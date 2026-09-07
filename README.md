@@ -1,0 +1,234 @@
+# ngx-rustscript
+
+NGINX dynamic HTTP module that will host RustScript (`pd-vm`) at the access
+phase. This tree currently exports a loadable HTTP module. Script execution,
+`access_by_rss_file`, host sleep, Tokio, and eventfd are not implemented yet.
+
+## Pinned revisions
+
+| Component | Pin |
+| --- | --- |
+| [ngx-rust](https://github.com/nginx/ngx-rust) | `cda9d8372ccd2e139ef2b03e5806e019e7796187` (`ngx` / `nginx-sys` 0.5.0, `nginx-src` 1.30.0+1.30.4) |
+| NGINX | 1.30.4 (`nginx_version` 1030004). Tarball SHA-256 `4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b` |
+| RustScript / `pd-vm` | `/home/wow/rustscript/rustscript` at `4b749862ff1632ef1266d75709da3676de37356c` (PR #26 `plan/callable-stream-integration` tip; read-only sibling; not a Cargo dependency yet) |
+| Rust toolchain | 1.85.0 or later (ngx-rust MSRV). Verified with rustc 1.94.1 |
+
+## ABI matching
+
+`nginx-sys` generates bindings from a **configured** NGINX source tree. The
+module `.so` must be built against the same source and `./configure` flags as
+the `nginx` binary that loads it. Distro packages often apply ABI-breaking
+patches; do not mix a distro `nginx` with this module.
+
+Official `nginx-sys` inputs (do not invent extra variables):
+
+- `NGINX_SOURCE_DIR` — absolute path to the NGINX source directory after
+  `./configure`
+- `NGINX_BUILD_DIR` — absolute path to the build directory (`objs` by default,
+  or an official `--builddir=` path)
+
+Only `./configure` is required for bindgen. The fixture below also runs `make`
+so `nginx -t` can load the module. An explicit `--builddir=` path is accepted
+and validated as a path-shaped configure argument; the machine path is not
+hashed into the module identity fingerprint.
+
+The selected required build path is official `nginx-sys` bindgen against this
+pinned, configured NGINX 1.30.4 tree. Pre-generated or vendored bindings are
+not used: they cannot match ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`
+and NGINX 1.30.4. Install clang and libclang so rust-bindgen can generate
+bindings at `cargo build`.
+
+Required build tools on Linux:
+
+- C compiler, make, OpenSSL, PCRE2, zlib
+- clang and libclang (official `nginx-sys` bindgen)
+- Rust 1.85+
+- GNU binutils `nm`, `readelf`, and `objcopy` on a compatible Linux host.
+  Tests copy the candidate `.so` once into a private snapshot, then inspect
+  that snapshot only. `nm -D --defined-only --format=posix` requires the
+  generic ngx-rust exports (`ngx_modules`, `ngx_module_names`,
+  `ngx_module_order`). `readelf -W --dyn-syms` requires
+  `ngx_rustscript_module_identity` to be bind `GLOBAL`, ELF type `OBJECT`,
+  size 32. `readelf -W -S` plus `objcopy --dump-section` of the dedicated
+  section `.ngx_rustscript_module_identity` must yield exactly 32 bytes that
+  match a fingerprint recomputed from current sources. ELF class and
+  endianness follow whatever GNU binutils accepts on the host (not ELF64
+  little-endian only). Tests do not `dlopen` the artifact, parse ELF
+  headers, or parse unbounded C strings for identity.
+
+Clear inherited `CFLAGS` / `BINDGEN_EXTRA_CLANG_ARGS` before `./configure` and
+`cargo build`. A leaked include path from another NGINX tree will change
+`ngx_auto_config.h` and break the link.
+
+## Build the NGINX fixture and module
+
+```sh
+# Run from the crate root. Capture absolute paths before changing directories.
+CRATE_ROOT="$PWD"
+NGINX_SOURCE_DIR="$CRATE_ROOT/nginx-1.30.4"
+NGINX_BUILD_DIR="$NGINX_SOURCE_DIR/objs"
+
+# 1. NGINX 1.30.4 with dynamic-module compat
+curl -fL -o nginx-1.30.4.tar.gz https://nginx.org/download/nginx-1.30.4.tar.gz
+echo '4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b  nginx-1.30.4.tar.gz' | sha256sum -c
+tar -xf nginx-1.30.4.tar.gz
+cd "$NGINX_SOURCE_DIR"
+unset CFLAGS CPPFLAGS BINDGEN_EXTRA_CLANG_ARGS
+./configure --prefix=/usr/local/nginx-1.30.4 --with-compat --with-http_ssl_module
+make -j"$(nproc)"
+
+# 2. return to the crate and build the cdylib against that exact tree
+cd "$CRATE_ROOT"
+export NGINX_SOURCE_DIR
+export NGINX_BUILD_DIR
+unset CFLAGS CPPFLAGS BINDGEN_EXTRA_CLANG_ARGS
+# Use the git CLI when GitHub HTTPS is rewritten to SSH (libgit2 cannot auth).
+export CARGO_NET_GIT_FETCH_WITH_CLI=true
+# Honor a workspace CARGO_TARGET_DIR; otherwise use <crate>/target.
+: "${CARGO_TARGET_DIR:=$CRATE_ROOT/target}"
+export CARGO_TARGET_DIR
+cargo build --lib
+
+# Absolute module path derived from the same target dir used above.
+export NGX_RUSTSCRIPT_MODULE="$(readlink -f "$CARGO_TARGET_DIR/debug/libngx_rustscript.so")"
+```
+
+`cargo build --lib` is the supported standalone path. It enables the
+`export-modules` feature so the cdylib dynamically exports `ngx_modules`,
+`ngx_module_names`, and `ngx_module_order` for `load_module`. The HTTP
+module object is named `ngx_http_rustscript_module` inside that table; it
+is not a dynamic symbol. `build.rs` also embeds a 32-byte identity/freshness
+fingerprint as the exported `OBJECT` `ngx_rustscript_module_identity` in ELF
+section `.ngx_rustscript_module_identity`. The digest is a deterministic
+std-only 4-lane FNV-1a-64 over the crate's local production inputs
+(`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/lib.rs`, `config`,
+`config.make`, `auto/rust`) plus pinned NGINX configured ABI inputs
+(`src/core/nginx.h`, generated `ngx_auto_config.h` / `ngx_auto_headers.h`,
+and the nginx-sys bindgen-driving `Makefile` `ALL_INCS`/`CFLAGS` extract).
+Machine/path-only data in `ngx_auto_config.h` (especially `NGX_CONFIGURE`
+`--prefix` / `--builddir` / `--add-dynamic-module` values and `NGX_PREFIX`)
+is replaced with stable placeholders before hashing. It is not a
+cryptographic MAC. `build.rs` requires `NGINX_SOURCE_DIR` and
+`NGINX_BUILD_DIR` and emits `cargo::rerun-if-env-changed` plus
+`cargo::rerun-if-changed` for each hashed file. Identity is bound to those
+configured source/build ABI inputs only; `build.rs` does not require
+`$NGINX_BUILD_DIR/nginx`.
+
+Standalone `cargo test` validates the canonical `$NGINX_BUILD_DIR/nginx`
+binary, `nginx/1.30.4`, `--with-compat`, and `--with-http_ssl_module` in the
+module-load harness before `nginx -t`. Quoted configure paths, `--prefix`,
+`--builddir`, `--add-dynamic-module`, and other valid NGINX flags are
+accepted. An official `--builddir=` path is allowed; the machine path is not
+part of the identity fingerprint.
+
+Tests resolve `${CARGO_TARGET_DIR:-<crate>/target}/debug/libngx_rustscript.so`
+(or `NGX_RUSTSCRIPT_MODULE` when set), copy that candidate once to a unique
+owner-only snapshot (RAII-cleaned), freeze it read-only after validation,
+and run `nm` / `readelf` / `objcopy` plus the final `nginx -t` against that
+snapshot. A missing or wrong shared library is rejected. Identity requires
+the dedicated `PROGBITS` section, a `GLOBAL OBJECT` of size 32 whose dynsym
+`Ndx` is that unique section index, and a symbol address range inside the
+section. The dumped 32 bytes must match a fingerprint the test recomputes
+from the same inputs. Fingerprint is authoritative. A different ngx-rust
+module that only exports the generic `ngx_modules` / `ngx_module_names` /
+`ngx_module_order` symbols is rejected, as are an identity symbol with the
+wrong ELF type, bind, size, or section (`ABS` / `.data`), a missing/NOBITS
+identity section, and a correctly shaped object with the wrong fingerprint.
+
+Tests also require the selected nginx binary to be canonical
+`$NGINX_BUILD_DIR/nginx` reporting `nginx/1.30.4` with `--with-compat` and
+`--with-http_ssl_module`. An official `--builddir=` path is accepted; the
+machine path is not part of the identity fingerprint. Fixture `nginx.conf.in`
+interpolates quoted paths; unsafe bytes (NUL, newline, non-UTF-8) are
+rejected fail-closed, and `nginx -t` receives `-p` / `-c` as `OsStr`.
+
+### Optional: NGINX `--add-dynamic-module`
+
+`config`, `config.make`, and `auto/rust` follow ngx-rust
+`examples/{config,config.make,auto/rust}` at the same git revision. That path
+builds a **staticlib** with `--no-default-features` (no `ngx_modules` table;
+NGINX generates it). Use it only when configuring NGINX with
+`--add-dynamic-module=/path/to/ngx-rustscript`. `make -j` can compile the
+staticlib in parallel with `objs/nginx` because `build.rs` fingerprints
+configured ABI inputs and does not wait for the linked binary.
+
+Full configure + parallel make + emitted identity + `nginx -t` is
+`tests/verify_add_dynamic.sh` (a standalone script so nested `cargo rustc`
+cannot deadlock a parent `cargo test`). After `cargo build --lib`, run:
+
+```sh
+export CARGO_TARGET_DIR
+export NGINX_SOURCE_DIR
+bash tests/verify_add_dynamic.sh
+```
+
+## Prove load with `nginx -t`
+
+```sh
+export NGX_RUSTSCRIPT_NGINX="$NGINX_BUILD_DIR/nginx"
+: "${CARGO_TARGET_DIR:=$CRATE_ROOT/target}"
+export CARGO_TARGET_DIR
+cargo build --lib
+export NGX_RUSTSCRIPT_MODULE="$(readlink -f "$CARGO_TARGET_DIR/debug/libngx_rustscript.so")"
+cargo test --test module_load -- --nocapture
+```
+
+The tests create an isolated prefix from `tests/fixtures/nginx.conf.in`:
+
+1. `load_module` of a missing path — `nginx -t` fails `dlopen()` of that exact module path in the fixture conf
+2. `load_module` of `libngx_rustscript.so` — `nginx -t` reports `test is successful`
+
+Manual check:
+
+```sh
+nginx -t -p /path/to/prefix -c conf/nginx.conf
+```
+
+## pd-vm signatures (locked, unused by this module)
+
+Verified at RustScript `4b749862ff1632ef1266d75709da3676de37356c`. Package
+`pd-vm`, lib name `vm`. Later tasks should use these APIs rather than
+`Vm::new`:
+
+```rust
+pub fn compile_source(source: &str) -> Result<CompiledProgram, SourceError>;
+
+impl Vm {
+    pub fn try_new(program: Program) -> VmResult<Self>;
+    pub fn run(&mut self) -> VmResult<VmStatus>;
+    pub fn resume(&mut self) -> VmResult<VmStatus>;
+    pub fn bind_static_args_function(
+        &mut self,
+        name: impl Into<String>,
+        function: StaticHostArgsFunction,
+    );
+}
+
+pub type StaticHostArgsFunction = fn(&[Value]) -> VmResult<CallOutcome>;
+
+pub enum CallOutcome {
+    Return(CallReturn),
+    Halt,
+    Yield,
+    Pending(HostOpId),
+}
+
+pub enum VmStatus {
+    Halted,
+    Yielded,
+    Waiting(HostOpId),
+}
+
+impl HostFunctionRegistry {
+    pub fn bind_vm_cached(&self, vm: &mut Vm) -> VmResult<()>;
+}
+```
+
+Normal termination is `Ok(VmStatus::Halted)`. Host `Yield` maps to
+`VmStatus::Yielded`; `resume()` re-enters the same host call. Drop of `Vm`
+owns cancellation and resource closure.
+
+## Related projects
+
+- [ngx-rust](https://github.com/nginx/ngx-rust) — NGINX Rust SDK
+- [rustscript](https://github.com/rustscript-lang/rustscript) — compiler and `pd-vm`

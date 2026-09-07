@@ -3,6 +3,24 @@ name = "ngx-rustscript"
 version = "0.1.0"
 edition = "2024"
 publish = false
+rust-version = "1.85.0"
+build = "build.rs"
+
+[package.metadata.ngx-rustscript]
+ngx-rust-git = "https://github.com/nginx/ngx-rust"
+ngx-rust-rev = "cda9d8372ccd2e139ef2b03e5806e019e7796187"
+nginx-version = "1.30.4"
+nginx-tarball-sha256 = "4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b"
+rustscript-rev = "4b749862ff1632ef1266d75709da3676de37356c"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nginx-sys = { git = "https://github.com/nginx/ngx-rust", rev = "cda9d8372ccd2e139ef2b03e5806e019e7796187" }
+ngx = { git = "https://github.com/nginx/ngx-rust", rev = "cda9d8372ccd2e139ef2b03e5806e019e7796187", default-features = false, features = ["std"] }
+
+[features]
+default = ["export-modules"]
+# Required to emit `ngx_modules` when building a cdylib outside the NGINX buildsystem.
+export-modules = []
