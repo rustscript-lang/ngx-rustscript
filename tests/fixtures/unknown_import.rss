@@ -1,0 +1,2 @@
+use unknownmod;
+unknownmod::f(1);

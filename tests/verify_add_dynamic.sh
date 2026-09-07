@@ -70,8 +70,10 @@ if [[ "$REPORT" != *--with-compat* || "$REPORT" != *--with-http_ssl_module* ]]; 
   exit 1
 fi
 
-readelf -W --dyn-syms "$MODULE_SO" | grep -q 'OBJECT *GLOBAL.*ngx_rustscript_module_identity'
-readelf -W -S "$MODULE_SO" | grep -q '\.ngx_rustscript_module_identity'
+readelf -W --dyn-syms "$MODULE_SO" > "$CONF_PREFIX/dynsym.txt"
+grep -q 'OBJECT *GLOBAL.*ngx_rustscript_module_identity' "$CONF_PREFIX/dynsym.txt"
+readelf -W -S "$MODULE_SO" > "$CONF_PREFIX/sections.txt"
+grep -q '\.ngx_rustscript_module_identity' "$CONF_PREFIX/sections.txt"
 
 DUMP_ADD="$CONF_PREFIX/identity-add.bin"
 objcopy --dump-section=.ngx_rustscript_module_identity="$DUMP_ADD" "$MODULE_SO"

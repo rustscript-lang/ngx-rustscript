@@ -1,5 +1,7 @@
 //! NGINX ABI pin, config quoting, and `nginx -t` helpers.
 
+#![allow(dead_code)]
+
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;

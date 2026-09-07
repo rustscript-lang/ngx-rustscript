@@ -1,5 +1,7 @@
 //! Atomically created owner-only temp dirs with RAII cleanup.
 
+#![allow(dead_code)]
+
 use std::collections::HashSet;
 use std::fs::{self, DirBuilder, File};
 use std::io::Read;

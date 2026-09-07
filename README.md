@@ -1,8 +1,10 @@
 # ngx-rustscript
 
-NGINX dynamic HTTP module that will host RustScript (`pd-vm`) at the access
-phase. This tree currently exports a loadable HTTP module. Script execution,
-`access_by_rss_file`, host sleep, Tokio, and eventfd are not implemented yet.
+NGINX dynamic HTTP module that hosts RustScript (`pd-vm`) at the access
+phase. Location directive `access_by_rss_file <path>` compiles the script
+once at configuration time and runs it synchronously to `Halted` on each
+request. Host sleep, Tokio, eventfd, and request suspension are not
+implemented yet.
 
 ## Pinned revisions
 
@@ -10,7 +12,7 @@ phase. This tree currently exports a loadable HTTP module. Script execution,
 | --- | --- |
 | [ngx-rust](https://github.com/nginx/ngx-rust) | `cda9d8372ccd2e139ef2b03e5806e019e7796187` (`ngx` / `nginx-sys` 0.5.0, `nginx-src` 1.30.0+1.30.4) |
 | NGINX | 1.30.4 (`nginx_version` 1030004). Tarball SHA-256 `4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b` |
-| RustScript / `pd-vm` | `/home/wow/rustscript/rustscript` at `4b749862ff1632ef1266d75709da3676de37356c` (PR #26 `plan/callable-stream-integration` tip; read-only sibling; not a Cargo dependency yet) |
+| RustScript / `pd-vm` | [`https://github.com/rustscript-lang/rustscript`](https://github.com/rustscript-lang/rustscript) at `4b749862ff1632ef1266d75709da3676de37356c` (Cargo git dependency `package = "pd-vm"` on that immutable rev; no sibling path) |
 | Rust toolchain | 1.85.0 or later (ngx-rust MSRV). Verified with rustc 1.94.1 |
 
 ## ABI matching
@@ -101,8 +103,9 @@ is not a dynamic symbol. `build.rs` also embeds a 32-byte identity/freshness
 fingerprint as the exported `OBJECT` `ngx_rustscript_module_identity` in ELF
 section `.ngx_rustscript_module_identity`. The digest is a deterministic
 std-only 4-lane FNV-1a-64 over the crate's local production inputs
-(`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/lib.rs`, `config`,
-`config.make`, `auto/rust`) plus pinned NGINX configured ABI inputs
+(`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/lib.rs`, `src/config.rs`,
+`src/access.rs`, `src/vm_pool.rs`, `config`, `config.make`, `auto/rust`) plus pinned NGINX
+configured ABI inputs
 (`src/core/nginx.h`, generated `ngx_auto_config.h` / `ngx_auto_headers.h`,
 and the nginx-sys bindgen-driving `Makefile` `ALL_INCS`/`CFLAGS` extract).
 Machine/path-only data in `ngx_auto_config.h` (especially `NGX_CONFIGURE`
@@ -184,19 +187,54 @@ Manual check:
 nginx -t -p /path/to/prefix -c conf/nginx.conf
 ```
 
-## pd-vm signatures (locked, unused by this module)
+## `access_by_rss_file`
+
+Location-only directive, exact one argument:
+
+```nginx
+location /t {
+    access_by_rss_file /path/to/script.rss;
+}
+```
+
+Relative paths resolve with NGINX `ngx_conf_full_name` against the conf
+prefix (the directory of the config file). Absolute paths are unchanged.
+The file is read once at `nginx -t` / reload, must be a regular UTF-8 file,
+and is compiled with `compile_source`. Every non-empty `Program.imports`
+entry is rejected at configuration time: `print`, `runtime::sleep`,
+`ngx::sleep`, and any other host import are not bound in this milestone.
+Unknown modules fail compile or import check. Duplicate directives in the
+same location are rejected. Unset nested locations inherit the parent
+program; an explicit child directive overrides. Unconfigured locations keep
+the original access-phase decline.
+
+On each request the access handler leases a worker-thread-local VM via
+`Vm::new_shared(Arc<Program>)`, runs to `VmStatus::Halted`, and returns
+`NGX_OK` so the content stage proceeds. After `Halted` and after a
+recoverable runtime error the VM is reset with `Vm::reset_for_reuse` and
+parked only when `Vm::is_reusable` is true. Idle pool size is bounded.
+VM errors and unexpected `Yielded` / `Waiting` fail the request with 500.
+
+## pd-vm signatures (locked)
 
 Verified at RustScript `4b749862ff1632ef1266d75709da3676de37356c`. Package
 `pd-vm`, lib name `vm`. Later tasks should use these APIs rather than
-`Vm::new`:
+`Vm::new`. This pin has `Vm::new_shared(Arc<Program>)` rather than
+`try_new_shared`; `try_new` only wraps owned `Vm::new` after frame-limit
+validation.
 
 ```rust
 pub fn compile_source(source: &str) -> Result<CompiledProgram, SourceError>;
 
 impl Vm {
     pub fn try_new(program: Program) -> VmResult<Self>;
+    pub fn new_shared(program: Arc<Program>) -> Self;
     pub fn run(&mut self) -> VmResult<VmStatus>;
     pub fn resume(&mut self) -> VmResult<VmStatus>;
+    pub fn reset_for_reuse(&mut self) -> VmResult<()>;
+    pub fn poll_reset_for_reuse(&mut self, cx: &mut Context<'_>) -> Poll<VmResult<()>>;
+    pub fn is_reusable(&self) -> bool;
+    pub fn scope_reset_pending(&self) -> bool;
     pub fn bind_static_args_function(
         &mut self,
         name: impl Into<String>,

@@ -1,0 +1,36 @@
+worker_processes 1;
+error_log "@@PREFIX@@/logs/error.log" error;
+pid "@@PREFIX@@/logs/nginx.pid";
+daemon off;
+master_process off;
+load_module @@MODULE@@;
+
+events {
+    worker_connections 32;
+}
+
+http {
+    access_log off;
+    default_type text/plain;
+    server {
+        listen 127.0.0.1:@@PORT@@;
+        server_name localhost;
+        root "@@PREFIX@@/html";
+
+        location /scripted/ {
+            access_by_rss_file @@SCRIPT_OK@@;
+        }
+
+        location /plain/ {
+        }
+
+        location /parent/ {
+            access_by_rss_file @@SCRIPT_RUNTIME@@;
+            location /parent/inherited/ {
+            }
+            location /parent/override/ {
+                access_by_rss_file @@SCRIPT_OK@@;
+            }
+        }
+    }
+}

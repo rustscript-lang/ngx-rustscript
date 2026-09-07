@@ -1,9 +1,17 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-use ngx::ffi::{NGX_HTTP_MODULE, ngx_command_t, ngx_http_module_t, ngx_module_t};
-use ngx::http::HttpModule;
+use ngx::core::Status;
+use ngx::ffi::{NGX_HTTP_MODULE, ngx_conf_t, ngx_http_module_t, ngx_int_t, ngx_module_t};
+use ngx::http::{self, HttpModule, HttpModuleLocationConf};
 
-struct Module;
+pub mod access;
+pub mod config;
+pub(crate) mod vm_pool;
+
+#[cfg(test)]
+use ngx_rustscript_nginx_test_stubs as _;
+
+pub(crate) struct Module;
 
 impl HttpModule for Module {
     fn module() -> &'static ngx_module_t {
@@ -11,6 +19,18 @@ impl HttpModule for Module {
         // exported to NGINX. Taking a shared reference is the SDK `HttpModule::module` contract.
         unsafe { &*::core::ptr::addr_of!(ngx_http_rustscript_module) }
     }
+
+    unsafe extern "C" fn postconfiguration(cf: *mut ngx_conf_t) -> ngx_int_t {
+        // SAFETY: NGINX always calls postconfiguration with a live `ngx_conf_t`.
+        let cf = unsafe { &mut *cf };
+        http::add_phase_handler::<access::AccessHandler>(cf)
+            .map_or(Status::NGX_ERROR, |_| Status::NGX_OK)
+            .into()
+    }
+}
+
+unsafe impl HttpModuleLocationConf for Module {
+    type LocationConf = config::LocationConf;
 }
 
 static NGX_HTTP_RUSTSCRIPT_MODULE_CTX: ngx_http_module_t = ngx_http_module_t {
@@ -20,11 +40,9 @@ static NGX_HTTP_RUSTSCRIPT_MODULE_CTX: ngx_http_module_t = ngx_http_module_t {
     init_main_conf: None,
     create_srv_conf: None,
     merge_srv_conf: None,
-    create_loc_conf: None,
-    merge_loc_conf: None,
+    create_loc_conf: Some(Module::create_loc_conf),
+    merge_loc_conf: Some(Module::merge_loc_conf),
 };
-
-static mut NGX_HTTP_RUSTSCRIPT_COMMANDS: [ngx_command_t; 1] = [ngx_command_t::empty()];
 
 #[cfg(feature = "export-modules")]
 ngx::ngx_modules!(ngx_http_rustscript_module);
@@ -52,7 +70,7 @@ pub static ngx_rustscript_module_identity: [u8; 32] = *include_bytes!(concat!(
 #[cfg_attr(not(feature = "export-modules"), unsafe(no_mangle))]
 pub static mut ngx_http_rustscript_module: ngx_module_t = ngx_module_t {
     ctx: &raw const NGX_HTTP_RUSTSCRIPT_MODULE_CTX as _,
-    commands: unsafe { &raw mut NGX_HTTP_RUSTSCRIPT_COMMANDS[0] },
+    commands: unsafe { &raw mut config::COMMANDS[0] },
     type_: NGX_HTTP_MODULE as _,
     ..ngx_module_t::default()
 };

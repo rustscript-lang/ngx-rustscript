@@ -23,6 +23,16 @@ pub const MODULE_CDYLIB_NAME: &str = "libngx_rustscript.so";
 const LEGACY_BUILDSYSTEM_MODE_ENV: &str = "NGX_RUSTSCRIPT_BUILDSYSTEM";
 pub const REQUIRED_NGINX_EXPORTS: &[&str] =
     &["ngx_modules", "ngx_module_names", "ngx_module_order"];
+/// Production cdylib must leave these NGINX symbols undefined (no test stubs).
+pub const FORBIDDEN_DEFINED_NGINX_STUBS: &[&str] = &[
+    "ngx_conf_full_name",
+    "ngx_conf_log_error",
+    "ngx_array_push",
+    "ngx_log_error_core",
+    "ngx_pool_cleanup_add",
+    "ngx_palloc",
+    "ngx_http_core_module",
+];
 /// Unique cdylib identity OBJECT. Not a function and not a C string table.
 pub const IDENTITY_SYMBOL: &str = "ngx_rustscript_module_identity";
 /// Dedicated ELF section that holds the 32-byte identity OBJECT.
@@ -459,6 +469,16 @@ pub fn validate_snapshot(snapshot: &Path, crate_root: &Path) -> Result<(), Modul
             format!("missing required exports {REQUIRED_NGINX_EXPORTS:?}"),
         ));
     }
+    if let Some(stub) = FORBIDDEN_DEFINED_NGINX_STUBS
+        .iter()
+        .copied()
+        .find(|name| symbols.iter().any(|symbol| symbol == name))
+    {
+        return Err(identity_error(
+            snapshot.to_path_buf(),
+            format!("production cdylib must not define NGINX stub symbol {stub}"),
+        ));
+    }
     let identity = read_validated_identity(snapshot)
         .map_err(|detail| identity_error(snapshot.to_path_buf(), detail))?;
     let expected = compute_source_fingerprint(crate_root).map_err(|detail| {
@@ -836,6 +856,9 @@ fn fingerprint_input_names_match_independently_authored_order() {
         "Cargo.lock",
         "build.rs",
         "src/lib.rs",
+        "src/config.rs",
+        "src/access.rs",
+        "src/vm_pool.rs",
         "config",
         "config.make",
         "auto/rust",

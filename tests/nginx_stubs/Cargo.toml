@@ -1,0 +1,12 @@
+[package]
+name = "ngx-rustscript-nginx-test-stubs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+links = "ngx_rustscript_nginx_test_stubs"
+
+[lib]
+doctest = false
+
+[build-dependencies]
+cc = "1"

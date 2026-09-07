@@ -1,0 +1,2 @@
+use runtime;
+runtime::sleep(0);
