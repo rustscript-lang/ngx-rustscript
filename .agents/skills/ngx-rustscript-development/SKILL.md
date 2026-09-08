@@ -9,6 +9,9 @@ description: Use when developing, debugging, reviewing, or testing ngx-rustscrip
 
 - Keep every NGINX request and VM on its worker main thread.
 - Tokio futures and wakers may carry only owned `Send + 'static` data and generation-safe request identities.
+- Implement outbound/external I/O hosts (TCP, UDP, DNS, HTTP clients, TLS streams, and similar APIs) exclusively with Tokio I/O drivers. Do not route them through NGINX socket, resolver, timer, or event FFI.
+- Tokio I/O futures may own Tokio sockets, TLS state, addresses, and byte buffers; completion returns through the existing `HostFuture` -> waker -> eventfd -> worker-main-thread VM resume path.
+- Keep NGINX FFI limited to worker-main-thread request/response integration that belongs to the current HTTP request lifecycle, such as reading request metadata/body state or submitting response buffers.
 - Keep `pd-host-function` pinned to the same Git URL and exact revision as `pd-vm`.
 - Declare every production host with `#[pd_host_function(name = "namespace::name")]`.
 - Use macro-generated argument conversion and callable wrapper for runtime binding.
