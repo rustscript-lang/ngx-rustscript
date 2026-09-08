@@ -74,6 +74,79 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         NGX_COOKIE_TIME_NAME,
         NGX_HTTP_TIME_NAME,
         NGX_PARSE_HTTP_TIME_NAME,
+        "ngx::get_phase",
+        "ngx::config::subsystem",
+        "ngx::config::debug",
+        "ngx::config::prefix",
+        "ngx::config::nginx_version",
+        "ngx::config::nginx_configure",
+        "ngx::config::ngx_rustscript_version",
+        "ngx::worker::exiting",
+        "ngx::worker::pid",
+        "ngx::worker::pids",
+        "ngx::worker::count",
+        "ngx::worker::id",
+        "ngx::log",
+        "ngx::core::ok",
+        "ngx::core::error",
+        "ngx::core::again",
+        "ngx::core::done",
+        "ngx::core::declined",
+        "ngx::core::null",
+        "ngx::http::get",
+        "ngx::http::head",
+        "ngx::http::put",
+        "ngx::http::post",
+        "ngx::http::delete",
+        "ngx::http::options",
+        "ngx::http::mkcol",
+        "ngx::http::copy",
+        "ngx::http::move",
+        "ngx::http::propfind",
+        "ngx::http::proppatch",
+        "ngx::http::lock",
+        "ngx::http::unlock",
+        "ngx::http::patch",
+        "ngx::http::trace",
+        "ngx::http::status_continue",
+        "ngx::http::status_switching_protocols",
+        "ngx::http::status_ok",
+        "ngx::http::status_created",
+        "ngx::http::status_accepted",
+        "ngx::http::status_no_content",
+        "ngx::http::status_partial_content",
+        "ngx::http::status_special_response",
+        "ngx::http::status_moved_permanently",
+        "ngx::http::status_moved_temporarily",
+        "ngx::http::status_see_other",
+        "ngx::http::status_not_modified",
+        "ngx::http::status_temporary_redirect",
+        "ngx::http::status_permanent_redirect",
+        "ngx::http::status_bad_request",
+        "ngx::http::status_unauthorized",
+        "ngx::http::status_forbidden",
+        "ngx::http::status_not_found",
+        "ngx::http::status_not_allowed",
+        "ngx::http::status_request_timeout",
+        "ngx::http::status_conflict",
+        "ngx::http::status_too_many_requests",
+        "ngx::http::status_close",
+        "ngx::http::status_internal_server_error",
+        "ngx::http::status_not_implemented",
+        "ngx::http::status_bad_gateway",
+        "ngx::http::status_service_unavailable",
+        "ngx::http::status_gateway_timeout",
+        "ngx::http::status_version_not_supported",
+        "ngx::http::status_insufficient_storage",
+        "ngx::log_level::stderr",
+        "ngx::log_level::emerg",
+        "ngx::log_level::alert",
+        "ngx::log_level::crit",
+        "ngx::log_level::error",
+        "ngx::log_level::warn",
+        "ngx::log_level::notice",
+        "ngx::log_level::info",
+        "ngx::log_level::debug",
     ]
 }
 
@@ -119,6 +192,214 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
         NGX_PARSE_HTTP_TIME_NAME,
         layout::helpers::time::parse_http_time,
     );
+    vm.bind_static_args_function("ngx::get_phase", layout::helpers::meta::get_phase);
+    vm.bind_static_args_function(
+        "ngx::config::subsystem",
+        layout::helpers::meta::config_subsystem,
+    );
+    vm.bind_static_args_function("ngx::config::debug", layout::helpers::meta::config_debug);
+    vm.bind_static_args_function("ngx::config::prefix", layout::helpers::meta::config_prefix);
+    vm.bind_static_args_function(
+        "ngx::config::nginx_version",
+        layout::helpers::meta::config_nginx_version,
+    );
+    vm.bind_static_args_function(
+        "ngx::config::nginx_configure",
+        layout::helpers::meta::config_nginx_configure,
+    );
+    vm.bind_static_args_function(
+        "ngx::config::ngx_rustscript_version",
+        layout::helpers::meta::config_ngx_rustscript_version,
+    );
+    vm.bind_static_args_function(
+        "ngx::worker::exiting",
+        layout::helpers::meta::worker_exiting,
+    );
+    vm.bind_static_args_function("ngx::worker::pid", layout::helpers::meta::worker_pid);
+    vm.bind_static_args_function("ngx::worker::pids", layout::helpers::meta::worker_pids);
+    vm.bind_static_args_function("ngx::worker::count", layout::helpers::meta::worker_count);
+    vm.bind_static_args_function("ngx::worker::id", layout::helpers::meta::worker_id);
+    vm.bind_static_args_function("ngx::log", layout::helpers::log::log);
+    vm.bind_static_args_function("ngx::core::ok", layout::helpers::meta::core_ok);
+    vm.bind_static_args_function("ngx::core::error", layout::helpers::meta::core_error);
+    vm.bind_static_args_function("ngx::core::again", layout::helpers::meta::core_again);
+    vm.bind_static_args_function("ngx::core::done", layout::helpers::meta::core_done);
+    vm.bind_static_args_function("ngx::core::declined", layout::helpers::meta::core_declined);
+    vm.bind_static_args_function("ngx::core::null", layout::helpers::meta::core_null);
+    vm.bind_static_args_function("ngx::http::get", layout::helpers::meta::http_get);
+    vm.bind_static_args_function("ngx::http::head", layout::helpers::meta::http_head);
+    vm.bind_static_args_function("ngx::http::put", layout::helpers::meta::http_put);
+    vm.bind_static_args_function("ngx::http::post", layout::helpers::meta::http_post);
+    vm.bind_static_args_function("ngx::http::delete", layout::helpers::meta::http_delete);
+    vm.bind_static_args_function("ngx::http::options", layout::helpers::meta::http_options);
+    vm.bind_static_args_function("ngx::http::mkcol", layout::helpers::meta::http_mkcol);
+    vm.bind_static_args_function("ngx::http::copy", layout::helpers::meta::http_copy);
+    vm.bind_static_args_function("ngx::http::move", layout::helpers::meta::http_move);
+    vm.bind_static_args_function("ngx::http::propfind", layout::helpers::meta::http_propfind);
+    vm.bind_static_args_function(
+        "ngx::http::proppatch",
+        layout::helpers::meta::http_proppatch,
+    );
+    vm.bind_static_args_function("ngx::http::lock", layout::helpers::meta::http_lock);
+    vm.bind_static_args_function("ngx::http::unlock", layout::helpers::meta::http_unlock);
+    vm.bind_static_args_function("ngx::http::patch", layout::helpers::meta::http_patch);
+    vm.bind_static_args_function("ngx::http::trace", layout::helpers::meta::http_trace);
+    vm.bind_static_args_function(
+        "ngx::http::status_continue",
+        layout::helpers::meta::http_status_continue,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_switching_protocols",
+        layout::helpers::meta::http_status_switching_protocols,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_ok",
+        layout::helpers::meta::http_status_ok,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_created",
+        layout::helpers::meta::http_status_created,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_accepted",
+        layout::helpers::meta::http_status_accepted,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_no_content",
+        layout::helpers::meta::http_status_no_content,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_partial_content",
+        layout::helpers::meta::http_status_partial_content,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_special_response",
+        layout::helpers::meta::http_status_special_response,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_moved_permanently",
+        layout::helpers::meta::http_status_moved_permanently,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_moved_temporarily",
+        layout::helpers::meta::http_status_moved_temporarily,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_see_other",
+        layout::helpers::meta::http_status_see_other,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_not_modified",
+        layout::helpers::meta::http_status_not_modified,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_temporary_redirect",
+        layout::helpers::meta::http_status_temporary_redirect,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_permanent_redirect",
+        layout::helpers::meta::http_status_permanent_redirect,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_bad_request",
+        layout::helpers::meta::http_status_bad_request,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_unauthorized",
+        layout::helpers::meta::http_status_unauthorized,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_forbidden",
+        layout::helpers::meta::http_status_forbidden,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_not_found",
+        layout::helpers::meta::http_status_not_found,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_not_allowed",
+        layout::helpers::meta::http_status_not_allowed,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_request_timeout",
+        layout::helpers::meta::http_status_request_timeout,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_conflict",
+        layout::helpers::meta::http_status_conflict,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_too_many_requests",
+        layout::helpers::meta::http_status_too_many_requests,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_close",
+        layout::helpers::meta::http_status_close,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_internal_server_error",
+        layout::helpers::meta::http_status_internal_server_error,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_not_implemented",
+        layout::helpers::meta::http_status_not_implemented,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_bad_gateway",
+        layout::helpers::meta::http_status_bad_gateway,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_service_unavailable",
+        layout::helpers::meta::http_status_service_unavailable,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_gateway_timeout",
+        layout::helpers::meta::http_status_gateway_timeout,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_version_not_supported",
+        layout::helpers::meta::http_status_version_not_supported,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_insufficient_storage",
+        layout::helpers::meta::http_status_insufficient_storage,
+    );
+    vm.bind_static_args_function(
+        "ngx::log_level::stderr",
+        layout::helpers::meta::log_level_stderr,
+    );
+    vm.bind_static_args_function(
+        "ngx::log_level::emerg",
+        layout::helpers::meta::log_level_emerg,
+    );
+    vm.bind_static_args_function(
+        "ngx::log_level::alert",
+        layout::helpers::meta::log_level_alert,
+    );
+    vm.bind_static_args_function(
+        "ngx::log_level::crit",
+        layout::helpers::meta::log_level_crit,
+    );
+    vm.bind_static_args_function(
+        "ngx::log_level::error",
+        layout::helpers::meta::log_level_error,
+    );
+    vm.bind_static_args_function(
+        "ngx::log_level::warn",
+        layout::helpers::meta::log_level_warn,
+    );
+    vm.bind_static_args_function(
+        "ngx::log_level::notice",
+        layout::helpers::meta::log_level_notice,
+    );
+    vm.bind_static_args_function(
+        "ngx::log_level::info",
+        layout::helpers::meta::log_level_info,
+    );
+    vm.bind_static_args_function(
+        "ngx::log_level::debug",
+        layout::helpers::meta::log_level_debug,
+    );
 }
 
 #[cfg(test)]
@@ -146,6 +427,12 @@ mod layout {
         }
         pub mod time {
             include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/time.rs"));
+        }
+        pub mod meta {
+            include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/meta.rs"));
+        }
+        pub mod log {
+            include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/log.rs"));
         }
 
         pub mod functions {

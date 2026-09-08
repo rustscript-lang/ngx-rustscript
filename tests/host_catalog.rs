@@ -130,6 +130,30 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
                     entry.name
                 );
             }
+            HostFamily::Meta => {
+                assert_eq!(entry.sync, HostSyncKind::Sync);
+                assert!(
+                    entry.capabilities.contains(&HostCapability::Meta),
+                    "{} is a meta host",
+                    entry.name
+                );
+            }
+            HostFamily::Log => {
+                assert_eq!(entry.sync, HostSyncKind::Sync);
+                assert!(
+                    entry.capabilities.contains(&HostCapability::Log),
+                    "{} is a log host",
+                    entry.name
+                );
+            }
+            HostFamily::Constant => {
+                assert_eq!(entry.sync, HostSyncKind::Sync);
+                assert!(
+                    entry.capabilities.contains(&HostCapability::Constant),
+                    "{} is a constant host",
+                    entry.name
+                );
+            }
         }
     }
 }

@@ -89,6 +89,9 @@ pub enum HostFamily {
     Timer,
     Codec,
     Time,
+    Meta,
+    Log,
+    Constant,
 }
 
 /// Whether a host submits a future or returns synchronously.
@@ -105,6 +108,9 @@ pub enum HostCapability {
     Timer,
     Codec,
     Time,
+    Meta,
+    Log,
+    Constant,
 }
 
 /// One production ngx host. Schema fields stay next to the catalog builder.
@@ -252,6 +258,85 @@ const PHASE_TIME: &[NgxPhase] = &[
 const TIMER_CAPABILITIES: &[HostCapability] = &[HostCapability::Timer];
 const CODEC_CAPABILITIES: &[HostCapability] = &[HostCapability::Codec];
 const TIME_CAPABILITIES: &[HostCapability] = &[HostCapability::Time];
+const META_CAPABILITIES: &[HostCapability] = &[HostCapability::Meta];
+const LOG_CAPABILITIES: &[HostCapability] = &[HostCapability::Log];
+const CONSTANT_CAPABILITIES: &[HostCapability] = &[HostCapability::Constant];
+
+/// OpenResty `ngx.log` / `ngx.get_phase` contexts: every script phase.
+const PHASE_ALL: &[NgxPhase] = PHASE_ESCAPE_URI;
+
+/// Core/HTTP constants: OpenResty omits init_worker and exit_worker.
+const PHASE_CORE_CONST: &[NgxPhase] = &[
+    NgxPhase::Init,
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Timer,
+    NgxPhase::Balancer,
+    NgxPhase::SslCertificate,
+    NgxPhase::SslSessionFetch,
+    NgxPhase::SslSessionStore,
+    NgxPhase::SslClientHello,
+];
+
+/// `ngx.config.subsystem` / `debug` / `prefix` / worker.pid/count/exiting.
+const PHASE_CONFIG_RUNTIME: &[NgxPhase] = &[
+    NgxPhase::Init,
+    NgxPhase::InitWorker,
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Timer,
+    NgxPhase::ExitWorker,
+];
+
+/// `ngx.config.nginx_version` / `nginx_configure` / module version.
+const PHASE_CONFIG_BUILD: &[NgxPhase] = &[
+    NgxPhase::Init,
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Timer,
+];
+
+/// `ngx.worker.pids` omits init and init_worker.
+const PHASE_WORKER_PIDS: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Timer,
+    NgxPhase::ExitWorker,
+];
+
+/// `ngx.worker.id` omits init.
+const PHASE_WORKER_ID: &[NgxPhase] = &[
+    NgxPhase::InitWorker,
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Timer,
+    NgxPhase::ExitWorker,
+];
 
 const MANIFEST: &[HostManifestEntry] = &[
     HostManifestEntry {
@@ -333,6 +418,231 @@ const MANIFEST: &[HostManifestEntry] = &[
     time_entry(NGX_COOKIE_TIME_NAME, "ngx.cookie_time", PHASE_TIME),
     time_entry(NGX_HTTP_TIME_NAME, "ngx.http_time", PHASE_TIME),
     time_entry(NGX_PARSE_HTTP_TIME_NAME, "ngx.parse_http_time", PHASE_TIME),
+    meta_entry("ngx::get_phase", "ngx.get_phase", PHASE_ALL),
+    meta_entry(
+        "ngx::config::subsystem",
+        "ngx.config.subsystem",
+        PHASE_CONFIG_RUNTIME,
+    ),
+    meta_entry(
+        "ngx::config::debug",
+        "ngx.config.debug",
+        PHASE_CONFIG_RUNTIME,
+    ),
+    meta_entry(
+        "ngx::config::prefix",
+        "ngx.config.prefix",
+        PHASE_CONFIG_RUNTIME,
+    ),
+    meta_entry(
+        "ngx::config::nginx_version",
+        "ngx.config.nginx_version",
+        PHASE_CONFIG_BUILD,
+    ),
+    meta_entry(
+        "ngx::config::nginx_configure",
+        "ngx.config.nginx_configure",
+        PHASE_CONFIG_BUILD,
+    ),
+    meta_entry(
+        "ngx::config::ngx_rustscript_version",
+        "ngx.config.ngx_lua_version",
+        PHASE_CONFIG_BUILD,
+    ),
+    meta_entry(
+        "ngx::worker::exiting",
+        "ngx.worker.exiting",
+        PHASE_CONFIG_RUNTIME,
+    ),
+    meta_entry("ngx::worker::pid", "ngx.worker.pid", PHASE_CONFIG_RUNTIME),
+    meta_entry("ngx::worker::pids", "ngx.worker.pids", PHASE_WORKER_PIDS),
+    meta_entry(
+        "ngx::worker::count",
+        "ngx.worker.count",
+        PHASE_CONFIG_RUNTIME,
+    ),
+    meta_entry("ngx::worker::id", "ngx.worker.id", PHASE_WORKER_ID),
+    log_entry("ngx::log", "ngx.log", PHASE_ALL),
+    const_entry("ngx::core::ok", "ngx.OK", PHASE_CORE_CONST),
+    const_entry("ngx::core::error", "ngx.ERROR", PHASE_CORE_CONST),
+    const_entry("ngx::core::again", "ngx.AGAIN", PHASE_CORE_CONST),
+    const_entry("ngx::core::done", "ngx.DONE", PHASE_CORE_CONST),
+    const_entry("ngx::core::declined", "ngx.DECLINED", PHASE_CORE_CONST),
+    const_entry("ngx::core::null", "ngx.null", PHASE_CORE_CONST),
+    const_entry("ngx::http::get", "ngx.HTTP_GET", PHASE_CORE_CONST),
+    const_entry("ngx::http::head", "ngx.HTTP_HEAD", PHASE_CORE_CONST),
+    const_entry("ngx::http::put", "ngx.HTTP_PUT", PHASE_CORE_CONST),
+    const_entry("ngx::http::post", "ngx.HTTP_POST", PHASE_CORE_CONST),
+    const_entry("ngx::http::delete", "ngx.HTTP_DELETE", PHASE_CORE_CONST),
+    const_entry("ngx::http::options", "ngx.HTTP_OPTIONS", PHASE_CORE_CONST),
+    const_entry("ngx::http::mkcol", "ngx.HTTP_MKCOL", PHASE_CORE_CONST),
+    const_entry("ngx::http::copy", "ngx.HTTP_COPY", PHASE_CORE_CONST),
+    const_entry("ngx::http::move", "ngx.HTTP_MOVE", PHASE_CORE_CONST),
+    const_entry("ngx::http::propfind", "ngx.HTTP_PROPFIND", PHASE_CORE_CONST),
+    const_entry(
+        "ngx::http::proppatch",
+        "ngx.HTTP_PROPPATCH",
+        PHASE_CORE_CONST,
+    ),
+    const_entry("ngx::http::lock", "ngx.HTTP_LOCK", PHASE_CORE_CONST),
+    const_entry("ngx::http::unlock", "ngx.HTTP_UNLOCK", PHASE_CORE_CONST),
+    const_entry("ngx::http::patch", "ngx.HTTP_PATCH", PHASE_CORE_CONST),
+    const_entry("ngx::http::trace", "ngx.HTTP_TRACE", PHASE_CORE_CONST),
+    const_entry(
+        "ngx::http::status_continue",
+        "ngx.HTTP_CONTINUE",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_switching_protocols",
+        "ngx.HTTP_SWITCHING_PROTOCOLS",
+        PHASE_CORE_CONST,
+    ),
+    const_entry("ngx::http::status_ok", "ngx.HTTP_OK", PHASE_CORE_CONST),
+    const_entry(
+        "ngx::http::status_created",
+        "ngx.HTTP_CREATED",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_accepted",
+        "ngx.HTTP_ACCEPTED",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_no_content",
+        "ngx.HTTP_NO_CONTENT",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_partial_content",
+        "ngx.HTTP_PARTIAL_CONTENT",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_special_response",
+        "ngx.HTTP_SPECIAL_RESPONSE",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_moved_permanently",
+        "ngx.HTTP_MOVED_PERMANENTLY",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_moved_temporarily",
+        "ngx.HTTP_MOVED_TEMPORARILY",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_see_other",
+        "ngx.HTTP_SEE_OTHER",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_not_modified",
+        "ngx.HTTP_NOT_MODIFIED",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_temporary_redirect",
+        "ngx.HTTP_TEMPORARY_REDIRECT",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_permanent_redirect",
+        "ngx.HTTP_PERMANENT_REDIRECT",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_bad_request",
+        "ngx.HTTP_BAD_REQUEST",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_unauthorized",
+        "ngx.HTTP_UNAUTHORIZED",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_forbidden",
+        "ngx.HTTP_FORBIDDEN",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_not_found",
+        "ngx.HTTP_NOT_FOUND",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_not_allowed",
+        "ngx.HTTP_NOT_ALLOWED",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_request_timeout",
+        "ngx.HTTP_REQUEST_TIMEOUT",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_conflict",
+        "ngx.HTTP_CONFLICT",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_too_many_requests",
+        "ngx.HTTP_TOO_MANY_REQUESTS",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_close",
+        "ngx.HTTP_CLOSE",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_internal_server_error",
+        "ngx.HTTP_INTERNAL_SERVER_ERROR",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_not_implemented",
+        "ngx.HTTP_NOT_IMPLEMENTED",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_bad_gateway",
+        "ngx.HTTP_BAD_GATEWAY",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_service_unavailable",
+        "ngx.HTTP_SERVICE_UNAVAILABLE",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_gateway_timeout",
+        "ngx.HTTP_GATEWAY_TIMEOUT",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_version_not_supported",
+        "ngx.HTTP_VERSION_NOT_SUPPORTED",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_insufficient_storage",
+        "ngx.HTTP_INSUFFICIENT_STORAGE",
+        PHASE_CORE_CONST,
+    ),
+    const_entry("ngx::log_level::stderr", "ngx.STDERR", PHASE_ALL),
+    const_entry("ngx::log_level::emerg", "ngx.EMERG", PHASE_ALL),
+    const_entry("ngx::log_level::alert", "ngx.ALERT", PHASE_ALL),
+    const_entry("ngx::log_level::crit", "ngx.CRIT", PHASE_ALL),
+    const_entry("ngx::log_level::error", "ngx.ERR", PHASE_ALL),
+    const_entry("ngx::log_level::warn", "ngx.WARN", PHASE_ALL),
+    const_entry("ngx::log_level::notice", "ngx.NOTICE", PHASE_ALL),
+    const_entry("ngx::log_level::info", "ngx.INFO", PHASE_ALL),
+    const_entry("ngx::log_level::debug", "ngx.DEBUG", PHASE_ALL),
 ];
 
 const fn codec_entry(
@@ -361,6 +671,51 @@ const fn time_entry(
         sync: HostSyncKind::Sync,
         phases,
         capabilities: TIME_CAPABILITIES,
+        openresty_name,
+    }
+}
+
+const fn meta_entry(
+    name: &'static str,
+    openresty_name: &'static str,
+    phases: &'static [NgxPhase],
+) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::Meta,
+        sync: HostSyncKind::Sync,
+        phases,
+        capabilities: META_CAPABILITIES,
+        openresty_name,
+    }
+}
+
+const fn log_entry(
+    name: &'static str,
+    openresty_name: &'static str,
+    phases: &'static [NgxPhase],
+) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::Log,
+        sync: HostSyncKind::Sync,
+        phases,
+        capabilities: LOG_CAPABILITIES,
+        openresty_name,
+    }
+}
+
+const fn const_entry(
+    name: &'static str,
+    openresty_name: &'static str,
+    phases: &'static [NgxPhase],
+) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::Constant,
+        sync: HostSyncKind::Sync,
+        phases,
+        capabilities: CONSTANT_CAPABILITIES,
         openresty_name,
     }
 }
@@ -410,7 +765,7 @@ fn int_in_string_out(name: &'static str, param: &'static str) -> HostFunctionSch
     )
 }
 
-fn nullary(name: &'static str, return_type: HostTypeSchema) -> HostFunctionSchema {
+fn nullary(name: &str, return_type: HostTypeSchema) -> HostFunctionSchema {
     HostFunctionSchema::with_return(name, Vec::new(), return_type)
 }
 
@@ -493,8 +848,101 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             vec![HostParamSchema::value("text", HostTypeSchema::String)],
             HostTypeSchema::Optional(Box::new(HostTypeSchema::Int)),
         ),
-        other => panic!("ngx host catalog has no schema for {other}"),
+        other => task4_schema(other)
+            .unwrap_or_else(|| panic!("ngx host catalog has no schema for {other}")),
     }
+}
+
+fn task4_schema(name: &str) -> Option<HostFunctionSchema> {
+    Some(match name {
+        "ngx::log" => HostFunctionSchema::with_return(
+            name,
+            vec![
+                HostParamSchema::value("level", HostTypeSchema::Int),
+                HostParamSchema::value("message", HostTypeSchema::String),
+            ],
+            HostTypeSchema::Null,
+        ),
+        "ngx::core::null" => nullary(name, HostTypeSchema::Null),
+        "ngx::get_phase"
+        | "ngx::config::subsystem"
+        | "ngx::config::prefix"
+        | "ngx::config::nginx_configure" => nullary(name, HostTypeSchema::String),
+        "ngx::config::debug" | "ngx::worker::exiting" => nullary(name, HostTypeSchema::Bool),
+        "ngx::worker::pids" => nullary(name, HostTypeSchema::Array(Box::new(HostTypeSchema::Int))),
+        "ngx::config::nginx_version"
+        | "ngx::config::ngx_rustscript_version"
+        | "ngx::worker::pid"
+        | "ngx::worker::id"
+        | "ngx::worker::count" => nullary(name, HostTypeSchema::Int),
+        name if is_int_constant(name) => nullary(name, HostTypeSchema::Int),
+        _ => return None,
+    })
+}
+
+fn is_int_constant(name: &str) -> bool {
+    matches!(
+        name,
+        "ngx::core::ok"
+            | "ngx::core::error"
+            | "ngx::core::again"
+            | "ngx::core::done"
+            | "ngx::core::declined"
+            | "ngx::http::get"
+            | "ngx::http::head"
+            | "ngx::http::put"
+            | "ngx::http::post"
+            | "ngx::http::delete"
+            | "ngx::http::options"
+            | "ngx::http::mkcol"
+            | "ngx::http::copy"
+            | "ngx::http::move"
+            | "ngx::http::propfind"
+            | "ngx::http::proppatch"
+            | "ngx::http::lock"
+            | "ngx::http::unlock"
+            | "ngx::http::patch"
+            | "ngx::http::trace"
+            | "ngx::http::status_continue"
+            | "ngx::http::status_switching_protocols"
+            | "ngx::http::status_ok"
+            | "ngx::http::status_created"
+            | "ngx::http::status_accepted"
+            | "ngx::http::status_no_content"
+            | "ngx::http::status_partial_content"
+            | "ngx::http::status_special_response"
+            | "ngx::http::status_moved_permanently"
+            | "ngx::http::status_moved_temporarily"
+            | "ngx::http::status_see_other"
+            | "ngx::http::status_not_modified"
+            | "ngx::http::status_temporary_redirect"
+            | "ngx::http::status_permanent_redirect"
+            | "ngx::http::status_bad_request"
+            | "ngx::http::status_unauthorized"
+            | "ngx::http::status_forbidden"
+            | "ngx::http::status_not_found"
+            | "ngx::http::status_not_allowed"
+            | "ngx::http::status_request_timeout"
+            | "ngx::http::status_conflict"
+            | "ngx::http::status_too_many_requests"
+            | "ngx::http::status_close"
+            | "ngx::http::status_internal_server_error"
+            | "ngx::http::status_not_implemented"
+            | "ngx::http::status_bad_gateway"
+            | "ngx::http::status_service_unavailable"
+            | "ngx::http::status_gateway_timeout"
+            | "ngx::http::status_version_not_supported"
+            | "ngx::http::status_insufficient_storage"
+            | "ngx::log_level::stderr"
+            | "ngx::log_level::emerg"
+            | "ngx::log_level::alert"
+            | "ngx::log_level::crit"
+            | "ngx::log_level::error"
+            | "ngx::log_level::warn"
+            | "ngx::log_level::notice"
+            | "ngx::log_level::info"
+            | "ngx::log_level::debug"
+    )
 }
 
 /// Compiler catalog for production ngx imports.

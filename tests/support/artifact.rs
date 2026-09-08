@@ -33,6 +33,12 @@ pub const FORBIDDEN_DEFINED_NGINX_STUBS: &[&str] = &[
     "ngx_http_block_reading",
     "ngx_handle_read_event",
     "ngx_posted_events",
+    "ngx_pid",
+    "ngx_worker",
+    "ngx_exiting",
+    "ngx_cycle",
+    "ngx_core_module",
+    "ngx_processes",
 ];
 
 pub fn resolve_module_candidate(

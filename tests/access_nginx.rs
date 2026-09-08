@@ -150,6 +150,13 @@ fn write_index(prefix: &Path, rel: &str, body: &str) {
     fs::write(path, body).unwrap();
 }
 
+fn write_script(path: &Path, body: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, body).unwrap();
+}
+
 #[test]
 fn nginx_t_rejects_missing_file() {
     let nginx = nginx_binary();
@@ -567,5 +574,198 @@ http {{
     assert_eq!(
         status, 403,
         "default satisfy all must still apply deny all after scripted NGX_OK; got:\n{response}"
+    );
+}
+
+fn meta_conf(module: &str, prefix: &Path, port: u16, locations: &str) -> String {
+    format!(
+        r#"
+worker_processes 1;
+error_log "{error_log}" notice;
+pid {pid};
+daemon off;
+master_process off;
+load_module {module};
+
+events {{
+    worker_connections 32;
+}}
+
+http {{
+    access_log off;
+    default_type text/plain;
+    server {{
+        listen 127.0.0.1:{port};
+        server_name localhost;
+        root {html};
+        {locations}
+    }}
+}}
+"#,
+        error_log = prefix.join("logs/error.log").display(),
+        pid = nginx_quote_path(&prefix.join("logs/nginx.pid")).unwrap(),
+        html = nginx_quote_path(&prefix.join("html")).unwrap(),
+    )
+}
+
+#[test]
+fn access_phase_logs_worker_metadata_constants_and_request_log() {
+    let nginx = nginx_binary();
+    let module = module_cdylib();
+    let port = free_port();
+    let prefix = isolated_prefix("ngx-rustscript-meta");
+    write_index(&prefix, "meta/index.html", "meta\n");
+    let script = prefix.join("conf/meta.rss");
+    write_script(
+        &script,
+        r#"
+use ngx;
+ngx::log(ngx::log_level::notice(), "TASK4_REQUEST_LOG");
+ngx::log(ngx::log_level::notice(), "TASK4_PREFIX=" + ngx::config::prefix());
+ngx::log(ngx::log_level::notice(), "TASK4_META=" + ngx::encode_args({ pid: ngx::worker::pid(), id: ngx::worker::id(), count: ngx::worker::count(), version: ngx::config::nginx_version(), phase: ngx::get_phase(), ok: ngx::core::ok(), status_ok: ngx::http::status_ok(), get: ngx::http::get(), err: ngx::log_level::error(), subsystem: ngx::config::subsystem() }));
+if ngx::config::debug() {
+    ngx::log(-1, "unexpected-debug");
+}
+if ngx::worker::exiting() {
+    ngx::log(-1, "unexpected-exiting");
+}
+"#,
+    );
+    let conf = meta_conf(
+        &nginx_quote_path(&module).unwrap(),
+        &prefix,
+        port,
+        &format!(
+            r#"
+        location /meta/ {{
+            access_by_rss_file {script};
+        }}
+"#,
+            script = nginx_quote_path(&script).unwrap(),
+        ),
+    );
+    write_conf(&prefix, &conf);
+    let out = nginx_test(&nginx, &prefix);
+    let text = combined(&out);
+    assert!(
+        out.status.success(),
+        "metadata script must pass nginx -t:\n{text}"
+    );
+
+    let child = spawn_nginx(&nginx, &prefix);
+    wait_for_port(port, Duration::from_secs(5));
+    let (status, response) = http_get(port, "/meta/");
+    assert_eq!(status, 200, "{response}");
+    assert!(
+        http_body(&response).contains("meta"),
+        "content must run after metadata access script; got:\n{response}"
+    );
+
+    let log = fs::read_to_string(prefix.join("logs/error.log")).unwrap_or_default();
+    assert!(
+        log.contains("ngx-rustscript: TASK4_REQUEST_LOG"),
+        "request-scoped ngx::log must write the module prefix; got:\n{log}"
+    );
+    let prefix_line = log
+        .lines()
+        .find(|line| line.contains("TASK4_PREFIX="))
+        .unwrap_or_else(|| panic!("missing TASK4_PREFIX in log:\n{log}"));
+    let logged_prefix = prefix_line
+        .rsplit_once("TASK4_PREFIX=")
+        .map(|(_, rest)| rest.split(", client:").next().unwrap_or(rest).trim())
+        .unwrap_or("");
+    let prefix_str = prefix.to_string_lossy();
+    assert!(
+        logged_prefix.contains(prefix_str.trim_end_matches('/'))
+            || prefix_str.contains(logged_prefix.trim_end_matches('/')),
+        "prefix must be the live NGINX prefix {prefix_str}, got {logged_prefix}"
+    );
+
+    let meta_line = log
+        .lines()
+        .find(|line| line.contains("TASK4_META="))
+        .unwrap_or_else(|| panic!("missing TASK4_META in log:\n{log}"));
+    let query = meta_line
+        .rsplit_once("TASK4_META=")
+        .map(|(_, rest)| rest.split(", client:").next().unwrap_or(rest).trim())
+        .unwrap_or("");
+    let mut fields = std::collections::HashMap::new();
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        fields.insert(key.to_string(), value.to_string());
+    }
+    let pid: i64 = fields
+        .get("pid")
+        .expect("pid field")
+        .parse()
+        .expect("pid int");
+    assert_eq!(
+        pid,
+        i64::from(child.child.id()),
+        "worker pid must match the live nginx worker, fields={fields:?}"
+    );
+    assert_eq!(fields.get("id").map(String::as_str), Some("0"));
+    assert_eq!(fields.get("count").map(String::as_str), Some("1"));
+    assert_eq!(fields.get("version").map(String::as_str), Some("1030004"));
+    assert_eq!(fields.get("phase").map(String::as_str), Some("access"));
+    assert_eq!(fields.get("ok").map(String::as_str), Some("0"));
+    assert_eq!(fields.get("status_ok").map(String::as_str), Some("200"));
+    assert_eq!(fields.get("get").map(String::as_str), Some("2"));
+    assert_eq!(fields.get("err").map(String::as_str), Some("4"));
+    assert_eq!(fields.get("subsystem").map(String::as_str), Some("http"));
+}
+
+#[test]
+fn access_phase_rejects_invalid_log_level_and_embedded_nul() {
+    let nginx = nginx_binary();
+    let module = module_cdylib();
+    let port = free_port();
+    let prefix = isolated_prefix("ngx-rustscript-log-reject");
+    write_index(&prefix, "bad-level/index.html", "level-ok\n");
+    write_index(&prefix, "bad-nul/index.html", "nul-ok\n");
+    let bad_level = prefix.join("conf/bad_level.rss");
+    let bad_nul = prefix.join("conf/bad_nul.rss");
+    write_script(&bad_level, "use ngx;\nngx::log(99, \"bad-level\");\n");
+    write_script(
+        &bad_nul,
+        "use ngx;\nngx::log(ngx::log_level::notice(), ngx::unescape_uri(\"a%00b\"));\n",
+    );
+    let conf = meta_conf(
+        &nginx_quote_path(&module).unwrap(),
+        &prefix,
+        port,
+        &format!(
+            r#"
+        location /bad-level/ {{
+            access_by_rss_file {bad_level};
+        }}
+        location /bad-nul/ {{
+            access_by_rss_file {bad_nul};
+        }}
+"#,
+            bad_level = nginx_quote_path(&bad_level).unwrap(),
+            bad_nul = nginx_quote_path(&bad_nul).unwrap(),
+        ),
+    );
+    write_conf(&prefix, &conf);
+    let out = nginx_test(&nginx, &prefix);
+    let text = combined(&out);
+    assert!(
+        out.status.success(),
+        "invalid-log scripts must compile and fail at runtime:\n{text}"
+    );
+
+    let _child = spawn_nginx(&nginx, &prefix);
+    wait_for_port(port, Duration::from_secs(5));
+
+    let (status, response) = http_get(port, "/bad-level/");
+    assert_eq!(
+        status, 500,
+        "invalid log level must fail the request; got:\n{response}"
+    );
+    let (status, response) = http_get(port, "/bad-nul/");
+    assert_eq!(
+        status, 500,
+        "embedded NUL must fail the request; got:\n{response}"
     );
 }

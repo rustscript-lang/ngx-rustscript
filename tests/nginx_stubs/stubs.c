@@ -7,6 +7,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 typedef intptr_t ngx_int_t;
 typedef uintptr_t ngx_uint_t;
@@ -95,6 +96,12 @@ void ngx_close_connection(void *c)
 __attribute__((aligned(8))) unsigned char ngx_event_actions[80];
 uintptr_t ngx_event_flags;
 uintptr_t ngx_process;
+pid_t ngx_pid;
+uintptr_t ngx_worker;
+uintptr_t ngx_exiting;
+void *ngx_cycle;
+unsigned char ngx_core_module[4096];
+unsigned char ngx_processes[1024 * 256];
 
 void ngx_http_core_run_phases(void *r)
 {

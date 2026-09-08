@@ -65,7 +65,9 @@ impl WorkerVmPool {
 fn construct(program: &Arc<Program>) -> Vm {
     #[cfg(test)]
     CREATED.with(|created| created.set(created.get().saturating_add(1)));
-    Vm::new_shared(Arc::clone(program))
+    let mut vm = Vm::new_shared(Arc::clone(program));
+    crate::host::bind_ngx_hosts(&mut vm);
+    vm
 }
 
 /// Reset through the supported pd-vm APIs. Pending host-IO close cannot be

@@ -158,7 +158,7 @@ The file is read once at `nginx -t` / reload, must be a regular UTF-8 file,
 and is compiled with `compile_source`.
 
 Config accepts the catalogued ngx hosts `ngx::sleep` and `ngx::sleep_ms`
-in the access phase. `print`, `runtime::sleep`, unknown imports, and
+in the access phase. `print` is not a host (use `ngx::log`); `runtime::sleep`, unknown imports, and
 phase-forbidden imports are rejected at configuration time. Unknown
 modules fail compile or import check. Duplicate directives in the same
 location are rejected. Unset nested locations inherit the parent
@@ -312,7 +312,7 @@ to a directory to place them elsewhere.
   `NGINX_SOURCE_DIR` / `NGINX_BUILD_DIR` at the configured 1.30.4 tree.
 - `script imports are not supported` / `failed to compile script` — only
   catalogued ngx hosts (`ngx::sleep`, `ngx::sleep_ms`) may be imported in
-  the access phase. `print` and `runtime::sleep` are rejected.
+  the access phase. `print` is rejected (use `ngx::log`); `runtime::sleep` is rejected.
 - HTTP 500 from an access script — VM runtime error or unexpected Waiting on
   an import-free program. Check the error log.
 - HTTP 499 on a sleep route — the client closed the connection before the
