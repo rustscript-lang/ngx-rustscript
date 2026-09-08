@@ -118,11 +118,16 @@ pub(crate) fn clear_worker_access() {
     });
 }
 
+fn mark_cached_clock_event_boundary() {
+    crate::host::notify_cached_clock_event_boundary();
+}
+
 fn enter_access_scope<R>(
     raw: *mut ngx_http_request_t,
     identity: RequestIdentity,
     f: impl FnOnce() -> R,
 ) -> R {
+    mark_cached_clock_event_boundary();
     with_request_scope(
         raw,
         identity,
@@ -156,6 +161,7 @@ fn allocate_scope_identity() -> RequestIdentity {
 
 /// Run a compiled program on a worker-local pooled VM until the first status.
 pub fn run_access_program(program: &Arc<Program>) -> Result<VmStatus, VmError> {
+    mark_cached_clock_event_boundary();
     vm_pool::run(program)
 }
 
@@ -339,6 +345,7 @@ fn unregister_exact(
 
 /// Consume ready identities on the worker main event turn.
 pub fn on_async_ready(identities: Vec<RequestIdentity>) {
+    mark_cached_clock_event_boundary();
     let deferred = WORKER_ACCESS.with(|state| {
         let mut state = state.borrow_mut();
         core::mem::take(&mut state.deferred)

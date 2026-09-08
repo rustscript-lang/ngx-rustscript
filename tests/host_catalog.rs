@@ -12,10 +12,13 @@ use ngx_rustscript::config::{
     ConfigError, compile_rss_source, reject_program_imports, validate_program_imports_for_phase,
 };
 use ngx_rustscript::host::{
-    HostCapability, HostFamily, HostSyncKind, NGX_DECODE_ARGS_NAME, NGX_DECODE_BASE64MIME_NAME,
-    NGX_ENCODE_ARGS_NAME, NGX_ESCAPE_URI_NAME, NGX_NOW_NAME, NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME,
-    NGX_TIME_NAME, NGX_UNESCAPE_URI_NAME, NGX_UPDATE_TIME_NAME, NgxPhase, bind_ngx_hosts,
-    host_allowed_in_phase, ngx_host_catalog, ngx_host_manifest, production_runtime_host_names,
+    HostCapability, HostFamily, HostSyncKind, NGX_CRC32_LONG_NAME, NGX_CRC32_SHORT_NAME,
+    NGX_DECODE_ARGS_NAME, NGX_DECODE_BASE64_NAME, NGX_DECODE_BASE64MIME_NAME, NGX_ENCODE_ARGS_NAME,
+    NGX_ENCODE_BASE64_NAME, NGX_ESCAPE_URI_NAME, NGX_HMAC_SHA1_NAME, NGX_MD5_BIN_NAME,
+    NGX_MD5_NAME, NGX_NOW_NAME, NGX_QUOTE_SQL_STR_NAME, NGX_SHA1_BIN_NAME, NGX_SLEEP_MS_NAME,
+    NGX_SLEEP_NAME, NGX_TIME_NAME, NGX_UNESCAPE_URI_NAME, NGX_UPDATE_TIME_NAME, NgxPhase,
+    bind_ngx_hosts, host_allowed_in_phase, ngx_host_catalog, ngx_host_manifest,
+    production_runtime_host_names,
 };
 use vm::{HostTypeSchema, Program, Vm};
 
@@ -343,4 +346,55 @@ fn codec_and_time_phase_metadata_matches_openresty() {
         NgxPhase::InitWorker
     ));
     assert!(host_allowed_in_phase(NGX_TIME_NAME, NgxPhase::Timer));
+}
+
+#[test]
+fn codec_misc_hosts_allow_ssl_client_hello_except_decode_base64mime() {
+    // OpenResty v0.10.29 allows ssl_client_hello for these codec APIs.
+    // decode_base64mime is the documented exception and must not share this list.
+    const SSL_CLIENT_HELLO_CODEC: &[&str] = &[
+        NGX_ENCODE_BASE64_NAME,
+        NGX_DECODE_BASE64_NAME,
+        NGX_CRC32_SHORT_NAME,
+        NGX_CRC32_LONG_NAME,
+        NGX_HMAC_SHA1_NAME,
+        NGX_MD5_NAME,
+        NGX_MD5_BIN_NAME,
+        NGX_SHA1_BIN_NAME,
+        NGX_QUOTE_SQL_STR_NAME,
+    ];
+    for name in SSL_CLIENT_HELLO_CODEC {
+        assert!(
+            host_allowed_in_phase(name, NgxPhase::SslClientHello),
+            "{name} must be allowed in ssl_client_hello"
+        );
+        assert!(
+            host_allowed_in_phase(name, NgxPhase::SslSessionFetch),
+            "{name} must keep ssl_session_fetch"
+        );
+        assert!(
+            !host_allowed_in_phase(name, NgxPhase::InitWorker),
+            "{name} must not gain init_worker from a shared codec list"
+        );
+        assert!(
+            !host_allowed_in_phase(name, NgxPhase::Init),
+            "{name} must not gain init from a shared codec list"
+        );
+        assert!(
+            !host_allowed_in_phase(name, NgxPhase::ExitWorker),
+            "{name} must not gain exit_worker from a shared codec list"
+        );
+    }
+    assert!(
+        !host_allowed_in_phase(NGX_DECODE_BASE64MIME_NAME, NgxPhase::SslClientHello),
+        "ngx::decode_base64mime must remain disallowed in ssl_client_hello"
+    );
+    assert!(host_allowed_in_phase(
+        NGX_DECODE_BASE64MIME_NAME,
+        NgxPhase::SslSessionFetch
+    ));
+    assert!(!host_allowed_in_phase(
+        NGX_DECODE_BASE64MIME_NAME,
+        NgxPhase::InitWorker
+    ));
 }

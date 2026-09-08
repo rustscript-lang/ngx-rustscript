@@ -6,16 +6,16 @@
 // refreshes that snapshot on the event loop (`ngx_time_update` from
 // `ngx_process_events_and_timers`). `ngx.update_time` forces a refresh.
 //
-// This host has no request pointer and Task 3 cannot wire access/runtime event
-// turns, so it uses a bounded thread-local cache:
+// Access-phase request and eventfd turns call
+// `notify_cached_clock_event_boundary` so the cache can refresh like nginx's
+// event-loop `ngx_time_update`, while intra-script reads stay coherent:
 //
 // * Reads reuse the snapshot while the event generation is unchanged and the
 //   snapshot is younger than `MAX_CLOCK_STALE` (1s).
-// * `notify_cached_clock_event_boundary` advances the generation. Call this at
-//   a future request/event-loop turn so intra-request reads stay stable while
-//   cross-request reads cannot stay frozen indefinitely.
+// * `notify_cached_clock_event_boundary` advances the generation at access
+//   request execution and later event-driven resume/poll turns.
 // * Crossing `MAX_CLOCK_STALE` also refreshes, so a worker cannot keep a frozen
-//   clock across requests even if the boundary is not yet wired.
+//   clock across requests if a turn forgets to mark the boundary.
 // * `update_time` always samples the OS (or test override) and replaces the
 //   snapshot — a real observable side effect.
 

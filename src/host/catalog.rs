@@ -196,7 +196,8 @@ const PHASE_DECODE_ARGS: &[NgxPhase] = &[
     NgxPhase::SslClientHello,
 ];
 
-/// Most remaining codec APIs: no init, init_worker, ssl_client_hello, exit_worker.
+/// `ngx.decode_base64mime`: like the other remaining codec APIs, but OpenResty
+/// v0.10.29 omits ssl_client_hello.
 const PHASE_CODEC_MISC: &[NgxPhase] = &[
     NgxPhase::Set,
     NgxPhase::Rewrite,
@@ -210,6 +211,23 @@ const PHASE_CODEC_MISC: &[NgxPhase] = &[
     NgxPhase::SslCertificate,
     NgxPhase::SslSessionFetch,
     NgxPhase::SslSessionStore,
+];
+
+/// Remaining codec APIs that OpenResty v0.10.29 allows in ssl_client_hello.
+const PHASE_CODEC_MISC_SSL_CLIENT_HELLO: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Timer,
+    NgxPhase::Balancer,
+    NgxPhase::SslCertificate,
+    NgxPhase::SslSessionFetch,
+    NgxPhase::SslSessionStore,
+    NgxPhase::SslClientHello,
 ];
 
 /// Time APIs: init_worker yes, init no; plus ssl_client_hello and exit_worker.
@@ -263,28 +281,48 @@ const MANIFEST: &[HostManifestEntry] = &[
     codec_entry(
         NGX_ENCODE_BASE64_NAME,
         "ngx.encode_base64",
-        PHASE_CODEC_MISC,
+        PHASE_CODEC_MISC_SSL_CLIENT_HELLO,
     ),
     codec_entry(
         NGX_DECODE_BASE64_NAME,
         "ngx.decode_base64",
-        PHASE_CODEC_MISC,
+        PHASE_CODEC_MISC_SSL_CLIENT_HELLO,
     ),
     codec_entry(
         NGX_DECODE_BASE64MIME_NAME,
         "ngx.decode_base64mime",
         PHASE_CODEC_MISC,
     ),
-    codec_entry(NGX_CRC32_SHORT_NAME, "ngx.crc32_short", PHASE_CODEC_MISC),
-    codec_entry(NGX_CRC32_LONG_NAME, "ngx.crc32_long", PHASE_CODEC_MISC),
-    codec_entry(NGX_HMAC_SHA1_NAME, "ngx.hmac_sha1", PHASE_CODEC_MISC),
-    codec_entry(NGX_MD5_NAME, "ngx.md5", PHASE_CODEC_MISC),
-    codec_entry(NGX_MD5_BIN_NAME, "ngx.md5_bin", PHASE_CODEC_MISC),
-    codec_entry(NGX_SHA1_BIN_NAME, "ngx.sha1_bin", PHASE_CODEC_MISC),
+    codec_entry(
+        NGX_CRC32_SHORT_NAME,
+        "ngx.crc32_short",
+        PHASE_CODEC_MISC_SSL_CLIENT_HELLO,
+    ),
+    codec_entry(
+        NGX_CRC32_LONG_NAME,
+        "ngx.crc32_long",
+        PHASE_CODEC_MISC_SSL_CLIENT_HELLO,
+    ),
+    codec_entry(
+        NGX_HMAC_SHA1_NAME,
+        "ngx.hmac_sha1",
+        PHASE_CODEC_MISC_SSL_CLIENT_HELLO,
+    ),
+    codec_entry(NGX_MD5_NAME, "ngx.md5", PHASE_CODEC_MISC_SSL_CLIENT_HELLO),
+    codec_entry(
+        NGX_MD5_BIN_NAME,
+        "ngx.md5_bin",
+        PHASE_CODEC_MISC_SSL_CLIENT_HELLO,
+    ),
+    codec_entry(
+        NGX_SHA1_BIN_NAME,
+        "ngx.sha1_bin",
+        PHASE_CODEC_MISC_SSL_CLIENT_HELLO,
+    ),
     codec_entry(
         NGX_QUOTE_SQL_STR_NAME,
         "ngx.quote_sql_str",
-        PHASE_CODEC_MISC,
+        PHASE_CODEC_MISC_SSL_CLIENT_HELLO,
     ),
     time_entry(NGX_TODAY_NAME, "ngx.today", PHASE_TIME),
     time_entry(NGX_TIME_NAME, "ngx.time", PHASE_TIME),

@@ -8,6 +8,7 @@ use ngx_rustscript_nginx_test_stubs as _;
 
 use std::sync::Arc;
 
+use ngx_rustscript::access::{on_async_ready, run_access_program};
 use ngx_rustscript::config::compile_rss_source;
 use ngx_rustscript::host::{
     bind_ngx_hosts, clear_os_clock_override, notify_cached_clock_event_boundary, override_os_clock,
@@ -189,6 +190,66 @@ fn event_boundary_and_update_time_refresh_cached_clock_across_vms() {
     assert!(
         (updated - 1_700_000_200.0).abs() < f64::EPSILON,
         "ngx::update_time must sample the OS clock, got {updated}"
+    );
+    clear_os_clock_override();
+}
+
+#[test]
+fn access_program_turn_refreshes_cached_clock_without_direct_hook() {
+    override_os_clock(1_710_000_000, 0);
+    let primed = expect_float(eval("use ngx;\nngx::update_time();\nngx::now();\n"));
+    assert!((primed - 1_710_000_000.0).abs() < f64::EPSILON);
+
+    override_os_clock(1_710_000_050, 250);
+    let cached = expect_float(eval("use ngx;\nngx::now();\n"));
+    assert_eq!(
+        cached, primed,
+        "cached clock must hold until a production request/event turn"
+    );
+
+    let program = compile("let x = 1;\n");
+    let status = run_access_program(&program).expect("sync access program");
+    assert_eq!(status, VmStatus::Halted);
+
+    let after_request = expect_float(eval("use ngx;\nngx::now();\n"));
+    assert!(
+        (after_request - 1_710_000_050.25).abs() < 1e-9,
+        "run_access_program must mark a cached-clock event boundary, got {after_request}"
+    );
+    clear_os_clock_override();
+}
+
+#[test]
+fn async_ready_event_turn_refreshes_cached_clock_without_direct_hook() {
+    override_os_clock(1_720_000_000, 0);
+    let primed = expect_float(eval("use ngx;\nngx::update_time();\nngx::now();\n"));
+    assert!((primed - 1_720_000_000.0).abs() < f64::EPSILON);
+
+    override_os_clock(1_720_000_080, 500);
+    let cached = expect_float(eval("use ngx;\nngx::now();\n"));
+    assert_eq!(cached, primed);
+
+    on_async_ready(Vec::new());
+
+    let after_event = expect_float(eval("use ngx;\nngx::now();\n"));
+    assert!(
+        (after_event - 1_720_000_080.5).abs() < 1e-9,
+        "on_async_ready must mark a cached-clock event boundary, got {after_event}"
+    );
+    clear_os_clock_override();
+}
+
+#[test]
+fn update_time_samples_os_immediately_without_event_turn() {
+    override_os_clock(1_730_000_000, 0);
+    let primed = expect_float(eval("use ngx;\nngx::update_time();\nngx::now();\n"));
+    assert!((primed - 1_730_000_000.0).abs() < f64::EPSILON);
+
+    override_os_clock(1_730_000_009, 0);
+    let updated = expect_float(eval("use ngx;\nngx::update_time();\nngx::now();\n"));
+    assert!(
+        (updated - 1_730_000_009.0).abs() < f64::EPSILON,
+        "ngx::update_time must sample immediately, got {updated}"
     );
     clear_os_clock_override();
 }
