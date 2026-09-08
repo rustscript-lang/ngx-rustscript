@@ -67,7 +67,9 @@ pub fn log(level: i64, message: &str) -> VmResult<CallOutcome> {
         ));
     }
     let Some(log) = request_log().or_else(cycle_log) else {
-        return ret(());
+        return Err(VmError::HostError(
+            "ngx::log requires a live request log or cycle log".into(),
+        ));
     };
     ngx::ngx_log_error!(
         level as nginx_sys::ngx_uint_t,

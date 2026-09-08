@@ -3,10 +3,15 @@
  * Production cdylib must not include this file. Pointer-typed parameters use
  * the SysV pointer ABI (compatible with the nginx-sys bindgen types).
  * `ngx_err_t` is `int` and sits before the variadic `fmt` argument.
+ *
+ * Cycle-log tests observe ngx-rust `%*s` payloads through the capture helpers.
  */
 
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include <sys/types.h>
 
 typedef intptr_t ngx_int_t;
@@ -42,6 +47,27 @@ void *ngx_array_push(void *a)
     return NULL;
 }
 
+enum { NGX_STUB_LOG_CAP = 4096 };
+
+static char ngx_stub_last_log[NGX_STUB_LOG_CAP];
+static int ngx_stub_log_count;
+
+void ngx_rustscript_stub_log_reset(void)
+{
+    ngx_stub_log_count = 0;
+    ngx_stub_last_log[0] = '\0';
+}
+
+int ngx_rustscript_stub_log_count(void)
+{
+    return ngx_stub_log_count;
+}
+
+const char *ngx_rustscript_stub_last_log(void)
+{
+    return ngx_stub_last_log;
+}
+
 void ngx_log_error_core(
     ngx_uint_t level,
     void *log,
@@ -49,10 +75,37 @@ void ngx_log_error_core(
     const char *fmt,
     ...
 ) {
+    va_list ap;
+
+    ngx_stub_log_count++;
+    ngx_stub_last_log[0] = '\0';
+
+    if (fmt == NULL) {
+        (void)level;
+        (void)log;
+        (void)err;
+        return;
+    }
+
+    va_start(ap, fmt);
+    /* ngx-rust formats with `%*s` and a `usize` length (see ngx::log::log_error). */
+    if (strcmp(fmt, "%*s") == 0) {
+        size_t len = va_arg(ap, size_t);
+        const char *msg = va_arg(ap, const char *);
+        if (msg != NULL && len > 0) {
+            if (len >= sizeof(ngx_stub_last_log)) {
+                len = sizeof(ngx_stub_last_log) - 1;
+            }
+            memcpy(ngx_stub_last_log, msg, len);
+            ngx_stub_last_log[len] = '\0';
+        }
+    } else {
+        vsnprintf(ngx_stub_last_log, sizeof(ngx_stub_last_log), fmt, ap);
+    }
+    va_end(ap);
     (void)level;
     (void)log;
     (void)err;
-    (void)fmt;
 }
 
 void *ngx_pool_cleanup_add(void *p, size_t size)
@@ -101,6 +154,7 @@ uintptr_t ngx_worker;
 uintptr_t ngx_exiting;
 void *ngx_cycle;
 unsigned char ngx_core_module[4096];
+ngx_int_t ngx_process_slot;
 unsigned char ngx_processes[1024 * 256];
 
 void ngx_http_core_run_phases(void *r)

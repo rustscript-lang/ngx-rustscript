@@ -79,9 +79,9 @@ ngx_int_const!(core_again, "ngx::core::again", nginx_sys::NGX_AGAIN);
 ngx_int_const!(core_done, "ngx::core::done", nginx_sys::NGX_DONE);
 ngx_int_const!(core_declined, "ngx::core::declined", nginx_sys::NGX_DECLINED);
 
-/// OpenResty `ngx.null`.
-#[pd_host_function(name = "ngx::core::null")]
-pub fn core_null() -> VmResult<CallOutcome> {
+/// OpenResty `ngx.null`. Named `null_value` because `null` is a reserved token.
+#[pd_host_function(name = "ngx::core::null_value")]
+pub fn core_null_value() -> VmResult<CallOutcome> {
     ret(())
 }
 
@@ -178,6 +178,11 @@ ngx_int_const!(
     nginx_sys::NGX_HTTP_UNAUTHORIZED
 );
 ngx_int_const!(
+    http_status_payment_required,
+    "ngx::http::status_payment_required",
+    402
+);
+ngx_int_const!(
     http_status_forbidden,
     "ngx::http::status_forbidden",
     nginx_sys::NGX_HTTP_FORBIDDEN
@@ -193,6 +198,11 @@ ngx_int_const!(
     nginx_sys::NGX_HTTP_NOT_ALLOWED
 );
 ngx_int_const!(
+    http_status_not_acceptable,
+    "ngx::http::status_not_acceptable",
+    406
+);
+ngx_int_const!(
     http_status_request_timeout,
     "ngx::http::status_request_timeout",
     nginx_sys::NGX_HTTP_REQUEST_TIME_OUT
@@ -202,11 +212,18 @@ ngx_int_const!(
     "ngx::http::status_conflict",
     nginx_sys::NGX_HTTP_CONFLICT
 );
+ngx_int_const!(http_status_gone, "ngx::http::status_gone", 410);
+ngx_int_const!(
+    http_status_upgrade_required,
+    "ngx::http::status_upgrade_required",
+    426
+);
 ngx_int_const!(
     http_status_too_many_requests,
     "ngx::http::status_too_many_requests",
     nginx_sys::NGX_HTTP_TOO_MANY_REQUESTS
 );
+ngx_int_const!(http_status_illegal, "ngx::http::status_illegal", 451);
 ngx_int_const!(
     http_status_close,
     "ngx::http::status_close",
@@ -325,16 +342,28 @@ pub fn worker_pid() -> VmResult<CallOutcome> {
 }
 
 /// OpenResty `ngx.worker.pids`.
+///
+/// Always includes the live `ngx_pid`. Other slots are workers only when
+/// `pid > 0` and `channel[0] > 0`, which excludes master, helpers, and stale
+/// entries. Invalid `ngx_process_slot` values are ignored. Duplicate pids are
+/// collapsed so a mixed table and a `master_process off` worker both stay
+/// unique.
 #[pd_host_function(name = "ngx::worker::pids")]
 pub fn worker_pids() -> VmResult<CallOutcome> {
     let mut pids = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    // SAFETY: `ngx_pid` is the current process pid published by NGINX.
+    let current = unsafe { core::ptr::addr_of!(ngx_pid).read() };
+    if current > 0 {
+        seen.insert(current);
+        pids.push(Value::Int(i64::from(current)));
+    }
     // SAFETY: `ngx_processes` is the public NGINX process table.
     let processes = unsafe { &*core::ptr::addr_of!(ngx_processes) };
     for proc in processes {
-        if proc.pid <= 0 {
-            continue;
+        if proc.pid > 0 && proc.channel[0] > 0 && seen.insert(proc.pid) {
+            pids.push(Value::Int(i64::from(proc.pid)));
         }
-        pids.push(Value::Int(i64::from(proc.pid)));
     }
     ret(pids)
 }

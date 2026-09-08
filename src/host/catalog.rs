@@ -283,7 +283,8 @@ const PHASE_CORE_CONST: &[NgxPhase] = &[
     NgxPhase::SslClientHello,
 ];
 
-/// `ngx.config.subsystem` / `debug` / `prefix` / worker.pid/count/exiting.
+/// `ngx.config.subsystem` / `debug` / `prefix` / worker.pid/count/exiting
+/// / `nginx_version` (init_worker and exit_worker, unlike `nginx_configure`).
 const PHASE_CONFIG_RUNTIME: &[NgxPhase] = &[
     NgxPhase::Init,
     NgxPhase::InitWorker,
@@ -298,7 +299,7 @@ const PHASE_CONFIG_RUNTIME: &[NgxPhase] = &[
     NgxPhase::ExitWorker,
 ];
 
-/// `ngx.config.nginx_version` / `nginx_configure` / module version.
+/// `ngx.config.nginx_configure` / module version. Omits init_worker/exit_worker.
 const PHASE_CONFIG_BUILD: &[NgxPhase] = &[
     NgxPhase::Init,
     NgxPhase::Set,
@@ -437,7 +438,7 @@ const MANIFEST: &[HostManifestEntry] = &[
     meta_entry(
         "ngx::config::nginx_version",
         "ngx.config.nginx_version",
-        PHASE_CONFIG_BUILD,
+        PHASE_CONFIG_RUNTIME,
     ),
     meta_entry(
         "ngx::config::nginx_configure",
@@ -468,7 +469,7 @@ const MANIFEST: &[HostManifestEntry] = &[
     const_entry("ngx::core::again", "ngx.AGAIN", PHASE_CORE_CONST),
     const_entry("ngx::core::done", "ngx.DONE", PHASE_CORE_CONST),
     const_entry("ngx::core::declined", "ngx.DECLINED", PHASE_CORE_CONST),
-    const_entry("ngx::core::null", "ngx.null", PHASE_CORE_CONST),
+    const_entry("ngx::core::null_value", "ngx.null", PHASE_CORE_CONST),
     const_entry("ngx::http::get", "ngx.HTTP_GET", PHASE_CORE_CONST),
     const_entry("ngx::http::head", "ngx.HTTP_HEAD", PHASE_CORE_CONST),
     const_entry("ngx::http::put", "ngx.HTTP_PUT", PHASE_CORE_CONST),
@@ -565,6 +566,11 @@ const MANIFEST: &[HostManifestEntry] = &[
         PHASE_CORE_CONST,
     ),
     const_entry(
+        "ngx::http::status_payment_required",
+        "ngx.HTTP_PAYMENT_REQUIRED",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
         "ngx::http::status_forbidden",
         "ngx.HTTP_FORBIDDEN",
         PHASE_CORE_CONST,
@@ -580,6 +586,11 @@ const MANIFEST: &[HostManifestEntry] = &[
         PHASE_CORE_CONST,
     ),
     const_entry(
+        "ngx::http::status_not_acceptable",
+        "ngx.HTTP_NOT_ACCEPTABLE",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
         "ngx::http::status_request_timeout",
         "ngx.HTTP_REQUEST_TIMEOUT",
         PHASE_CORE_CONST,
@@ -589,9 +600,20 @@ const MANIFEST: &[HostManifestEntry] = &[
         "ngx.HTTP_CONFLICT",
         PHASE_CORE_CONST,
     ),
+    const_entry("ngx::http::status_gone", "ngx.HTTP_GONE", PHASE_CORE_CONST),
+    const_entry(
+        "ngx::http::status_upgrade_required",
+        "ngx.HTTP_UPGRADE_REQUIRED",
+        PHASE_CORE_CONST,
+    ),
     const_entry(
         "ngx::http::status_too_many_requests",
         "ngx.HTTP_TOO_MANY_REQUESTS",
+        PHASE_CORE_CONST,
+    ),
+    const_entry(
+        "ngx::http::status_illegal",
+        "ngx.HTTP_ILLEGAL",
         PHASE_CORE_CONST,
     ),
     const_entry(
@@ -848,12 +870,12 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             vec![HostParamSchema::value("text", HostTypeSchema::String)],
             HostTypeSchema::Optional(Box::new(HostTypeSchema::Int)),
         ),
-        other => task4_schema(other)
+        other => metadata_schema(other)
             .unwrap_or_else(|| panic!("ngx host catalog has no schema for {other}")),
     }
 }
 
-fn task4_schema(name: &str) -> Option<HostFunctionSchema> {
+fn metadata_schema(name: &str) -> Option<HostFunctionSchema> {
     Some(match name {
         "ngx::log" => HostFunctionSchema::with_return(
             name,
@@ -863,7 +885,7 @@ fn task4_schema(name: &str) -> Option<HostFunctionSchema> {
             ],
             HostTypeSchema::Null,
         ),
-        "ngx::core::null" => nullary(name, HostTypeSchema::Null),
+        "ngx::core::null_value" => nullary(name, HostTypeSchema::Null),
         "ngx::get_phase"
         | "ngx::config::subsystem"
         | "ngx::config::prefix"
@@ -919,12 +941,17 @@ fn is_int_constant(name: &str) -> bool {
             | "ngx::http::status_permanent_redirect"
             | "ngx::http::status_bad_request"
             | "ngx::http::status_unauthorized"
+            | "ngx::http::status_payment_required"
             | "ngx::http::status_forbidden"
             | "ngx::http::status_not_found"
             | "ngx::http::status_not_allowed"
+            | "ngx::http::status_not_acceptable"
             | "ngx::http::status_request_timeout"
             | "ngx::http::status_conflict"
+            | "ngx::http::status_gone"
+            | "ngx::http::status_upgrade_required"
             | "ngx::http::status_too_many_requests"
+            | "ngx::http::status_illegal"
             | "ngx::http::status_close"
             | "ngx::http::status_internal_server_error"
             | "ngx::http::status_not_implemented"

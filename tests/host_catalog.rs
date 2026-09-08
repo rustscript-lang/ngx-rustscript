@@ -422,3 +422,31 @@ fn codec_misc_hosts_allow_ssl_client_hello_except_decode_base64mime() {
         NgxPhase::InitWorker
     ));
 }
+
+#[test]
+fn nginx_version_allows_init_worker_and_exit_worker_unlike_nginx_configure() {
+    assert!(host_allowed_in_phase(
+        "ngx::config::nginx_version",
+        NgxPhase::InitWorker
+    ));
+    assert!(host_allowed_in_phase(
+        "ngx::config::nginx_version",
+        NgxPhase::ExitWorker
+    ));
+    assert!(host_allowed_in_phase(
+        "ngx::config::nginx_version",
+        NgxPhase::Init
+    ));
+    assert!(!host_allowed_in_phase(
+        "ngx::config::nginx_configure",
+        NgxPhase::InitWorker
+    ));
+    assert!(!host_allowed_in_phase(
+        "ngx::config::nginx_configure",
+        NgxPhase::ExitWorker
+    ));
+    assert!(host_allowed_in_phase(
+        "ngx::config::nginx_configure",
+        NgxPhase::Init
+    ));
+}

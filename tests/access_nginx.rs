@@ -623,6 +623,7 @@ use ngx;
 ngx::log(ngx::log_level::notice(), "TASK4_REQUEST_LOG");
 ngx::log(ngx::log_level::notice(), "TASK4_PREFIX=" + ngx::config::prefix());
 ngx::log(ngx::log_level::notice(), "TASK4_META=" + ngx::encode_args({ pid: ngx::worker::pid(), id: ngx::worker::id(), count: ngx::worker::count(), version: ngx::config::nginx_version(), phase: ngx::get_phase(), ok: ngx::core::ok(), status_ok: ngx::http::status_ok(), get: ngx::http::get(), err: ngx::log_level::error(), subsystem: ngx::config::subsystem() }));
+ngx::log(ngx::log_level::notice(), "TASK4_PIDS=" + ngx::encode_args({ pid: ngx::worker::pids() }));
 if ngx::config::debug() {
     ngx::log(-1, "unexpected-debug");
 }
@@ -713,6 +714,40 @@ if ngx::worker::exiting() {
     assert_eq!(fields.get("get").map(String::as_str), Some("2"));
     assert_eq!(fields.get("err").map(String::as_str), Some("4"));
     assert_eq!(fields.get("subsystem").map(String::as_str), Some("http"));
+
+    let pids_line = log
+        .lines()
+        .find(|line| line.contains("TASK4_PIDS="))
+        .unwrap_or_else(|| panic!("missing TASK4_PIDS in log:\n{log}"));
+    let pids_query = pids_line
+        .rsplit_once("TASK4_PIDS=")
+        .map(|(_, rest)| rest.split(", client:").next().unwrap_or(rest).trim())
+        .unwrap_or("");
+    let mut pids = Vec::new();
+    for pair in pids_query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if key == "pid" {
+            pids.push(value.parse::<i64>().expect("pid int"));
+        }
+    }
+    assert!(
+        pids.contains(&pid),
+        "worker::pids must include the current ngx_pid {pid}, got {pids:?}"
+    );
+    let unique = pids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unique.len(),
+        pids.len(),
+        "worker::pids must not contain duplicates, got {pids:?}"
+    );
+    assert_eq!(
+        pids.len(),
+        1,
+        "single-worker nginx must report only the live worker pid, got {pids:?}"
+    );
 }
 
 #[test]

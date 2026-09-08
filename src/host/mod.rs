@@ -92,7 +92,7 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         "ngx::core::again",
         "ngx::core::done",
         "ngx::core::declined",
-        "ngx::core::null",
+        "ngx::core::null_value",
         "ngx::http::get",
         "ngx::http::head",
         "ngx::http::put",
@@ -124,12 +124,17 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         "ngx::http::status_permanent_redirect",
         "ngx::http::status_bad_request",
         "ngx::http::status_unauthorized",
+        "ngx::http::status_payment_required",
         "ngx::http::status_forbidden",
         "ngx::http::status_not_found",
         "ngx::http::status_not_allowed",
+        "ngx::http::status_not_acceptable",
         "ngx::http::status_request_timeout",
         "ngx::http::status_conflict",
+        "ngx::http::status_gone",
+        "ngx::http::status_upgrade_required",
         "ngx::http::status_too_many_requests",
+        "ngx::http::status_illegal",
         "ngx::http::status_close",
         "ngx::http::status_internal_server_error",
         "ngx::http::status_not_implemented",
@@ -225,7 +230,10 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
     vm.bind_static_args_function("ngx::core::again", layout::helpers::meta::core_again);
     vm.bind_static_args_function("ngx::core::done", layout::helpers::meta::core_done);
     vm.bind_static_args_function("ngx::core::declined", layout::helpers::meta::core_declined);
-    vm.bind_static_args_function("ngx::core::null", layout::helpers::meta::core_null);
+    vm.bind_static_args_function(
+        "ngx::core::null_value",
+        layout::helpers::meta::core_null_value,
+    );
     vm.bind_static_args_function("ngx::http::get", layout::helpers::meta::http_get);
     vm.bind_static_args_function("ngx::http::head", layout::helpers::meta::http_head);
     vm.bind_static_args_function("ngx::http::put", layout::helpers::meta::http_put);
@@ -309,6 +317,10 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
         layout::helpers::meta::http_status_unauthorized,
     );
     vm.bind_static_args_function(
+        "ngx::http::status_payment_required",
+        layout::helpers::meta::http_status_payment_required,
+    );
+    vm.bind_static_args_function(
         "ngx::http::status_forbidden",
         layout::helpers::meta::http_status_forbidden,
     );
@@ -321,6 +333,10 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
         layout::helpers::meta::http_status_not_allowed,
     );
     vm.bind_static_args_function(
+        "ngx::http::status_not_acceptable",
+        layout::helpers::meta::http_status_not_acceptable,
+    );
+    vm.bind_static_args_function(
         "ngx::http::status_request_timeout",
         layout::helpers::meta::http_status_request_timeout,
     );
@@ -329,8 +345,20 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
         layout::helpers::meta::http_status_conflict,
     );
     vm.bind_static_args_function(
+        "ngx::http::status_gone",
+        layout::helpers::meta::http_status_gone,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_upgrade_required",
+        layout::helpers::meta::http_status_upgrade_required,
+    );
+    vm.bind_static_args_function(
         "ngx::http::status_too_many_requests",
         layout::helpers::meta::http_status_too_many_requests,
+    );
+    vm.bind_static_args_function(
+        "ngx::http::status_illegal",
+        layout::helpers::meta::http_status_illegal,
     );
     vm.bind_static_args_function(
         "ngx::http::status_close",
