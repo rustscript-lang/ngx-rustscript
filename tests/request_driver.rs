@@ -23,11 +23,13 @@ fn compile(source: &str) -> Arc<Program> {
 }
 
 fn sleep_once(ms: i64) -> Arc<Program> {
-    compile(&format!("use ngx;\nngx::sleep({ms});\n"))
+    compile(&format!("use ngx;\nngx::sleep_ms({ms});\n"))
 }
 
 fn two_sleeps(a: i64, b: i64) -> Arc<Program> {
-    compile(&format!("use ngx;\nngx::sleep({a});\nngx::sleep({b});\n"))
+    compile(&format!(
+        "use ngx;\nngx::sleep_ms({a});\nngx::sleep_ms({b});\n"
+    ))
 }
 
 fn wait_readable(fd: RawFd, timeout: Duration) -> bool {
@@ -160,7 +162,7 @@ fn vm_error_on_first_run_is_http_500_without_phase_continue() {
 
 #[test]
 fn vm_error_on_resume_is_http_500_with_single_phase_continue() {
-    let program = compile("use ngx;\nngx::sleep(1);\n1 / 0;\n");
+    let program = compile("use ngx;\nngx::sleep_ms(1);\n1 / 0;\n");
     let mut driver = Driver::new(program);
     assert_eq!(driver.handle(), AccessStatus::Again);
     let effect = driver.wait_ready();

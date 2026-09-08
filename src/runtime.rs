@@ -348,7 +348,7 @@ mod tests {
     }
 
     fn sleep_once(ms: i64) -> Arc<Program> {
-        compile_rss_source(&format!("use ngx;\nngx::sleep({ms});\n")).expect("compile")
+        compile_rss_source(&format!("use ngx;\nngx::sleep_ms({ms});\n")).expect("compile")
     }
 
     #[test]

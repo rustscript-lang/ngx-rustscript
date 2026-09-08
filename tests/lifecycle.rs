@@ -38,11 +38,13 @@ fn compile(source: &str) -> Arc<Program> {
 }
 
 fn sleep_once(ms: i64) -> Arc<Program> {
-    compile(&format!("use ngx;\nngx::sleep({ms});\n"))
+    compile(&format!("use ngx;\nngx::sleep_ms({ms});\n"))
 }
 
 fn two_sleeps(a: i64, b: i64) -> Arc<Program> {
-    compile(&format!("use ngx;\nngx::sleep({a});\nngx::sleep({b});\n"))
+    compile(&format!(
+        "use ngx;\nngx::sleep_ms({a});\nngx::sleep_ms({b});\n"
+    ))
 }
 
 fn wait_readable(fd: RawFd, timeout: Duration) -> bool {

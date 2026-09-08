@@ -17,7 +17,7 @@ use vm::{
     CompileSourceFileOptions, Program, SourceFlavor, Vm, compile_source_with_flavor_and_options,
 };
 
-use crate::host::{NGX_SLEEP_NAME, ngx_host_catalog};
+use crate::host::{HostSyncKind, NgxPhase, ngx_host_catalog, ngx_host_manifest};
 
 /// Compiled access-phase program stored on the location config.
 #[derive(Default)]
@@ -69,6 +69,7 @@ pub enum ConfigError {
     NotUtf8(PathBuf),
     Compile(String),
     UnsupportedImport(String),
+    PhaseForbidden { name: String, phase: NgxPhase },
     Duplicate,
     VmConstruct(String),
 }
@@ -88,6 +89,12 @@ impl fmt::Display for ConfigError {
             Self::Compile(msg) => write!(f, "failed to compile script: {msg}"),
             Self::UnsupportedImport(names) => {
                 write!(f, "script imports are not supported: {names}")
+            }
+            Self::PhaseForbidden { name, phase } => {
+                write!(
+                    f,
+                    "script import {name} is not allowed in the {phase} phase"
+                )
             }
             Self::Duplicate => write!(f, "duplicate access_by_rss_file in this location"),
             Self::VmConstruct(msg) => write!(f, "cannot construct VM for script: {msg}"),
@@ -137,31 +144,54 @@ pub fn load_rss_file(path: &Path) -> Result<String, ConfigError> {
     String::from_utf8(bytes).map_err(|_| ConfigError::NotUtf8(path.to_path_buf()))
 }
 
-/// Accept exactly `ngx::sleep`. Reject `print`, `runtime::sleep`, and every
-/// other host import.
+/// Accept catalogued hosts allowed in the access phase. Reject `print`,
+/// `runtime::sleep`, unknown imports, and phase-forbidden imports.
 pub fn reject_program_imports(program: &Program) -> Result<(), ConfigError> {
-    let names = program
-        .imports
-        .iter()
-        .map(|import| import.name.as_str())
-        .filter(|name| *name != NGX_SLEEP_NAME)
-        .collect::<Vec<_>>();
-    if names.is_empty() {
-        Ok(())
-    } else {
-        Err(ConfigError::UnsupportedImport(names.join(", ")))
+    validate_program_imports_for_phase(program, NgxPhase::Access)
+}
+
+/// Check each program import against the handwritten ngx manifest.
+pub fn validate_program_imports_for_phase(
+    program: &Program,
+    phase: NgxPhase,
+) -> Result<(), ConfigError> {
+    let manifest = ngx_host_manifest();
+    let mut unknown = Vec::new();
+    let mut forbidden = Vec::new();
+    for import in &program.imports {
+        match manifest
+            .iter()
+            .find(|entry| entry.name == import.name.as_str())
+        {
+            None => unknown.push(import.name.as_str()),
+            Some(entry) if !entry.phases.contains(&phase) => {
+                forbidden.push(import.name.as_str());
+            }
+            Some(_) => {}
+        }
     }
+    if !unknown.is_empty() {
+        return Err(ConfigError::UnsupportedImport(unknown.join(", ")));
+    }
+    if let Some(name) = forbidden.first() {
+        return Err(ConfigError::PhaseForbidden {
+            name: (*name).to_string(),
+            phase,
+        });
+    }
+    Ok(())
 }
 
-/// True when the compiled program imported the Task 3 `ngx::sleep` host.
+/// True when the compiled program imported an async ngx host that needs Waiting.
 pub fn program_needs_sleep(program: &Program) -> bool {
-    program
-        .imports
-        .iter()
-        .any(|import| import.name.as_str() == NGX_SLEEP_NAME)
+    program.imports.iter().any(|import| {
+        ngx_host_manifest()
+            .iter()
+            .any(|entry| entry.name == import.name.as_str() && entry.sync == HostSyncKind::Async)
+    })
 }
 
-/// Compile with the Task 3 `ngx::sleep` catalog and reject every other import.
+/// Compile with the ngx host catalog and reject unknown or phase-forbidden imports.
 pub fn compile_rss_source(source: &str) -> Result<Arc<Program>, ConfigError> {
     let catalog = Arc::new(ngx_host_catalog());
     let compiled = compile_source_with_flavor_and_options(

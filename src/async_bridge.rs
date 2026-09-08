@@ -134,6 +134,14 @@ mod tests {
         let mut builder = vm::HostApiBuilder::new();
         builder.function(vm::HostFunctionSchema::with_return(
             "ngx::sleep",
+            vec![vm::HostParamSchema::value(
+                "seconds",
+                vm::HostTypeSchema::Number,
+            )],
+            vm::HostTypeSchema::Null,
+        ));
+        builder.function(vm::HostFunctionSchema::with_return(
+            "ngx::sleep_ms",
             vec![vm::HostParamSchema::value("ms", vm::HostTypeSchema::Int)],
             vm::HostTypeSchema::Null,
         ));
@@ -170,7 +178,7 @@ mod tests {
     #[test]
     fn waiting_initial_pending_ready_poll_resume() {
         let rt = runtime();
-        let program = compile_with("use ngx;\nngx::sleep(5);\n", sleep_catalog());
+        let program = compile_with("use ngx;\nngx::sleep_ms(5);\n", sleep_catalog());
         let mut vm = bind_vm(program, rt.handle().clone(), false);
         let status = vm.run().expect("run");
         let VmStatus::Waiting(_op_id) = status else {
@@ -230,7 +238,7 @@ mod tests {
     fn two_consecutive_async_calls() {
         let rt = runtime();
         let program = compile_with(
-            "use ngx;\nngx::sleep(1);\nngx::sleep(1);\n",
+            "use ngx;\nngx::sleep_ms(1);\nngx::sleep_ms(1);\n",
             sleep_catalog(),
         );
         let mut vm = bind_vm(program, rt.handle().clone(), false);
@@ -289,7 +297,10 @@ mod tests {
     #[test]
     fn second_macro_async_host_shares_the_bridge() {
         let rt = runtime();
-        let program = compile_with("use ngx;\nngx::sleep(1);\nngx::probe(1);\n", test_catalog());
+        let program = compile_with(
+            "use ngx;\nngx::sleep_ms(1);\nngx::probe(1);\n",
+            test_catalog(),
+        );
         let mut vm = bind_vm(program, rt.handle().clone(), true);
         assert!(matches!(vm.run().expect("run"), VmStatus::Waiting(_)));
 
@@ -391,7 +402,7 @@ mod tests {
         );
 
         let mut vm = bind_vm(
-            compile_with("use ngx;\nngx::sleep(60000);\n", sleep_catalog()),
+            compile_with("use ngx;\nngx::sleep_ms(60000);\n", sleep_catalog()),
             rt.handle().clone(),
             false,
         );

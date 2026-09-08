@@ -1,0 +1,269 @@
+//! Manifest, catalog, and config-time import validation for ngx hosts.
+//!
+//! Catalog metadata is handwritten. Runtime bindings stay macro-generated and
+//! are checked through a real VM, not by scanning source strings.
+
+use ngx_rustscript_nginx_test_stubs as _;
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use ngx_rustscript::config::{
+    ConfigError, compile_rss_source, reject_program_imports, validate_program_imports_for_phase,
+};
+use ngx_rustscript::host::{
+    HostCapability, HostFamily, HostSyncKind, NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NgxPhase,
+    bind_ngx_hosts, ngx_host_catalog, ngx_host_manifest, production_runtime_host_names,
+};
+use vm::{HostTypeSchema, Program, Vm};
+
+fn compile(source: &str) -> Arc<Program> {
+    compile_rss_source(source).expect("source should compile against the ngx catalog")
+}
+
+fn compile_err(source: &str) -> ConfigError {
+    compile_rss_source(source).expect_err("source should fail configuration")
+}
+
+fn error_text(err: &ConfigError) -> String {
+    err.to_string().to_ascii_lowercase()
+}
+
+#[test]
+fn runtime_host_names_are_unique() {
+    let names = production_runtime_host_names();
+    let mut seen = HashSet::new();
+    for name in names {
+        assert!(
+            seen.insert(*name),
+            "production runtime host name {name} is duplicated"
+        );
+    }
+    assert!(
+        !names.is_empty(),
+        "production runtime must bind at least one ngx host"
+    );
+}
+
+#[test]
+fn manifest_catalog_and_runtime_names_correspond() {
+    let catalog = ngx_host_catalog();
+    let manifest = ngx_host_manifest();
+    let runtime_names = production_runtime_host_names();
+
+    let catalog_names: HashSet<&str> = catalog
+        .functions()
+        .iter()
+        .map(|schema| schema.name.as_str())
+        .collect();
+    let manifest_names: HashSet<&str> = manifest.iter().map(|entry| entry.name).collect();
+    let runtime_set: HashSet<&str> = runtime_names.iter().copied().collect();
+
+    assert_eq!(
+        catalog_names, runtime_set,
+        "compiler catalog names must match runtime bindings exactly"
+    );
+    assert_eq!(
+        manifest_names, runtime_set,
+        "manifest names must match runtime bindings exactly"
+    );
+    assert_eq!(
+        catalog.functions().len(),
+        runtime_names.len(),
+        "catalog must not declare overloads for production ngx hosts"
+    );
+}
+
+#[test]
+fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
+    for entry in ngx_host_manifest() {
+        assert!(!entry.name.is_empty(), "manifest entry needs a host name");
+        assert_eq!(entry.family, HostFamily::Timer);
+        assert_eq!(entry.sync, HostSyncKind::Async);
+        assert!(
+            !entry.phases.is_empty(),
+            "{} must declare allowed phases",
+            entry.name
+        );
+        assert!(
+            entry.phases.contains(&NgxPhase::Access),
+            "{} must be allowed in the current access phase",
+            entry.name
+        );
+        assert!(
+            !entry.capabilities.is_empty(),
+            "{} must declare capabilities",
+            entry.name
+        );
+        assert!(
+            entry.capabilities.contains(&HostCapability::Timer),
+            "{} is a timer host",
+            entry.name
+        );
+        assert_eq!(
+            entry.openresty_name, "ngx.sleep",
+            "{} corresponds to OpenResty ngx.sleep",
+            entry.name
+        );
+    }
+}
+
+#[test]
+fn catalog_sleep_schema_is_openresty_seconds_number() {
+    let catalog = ngx_host_catalog();
+    let schema = catalog
+        .function(NGX_SLEEP_NAME)
+        .expect("ngx::sleep is catalogued");
+    assert_eq!(schema.name, NGX_SLEEP_NAME);
+    assert_eq!(schema.params.len(), 1);
+    assert_eq!(schema.params[0].name, "seconds");
+    assert_eq!(schema.params[0].ty, HostTypeSchema::Number);
+    assert_eq!(schema.return_type, HostTypeSchema::Null);
+}
+
+#[test]
+fn catalog_sleep_ms_schema_preserves_millisecond_int() {
+    let catalog = ngx_host_catalog();
+    let schema = catalog
+        .function(NGX_SLEEP_MS_NAME)
+        .expect("ngx::sleep_ms is catalogued");
+    assert_eq!(schema.name, NGX_SLEEP_MS_NAME);
+    assert_eq!(schema.params.len(), 1);
+    assert_eq!(schema.params[0].name, "ms");
+    assert_eq!(schema.params[0].ty, HostTypeSchema::Int);
+    assert_eq!(schema.return_type, HostTypeSchema::Null);
+}
+
+#[test]
+fn bound_vm_has_every_catalogued_runtime_host_and_no_test_hosts() {
+    let program = compile("let x = 1;\n");
+    let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
+    bind_ngx_hosts(&mut vm);
+    for name in production_runtime_host_names() {
+        assert!(
+            vm.has_bound_function(name),
+            "runtime VM must bind catalogued host {name}"
+        );
+    }
+    for banned in [
+        "ngx::probe",
+        "ngx::now",
+        "ngx::fail",
+        "print",
+        "runtime::sleep",
+    ] {
+        assert!(
+            !vm.has_bound_function(banned),
+            "production bind must not install {banned}"
+        );
+    }
+}
+
+#[test]
+fn catalog_does_not_include_test_hosts() {
+    let catalog = ngx_host_catalog();
+    assert!(catalog.function("ngx::probe").is_none());
+    assert!(catalog.function("ngx::now").is_none());
+    assert!(catalog.function("ngx::fail").is_none());
+}
+
+#[test]
+fn unknown_import_is_distinct_from_arity_and_type_errors() {
+    let err = compile_err("use ngx;\nngx::not_a_host(1);\n");
+    let text = error_text(&err);
+    assert!(
+        matches!(err, ConfigError::UnsupportedImport(_)),
+        "unknown ngx member is rejected by the catalog allowlist, got {err:?}"
+    );
+    assert!(
+        text.contains("ngx::not_a_host"),
+        "unknown import should name the rejected host, got {err}"
+    );
+    assert!(
+        !text.contains("unknown host function"),
+        "pinned compiler accepts an undeclared ngx member as an import; allowlist rejection is distinct: {err}"
+    );
+    assert!(
+        !text.contains("call site"),
+        "unknown import must not be reported as arity mismatch: {err}"
+    );
+    assert!(
+        !text.contains("matches the arguments"),
+        "unknown import must not be reported as type mismatch: {err}"
+    );
+}
+
+#[test]
+fn arity_mismatch_is_distinct_from_unknown_and_type_errors() {
+    let err = compile_err("use ngx;\nngx::sleep();\n");
+    let text = error_text(&err);
+    assert!(
+        matches!(err, ConfigError::Compile(_)),
+        "wrong arity should fail in the compiler, got {err:?}"
+    );
+    assert!(
+        text.contains("ngx::sleep") && (text.contains("argument") || text.contains("arity")),
+        "arity mismatch should name the host and argument count, got {err}"
+    );
+    assert!(
+        !text.contains("unknown host function"),
+        "arity mismatch must not be reported as unknown import: {err}"
+    );
+}
+
+#[test]
+fn type_mismatch_is_distinct_from_unknown_and_arity_errors() {
+    let err = compile_err("use ngx;\nngx::sleep(\"nope\");\n");
+    let text = error_text(&err);
+    assert!(
+        matches!(err, ConfigError::Compile(_)),
+        "type mismatch should fail in the compiler, got {err:?}"
+    );
+    assert!(
+        text.contains("ngx::sleep")
+            && (text.contains("match") || text.contains("type") || text.contains("string")),
+        "type mismatch should mention the host and the bad argument, got {err}"
+    );
+    assert!(
+        !text.contains("unknown host function"),
+        "type mismatch must not be reported as unknown import: {err}"
+    );
+    assert!(
+        !(text.contains("takes ") && text.contains("call site")),
+        "type mismatch must not be reported as arity mismatch: {err}"
+    );
+}
+
+#[test]
+fn phase_forbidden_import_is_distinct_from_compiler_diagnostics() {
+    let program = compile("use ngx;\nngx::sleep(0);\n");
+    let err = validate_program_imports_for_phase(&program, NgxPhase::Log)
+        .expect_err("ngx::sleep is not allowed in log");
+    let text = error_text(&err);
+    assert!(
+        !matches!(err, ConfigError::Compile(_)),
+        "phase denial is config metadata, not a compiler catalog miss: {err:?}"
+    );
+    assert!(
+        text.contains("ngx::sleep") && text.contains("log"),
+        "phase-forbidden error should name the import and phase, got {err}"
+    );
+    assert!(
+        text.contains("not allowed") || text.contains("forbidden") || text.contains("phase"),
+        "phase-forbidden error should say the import is not allowed, got {err}"
+    );
+    assert!(
+        !text.contains("unknown host function"),
+        "phase-forbidden must not look like an unknown import: {err}"
+    );
+}
+
+#[test]
+fn access_phase_accepts_sleep_and_sleep_ms() {
+    compile("use ngx;\nngx::sleep(0);\n");
+    compile("use ngx;\nngx::sleep_ms(1);\n");
+    let program = compile("use ngx;\nngx::sleep(0);\nngx::sleep_ms(1);\n");
+    reject_program_imports(&program).expect("access phase allows timer hosts");
+    validate_program_imports_for_phase(&program, NgxPhase::Access)
+        .expect("access phase allows timer hosts");
+}

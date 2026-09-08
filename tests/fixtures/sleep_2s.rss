@@ -1,2 +1,2 @@
 use ngx;
-ngx::sleep(2000);
+ngx::sleep_ms(2000);

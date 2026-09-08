@@ -1,4 +1,4 @@
 use ngx;
-ngx::sleep(1);
-ngx::sleep(2);
+ngx::sleep_ms(1);
+ngx::sleep_ms(2);
 ngx::mark(3);

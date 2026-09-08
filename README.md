@@ -5,11 +5,12 @@ phase. Location directive `access_by_rss_file <path>` compiles the script
 once at configuration time.
 
 Import-free scripts run synchronously to `Halted` on a worker-local VM
-pool. Scripts that import exactly `ngx::sleep` bind a request-local VM,
-return `NGX_AGAIN` while a generic host future is pending, and resume the
-same VM from the eventfd callback. Client disconnect during a wait
-finalizes the request as HTTP 499. Graceful master shutdown cancels
-in-flight host futures instead of waiting them out.
+pool. Scripts that import `ngx::sleep` or `ngx::sleep_ms` bind a
+request-local VM, return `NGX_AGAIN` while a generic host future is
+pending, and resume the same VM from the eventfd callback. Client
+disconnect during a wait finalizes the request as HTTP 499. Graceful
+master shutdown cancels in-flight host futures instead of waiting them
+out.
 
 ## Requirements
 
@@ -156,12 +157,13 @@ prefix (the directory of the config file). Absolute paths are unchanged.
 The file is read once at `nginx -t` / reload, must be a regular UTF-8 file,
 and is compiled with `compile_source`.
 
-Config accepts exactly the `ngx::sleep` host import. `print`,
-`runtime::sleep`, and every other import are rejected at configuration
-time. Unknown modules fail compile or import check. Duplicate directives in
-the same location are rejected. Unset nested locations inherit the parent
-program; an explicit child directive overrides. Unconfigured locations keep
-the original access-phase decline.
+Config accepts the catalogued ngx hosts `ngx::sleep` and `ngx::sleep_ms`
+in the access phase. `print`, `runtime::sleep`, unknown imports, and
+phase-forbidden imports are rejected at configuration time. Unknown
+modules fail compile or import check. Duplicate directives in the same
+location are rejected. Unset nested locations inherit the parent
+program; an explicit child directive overrides. Unconfigured locations
+keep the original access-phase decline.
 
 Prove load with an isolated prefix:
 
@@ -187,22 +189,31 @@ One sleep, then the content phase:
 
 ```rss
 use ngx;
-ngx::sleep(30);
+ngx::sleep(0.03);
+```
+
+Millisecond sleep for integer delays:
+
+```rss
+use ngx;
+ngx::sleep_ms(30);
 ```
 
 Two sequential sleeps:
 
 ```rss
 use ngx;
-ngx::sleep(10);
-ngx::sleep(10);
+ngx::sleep(0.01);
+ngx::sleep_ms(10);
 ```
 
-`ngx::sleep` is a `pd-host-function` async host (`ms:int -> null`). The
-generated wrapper submits an owned host future; the impl validates a
-nonnegative millisecond count and awaits Tokio. The first host entry
-returns `VmStatus::Waiting`. Two sequential sleeps reuse the same
-generation-safe request identity and each wait once.
+`ngx::sleep` is a `pd-host-function` async host (`seconds:number -> null`).
+`seconds` is an OpenResty-style integer or float; negative, NaN, infinity,
+and duration overflow are rejected. `ngx::sleep_ms` is the millisecond
+integer form (`ms:int -> null`). The generated wrapper submits an owned
+host future; the impl validates the duration and awaits Tokio. The first
+host entry returns `VmStatus::Waiting`. Two sequential sleeps reuse the
+same generation-safe request identity and each wait once.
 
 On each request the access handler leases a worker-thread-local VM via
 `Vm::new_shared(Arc<Program>)`. Import-free programs run to
@@ -212,8 +223,9 @@ On each request the access handler leases a worker-thread-local VM via
 pool size is bounded. VM errors and unexpected `Waiting` on import-free
 programs fail the request with 500.
 
-Scripts that imported `ngx::sleep` bind a request-local VM instead of the
-pool. `Waiting` returns `NGX_AGAIN` without incrementing `r->main->count`.
+Scripts that imported `ngx::sleep` or `ngx::sleep_ms` bind a request-local
+VM instead of the pool. `Waiting` returns `NGX_AGAIN` without incrementing
+`r->main->count`.
 The eventfd callback polls the waiting host op, resumes the same VM on the
 worker main thread, and continues `ngx_http_core_run_phases` exactly once
 so the access handler can return `NGX_OK`. Host-bound waiting VMs are never
@@ -274,7 +286,7 @@ python3 tests/nginx_integration.py --nginx <absolute pinned nginx> --module <abs
 
 It checks that the nginx binary and module paths are absolute, that nginx
 reports `nginx/1.30.4` with `--with-compat` and `--with-http_ssl_module`,
-and that `nginx -t` accepts a valid `ngx::sleep` config while missing,
+and that `nginx -t` accepts a valid sleep config while missing,
 syntax, unsupported-import, and wrong-arity fixtures fail with those
 causes. Against a live isolated master (`master_process on`,
 `worker_processes 1`, foreground) it checks that a 2s sleep does not block
@@ -299,7 +311,8 @@ to a directory to place them elsewhere.
   `BINDGEN_EXTRA_CLANG_ARGS`; install clang and libclang; point
   `NGINX_SOURCE_DIR` / `NGINX_BUILD_DIR` at the configured 1.30.4 tree.
 - `script imports are not supported` / `failed to compile script` — only
-  `ngx::sleep` may be imported. `print` and `runtime::sleep` are rejected.
+  catalogued ngx hosts (`ngx::sleep`, `ngx::sleep_ms`) may be imported in
+  the access phase. `print` and `runtime::sleep` are rejected.
 - HTTP 500 from an access script — VM runtime error or unexpected Waiting on
   an import-free program. Check the error log.
 - HTTP 499 on a sleep route — the client closed the connection before the
