@@ -14,16 +14,16 @@ use tokio::runtime::Handle;
 use vm::{Program, Vm, VmStatus};
 
 use crate::async_bridge::NgxAsyncBridge;
-use crate::host::{AllowedOps, NgxPhase, RequestExecutionScope, bind_ngx_hosts};
+use crate::host::{AllowedOps, NgxPhase, bind_ngx_hosts, with_vm_request_scope};
 use crate::notify::{CompletionPermit, RequestIdentity};
 
 fn with_vm_entry<T>(identity: RequestIdentity, f: impl FnOnce() -> T) -> T {
-    let _scope = RequestExecutionScope::enter_for_vm(
+    with_vm_request_scope(
         identity,
         NgxPhase::Access,
         AllowedOps::for_phase(NgxPhase::Access),
-    );
-    f()
+        f,
+    )
 }
 
 /// Result of one access-phase entry.

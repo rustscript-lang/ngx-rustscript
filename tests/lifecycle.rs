@@ -20,7 +20,9 @@ use std::time::{Duration, Instant};
 
 use ngx::core::Status;
 use ngx_rustscript::config::compile_rss_source;
-use ngx_rustscript::host::{ScopeError, current_identity, is_active};
+use ngx_rustscript::host::{
+    AllowedOps, NgxPhase, ScopeError, capture_vm_entries, current_identity, is_active,
+};
 use ngx_rustscript::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
 use ngx_rustscript::read_close::{
     EventFlags, HandlerAction, HandlerState, PeekResult, run_read_close_handler,
@@ -145,12 +147,26 @@ fn cleanup_before_completion_ignores_later_ready() {
 #[test]
 fn handle_poll_resume_leave_request_scope_inactive() {
     let mut driver = Driver::new(sleep_once(1));
+    let identity = driver.exec.identity();
     assert!(!is_active());
-    assert_eq!(driver.handle(), AccessStatus::Again);
+    let (status, entries) = capture_vm_entries(|| driver.handle());
+    assert_eq!(status, AccessStatus::Again);
+    assert!(!entries.is_empty());
+    for entry in &entries {
+        assert_eq!(entry.identity, identity);
+        assert_eq!(entry.phase, NgxPhase::Access);
+        assert_eq!(entry.allowed, AllowedOps::for_phase(NgxPhase::Access));
+        assert!(!entry.request_live);
+    }
     assert!(!is_active());
     assert_eq!(current_identity(), Err(ScopeError::NotInRequestScope));
-    let effect = driver.wait_ready();
+    let (effect, ready_entries) = capture_vm_entries(|| driver.wait_ready());
     assert_eq!(effect, ReadyEffect::Halted);
+    assert!(!ready_entries.is_empty());
+    for entry in &ready_entries {
+        assert_eq!(entry.identity, identity);
+        assert!(!entry.request_live);
+    }
     assert!(!is_active());
     assert_eq!(current_identity(), Err(ScopeError::NotInRequestScope));
 }
