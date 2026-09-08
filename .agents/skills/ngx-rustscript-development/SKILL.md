@@ -19,6 +19,19 @@ description: Use when developing, debugging, reviewing, or testing ngx-rustscrip
 - Do not handwrite `HostFunction`, `HostArgsFunction`, `HostFunctionSchema`, argument decoding, or `CallOutcome::Yield` replay for ordinary hosts.
 - Inspect the exact pinned macro parser before adding attributes. Preserve the verified module re-exports required by generated code.
 
+## Release A ngx API surface
+
+`docs/ngx-api-compatibility.md` is the authoritative current ngx API
+surface and checklist. Update it whenever a production manifest API,
+callable signature, allowed phase, limit, yield behavior (sync versus
+Waiting), or semantic adaptation changes. Cross-check the handwritten
+manifest, compiler catalog, and `bind_ngx_hosts` / runtime name list so
+the matrix stays complete.
+
+Keep the Tokio external-I/O constraints above: outbound TCP, UDP, DNS,
+HTTP client, and TLS hosts use Tokio I/O drivers only. Do not route them
+through NGINX socket, resolver, timer, or event FFI.
+
 A normal async host should contain only validation and awaited business work:
 
 ```rust

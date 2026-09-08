@@ -233,6 +233,10 @@ returned to the pool.
 
 ## Runtime and compatibility limits
 
+The Release A ngx host surface (signatures, phases, yield behavior,
+limits, and OpenResty adaptations) is listed in
+[docs/ngx-api-compatibility.md](docs/ngx-api-compatibility.md).
+
 - Worker runtime is created only in NGINX worker `init_process` after fork,
   and only when `ngx_process` is `NGX_PROCESS_WORKER` or
   `NGX_PROCESS_SINGLE`. Helper processes skip initialization. `nginx -t`,
