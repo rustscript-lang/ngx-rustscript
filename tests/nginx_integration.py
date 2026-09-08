@@ -227,6 +227,8 @@ def runtime_conf(module, prefix, port):
             location("/alpha/", fixture("sleep_80ms.rss")),
             location("/beta/", fixture("sleep_30ms.rss")),
             location("/long/", fixture("sleep_30s.rss")),
+            location("/iso-a/", fixture("request_iso.rss")),
+            location("/iso-b/", fixture("request_iso.rss")),
             """
         location /plain/ {
         }
@@ -291,9 +293,27 @@ def parse_http(raw):
 
 
 def http_get(port, path, timeout=10.0, sent_event=None):
-    req = (
-        f"GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-    ).encode("ascii")
+    return http_exchange(port, "GET", path, timeout=timeout, sent_event=sent_event)
+
+
+def http_exchange(
+    port,
+    method,
+    path,
+    timeout=10.0,
+    sent_event=None,
+    headers=None,
+    version="HTTP/1.0",
+):
+    lines = [
+        f"{method} {path} {version}",
+        "Host: 127.0.0.1",
+        "Connection: close",
+    ]
+    if headers:
+        for name, value in headers.items():
+            lines.append(f"{name}: {value}")
+    req = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
     sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
     try:
         sock.settimeout(timeout)
@@ -521,6 +541,8 @@ def run_acceptance(nginx, module):
         write_index(prefix, "beta/index.html", "beta-body\n")
         write_index(prefix, "long/index.html", "long\n")
         write_index(prefix, "plain/index.html", "plain\n")
+        write_index(prefix, "iso-a/index.html", "iso-a\n")
+        write_index(prefix, "iso-b/index.html", "iso-b\n")
 
         write_text(
             os.path.join(prefix, "conf", "nginx.conf"),
@@ -714,6 +736,97 @@ def run_acceptance(nginx, module):
                 dump_owned(prefix, proc, after_plain_raw),
             )
         summary["concurrent"] = "12/12 mapped plain=200/plain"
+
+        iso_barrier = threading.Barrier(2, timeout=5.0)
+        iso_results = {}
+        iso_errors = []
+        iso_lock = threading.Lock()
+
+        def iso_one(name, method, path, token):
+            try:
+                iso_barrier.wait()
+                status, body, raw = http_exchange(
+                    port,
+                    method,
+                    path,
+                    timeout=8.0,
+                    headers={"X-Token": token},
+                )
+                with iso_lock:
+                    iso_results[name] = (status, body, raw)
+                    if name == "iso-a":
+                        if status != 200 or body != f"{name}\n":
+                            iso_errors.append((name, status, body))
+                    elif status not in (200, 405):
+                        iso_errors.append((name, status, body))
+            except Exception as exc:
+                with iso_lock:
+                    iso_errors.append((name, "exc", str(exc)))
+
+        iso_threads = [
+            threading.Thread(
+                target=iso_one, args=("iso-a", "GET", "/iso-a/?token=alpha", "alpha")
+            ),
+            threading.Thread(
+                target=iso_one, args=("iso-b", "POST", "/iso-b/?token=beta", "beta")
+            ),
+        ]
+        for thread in iso_threads:
+            thread.start()
+        for thread in iso_threads:
+            thread.join(timeout=10.0)
+        if any(thread.is_alive() for thread in iso_threads):
+            raise CheckError(
+                "request-read isolation requests did not finish",
+                dump_owned(prefix, proc),
+            )
+        if iso_errors:
+            raise CheckError(
+                f"request-read isolation HTTP mismatch: {iso_errors}",
+                dump_owned(prefix, proc),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        a_lines = [
+            line
+            for line in error_text.splitlines()
+            if "/iso-a/?token=alpha" in line and ("ISO_METHOD=" in line or "ISO_VARS=" in line)
+        ]
+        b_lines = [
+            line
+            for line in error_text.splitlines()
+            if "/iso-b/?token=beta" in line and ("ISO_METHOD=" in line or "ISO_VARS=" in line)
+        ]
+        if not any("ISO_METHOD=GET" in line for line in a_lines):
+            raise CheckError(
+                "iso-a must log GET without borrowing iso-b",
+                dump_owned(prefix, proc, error_text),
+            )
+        if not any("ISO_METHOD=POST" in line for line in b_lines):
+            raise CheckError(
+                "iso-b must log POST without borrowing iso-a",
+                dump_owned(prefix, proc, error_text),
+            )
+        if any("beta" in line for line in a_lines):
+            raise CheckError(
+                "iso-a logs must not contain iso-b token/header",
+                dump_owned(prefix, proc, "\n".join(a_lines)),
+            )
+        if any("alpha" in line for line in b_lines):
+            raise CheckError(
+                "iso-b logs must not contain iso-a token/header",
+                dump_owned(prefix, proc, "\n".join(b_lines)),
+            )
+        if not any("token=alpha" in line and "hdr=alpha" in line for line in a_lines):
+            raise CheckError(
+                "iso-a must log its own arg and header",
+                dump_owned(prefix, proc, "\n".join(a_lines)),
+            )
+        if not any("token=beta" in line and "hdr=beta" in line for line in b_lines):
+            raise CheckError(
+                "iso-b must log its own arg and header",
+                dump_owned(prefix, proc, "\n".join(b_lines)),
+            )
+        summary["concurrent"] = "12/12 mapped plain=200/plain isolation=ok"
 
         # Disconnect during 30s sleep -> access log 499, then routes still work.
         disc = socket.create_connection(("127.0.0.1", port), timeout=3.0)

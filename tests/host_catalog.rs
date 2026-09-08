@@ -154,6 +154,14 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
                     entry.name
                 );
             }
+            HostFamily::Request => {
+                assert_eq!(entry.sync, HostSyncKind::Sync);
+                assert!(
+                    entry.capabilities.contains(&HostCapability::RequestRead),
+                    "{} is a request-read host",
+                    entry.name
+                );
+            }
         }
     }
 }

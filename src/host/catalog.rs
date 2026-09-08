@@ -39,6 +39,18 @@ pub const NGX_COOKIE_TIME_NAME: &str = "ngx::cookie_time";
 pub const NGX_HTTP_TIME_NAME: &str = "ngx::http_time";
 pub const NGX_PARSE_HTTP_TIME_NAME: &str = "ngx::parse_http_time";
 
+pub const NGX_REQ_GET_METHOD_NAME: &str = "ngx::req::get_method";
+pub const NGX_REQ_HTTP_VERSION_NAME: &str = "ngx::req::http_version";
+pub const NGX_REQ_RAW_HEADER_NAME: &str = "ngx::req::raw_header";
+pub const NGX_REQ_GET_HEADERS_NAME: &str = "ngx::req::get_headers";
+pub const NGX_REQ_GET_URI_ARGS_NAME: &str = "ngx::req::get_uri_args";
+pub const NGX_REQ_GET_POST_ARGS_NAME: &str = "ngx::req::get_post_args";
+pub const NGX_REQ_IS_INTERNAL_NAME: &str = "ngx::req::is_internal";
+pub const NGX_REQ_START_TIME_NAME: &str = "ngx::req::start_time";
+pub const NGX_IS_SUBREQUEST_NAME: &str = "ngx::is_subrequest";
+pub const NGX_HEADERS_SENT_NAME: &str = "ngx::headers_sent";
+pub const NGX_VAR_GET_NAME: &str = "ngx::var::get";
+
 /// NGINX / OpenResty execution phases that can host a script.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NgxPhase {
@@ -92,6 +104,7 @@ pub enum HostFamily {
     Meta,
     Log,
     Constant,
+    Request,
 }
 
 /// Whether a host submits a future or returns synchronously.
@@ -111,6 +124,7 @@ pub enum HostCapability {
     Meta,
     Log,
     Constant,
+    RequestRead,
 }
 
 /// One production ngx host. Schema fields stay next to the catalog builder.
@@ -261,6 +275,92 @@ const TIME_CAPABILITIES: &[HostCapability] = &[HostCapability::Time];
 const META_CAPABILITIES: &[HostCapability] = &[HostCapability::Meta];
 const LOG_CAPABILITIES: &[HostCapability] = &[HostCapability::Log];
 const CONSTANT_CAPABILITIES: &[HostCapability] = &[HostCapability::Constant];
+const REQUEST_READ_CAPABILITIES: &[HostCapability] = &[HostCapability::RequestRead];
+
+/// `ngx.req.get_method` contexts from OpenResty v0.10.29.
+const PHASE_REQ_GET_METHOD: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Balancer,
+    NgxPhase::Log,
+];
+
+/// `ngx.req.http_version` / `ngx.req.raw_header`.
+const PHASE_REQ_HTTP_VERSION: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+];
+
+/// `ngx.req.get_uri_args`.
+const PHASE_REQ_GET_URI_ARGS: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Balancer,
+];
+
+/// `ngx.req.get_post_args`.
+const PHASE_REQ_GET_POST_ARGS: &[NgxPhase] = &[
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+];
+
+/// `ngx.req.get_headers`.
+const PHASE_REQ_GET_HEADERS: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+];
+
+/// `ngx.req.is_internal`, `ngx.req.start_time`, `ngx.is_subrequest`.
+const PHASE_REQ_FLAGS: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+];
+
+/// `ngx.headers_sent`.
+const PHASE_HEADERS_SENT: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+];
+
+/// `ngx.var.VARIABLE` read.
+const PHASE_VAR_GET: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Balancer,
+];
 
 /// OpenResty `ngx.log` / `ngx.get_phase` contexts: every script phase.
 const PHASE_ALL: &[NgxPhase] = PHASE_ESCAPE_URI;
@@ -665,6 +765,53 @@ const MANIFEST: &[HostManifestEntry] = &[
     const_entry("ngx::log_level::notice", "ngx.NOTICE", PHASE_ALL),
     const_entry("ngx::log_level::info", "ngx.INFO", PHASE_ALL),
     const_entry("ngx::log_level::debug", "ngx.DEBUG", PHASE_ALL),
+    request_entry(
+        NGX_REQ_GET_METHOD_NAME,
+        "ngx.req.get_method",
+        PHASE_REQ_GET_METHOD,
+    ),
+    request_entry(
+        NGX_REQ_HTTP_VERSION_NAME,
+        "ngx.req.http_version",
+        PHASE_REQ_HTTP_VERSION,
+    ),
+    request_entry(
+        NGX_REQ_RAW_HEADER_NAME,
+        "ngx.req.raw_header",
+        PHASE_REQ_HTTP_VERSION,
+    ),
+    request_entry(
+        NGX_REQ_GET_HEADERS_NAME,
+        "ngx.req.get_headers",
+        PHASE_REQ_GET_HEADERS,
+    ),
+    request_entry(
+        NGX_REQ_GET_URI_ARGS_NAME,
+        "ngx.req.get_uri_args",
+        PHASE_REQ_GET_URI_ARGS,
+    ),
+    request_entry(
+        NGX_REQ_GET_POST_ARGS_NAME,
+        "ngx.req.get_post_args",
+        PHASE_REQ_GET_POST_ARGS,
+    ),
+    request_entry(
+        NGX_REQ_IS_INTERNAL_NAME,
+        "ngx.req.is_internal",
+        PHASE_REQ_FLAGS,
+    ),
+    request_entry(
+        NGX_REQ_START_TIME_NAME,
+        "ngx.req.start_time",
+        PHASE_REQ_FLAGS,
+    ),
+    request_entry(NGX_IS_SUBREQUEST_NAME, "ngx.is_subrequest", PHASE_REQ_FLAGS),
+    request_entry(
+        NGX_HEADERS_SENT_NAME,
+        "ngx.headers_sent",
+        PHASE_HEADERS_SENT,
+    ),
+    request_entry(NGX_VAR_GET_NAME, "ngx.var.VARIABLE", PHASE_VAR_GET),
 ];
 
 const fn codec_entry(
@@ -738,6 +885,21 @@ const fn const_entry(
         sync: HostSyncKind::Sync,
         phases,
         capabilities: CONSTANT_CAPABILITIES,
+        openresty_name,
+    }
+}
+
+const fn request_entry(
+    name: &'static str,
+    openresty_name: &'static str,
+    phases: &'static [NgxPhase],
+) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::Request,
+        sync: HostSyncKind::Sync,
+        phases,
+        capabilities: REQUEST_READ_CAPABILITIES,
         openresty_name,
     }
 }
@@ -869,6 +1031,46 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             NGX_PARSE_HTTP_TIME_NAME,
             vec![HostParamSchema::value("text", HostTypeSchema::String)],
             HostTypeSchema::Optional(Box::new(HostTypeSchema::Int)),
+        ),
+        NGX_REQ_GET_METHOD_NAME => nullary(NGX_REQ_GET_METHOD_NAME, HostTypeSchema::String),
+        NGX_REQ_HTTP_VERSION_NAME => nullary(
+            NGX_REQ_HTTP_VERSION_NAME,
+            HostTypeSchema::Optional(Box::new(HostTypeSchema::Float)),
+        ),
+        NGX_REQ_RAW_HEADER_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_RAW_HEADER_NAME,
+            vec![HostParamSchema::value(
+                "no_request_line",
+                HostTypeSchema::Unknown,
+            )],
+            HostTypeSchema::String,
+        ),
+        NGX_REQ_GET_HEADERS_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_GET_HEADERS_NAME,
+            vec![
+                HostParamSchema::value("max_headers", HostTypeSchema::Unknown),
+                HostParamSchema::value("raw", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+        ),
+        NGX_REQ_GET_URI_ARGS_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_GET_URI_ARGS_NAME,
+            vec![HostParamSchema::value("max_args", HostTypeSchema::Unknown)],
+            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+        ),
+        NGX_REQ_GET_POST_ARGS_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_GET_POST_ARGS_NAME,
+            vec![HostParamSchema::value("max_args", HostTypeSchema::Unknown)],
+            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+        ),
+        NGX_REQ_IS_INTERNAL_NAME => nullary(NGX_REQ_IS_INTERNAL_NAME, HostTypeSchema::Bool),
+        NGX_REQ_START_TIME_NAME => nullary(NGX_REQ_START_TIME_NAME, HostTypeSchema::Float),
+        NGX_IS_SUBREQUEST_NAME => nullary(NGX_IS_SUBREQUEST_NAME, HostTypeSchema::Bool),
+        NGX_HEADERS_SENT_NAME => nullary(NGX_HEADERS_SENT_NAME, HostTypeSchema::Bool),
+        NGX_VAR_GET_NAME => HostFunctionSchema::with_return(
+            NGX_VAR_GET_NAME,
+            vec![HostParamSchema::value("name", HostTypeSchema::String)],
+            HostTypeSchema::Optional(Box::new(HostTypeSchema::String)),
         ),
         other => metadata_schema(other)
             .unwrap_or_else(|| panic!("ngx host catalog has no schema for {other}")),

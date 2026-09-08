@@ -185,3 +185,45 @@ typedef struct {
 } ngx_queue_t;
 
 ngx_queue_t ngx_posted_events;
+
+typedef struct {
+    size_t len;
+    unsigned char *data;
+} ngx_str_t;
+
+typedef struct {
+    unsigned len:28;
+    unsigned valid:1;
+    unsigned no_cacheable:1;
+    unsigned not_found:1;
+    unsigned escape:1;
+    unsigned char *data;
+} ngx_http_variable_value_t;
+
+ngx_http_variable_value_t *ngx_http_get_variable(void *r, ngx_str_t *name, ngx_uint_t key)
+{
+    static ngx_http_variable_value_t vv;
+    static unsigned char found[] = "stub-value";
+    static unsigned char empty[] = "";
+
+    (void)r;
+    (void)key;
+    if (name == NULL || name->data == NULL) {
+        return NULL;
+    }
+    if (name->len == 5 && memcmp(name->data, "empty", 5) == 0) {
+        memset(&vv, 0, sizeof(vv));
+        vv.valid = 1;
+        vv.len = 0;
+        vv.data = empty;
+        return &vv;
+    }
+    if (name->len == 5 && memcmp(name->data, "found", 5) == 0) {
+        memset(&vv, 0, sizeof(vv));
+        vv.valid = 1;
+        vv.len = 10;
+        vv.data = found;
+        return &vv;
+    }
+    return NULL;
+}

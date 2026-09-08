@@ -14,11 +14,14 @@ pub use catalog::{
     HostCapability, HostFamily, HostManifestEntry, HostSyncKind, NGX_COOKIE_TIME_NAME,
     NGX_CRC32_LONG_NAME, NGX_CRC32_SHORT_NAME, NGX_DECODE_ARGS_NAME, NGX_DECODE_BASE64_NAME,
     NGX_DECODE_BASE64MIME_NAME, NGX_ENCODE_ARGS_NAME, NGX_ENCODE_BASE64_NAME, NGX_ESCAPE_URI_NAME,
-    NGX_HMAC_SHA1_NAME, NGX_HTTP_TIME_NAME, NGX_LOCALTIME_NAME, NGX_MD5_BIN_NAME, NGX_MD5_NAME,
-    NGX_NOW_NAME, NGX_PARSE_HTTP_TIME_NAME, NGX_QUOTE_SQL_STR_NAME, NGX_SHA1_BIN_NAME,
+    NGX_HEADERS_SENT_NAME, NGX_HMAC_SHA1_NAME, NGX_HTTP_TIME_NAME, NGX_IS_SUBREQUEST_NAME,
+    NGX_LOCALTIME_NAME, NGX_MD5_BIN_NAME, NGX_MD5_NAME, NGX_NOW_NAME, NGX_PARSE_HTTP_TIME_NAME,
+    NGX_QUOTE_SQL_STR_NAME, NGX_REQ_GET_HEADERS_NAME, NGX_REQ_GET_METHOD_NAME,
+    NGX_REQ_GET_POST_ARGS_NAME, NGX_REQ_GET_URI_ARGS_NAME, NGX_REQ_HTTP_VERSION_NAME,
+    NGX_REQ_IS_INTERNAL_NAME, NGX_REQ_RAW_HEADER_NAME, NGX_REQ_START_TIME_NAME, NGX_SHA1_BIN_NAME,
     NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_TIME_NAME, NGX_TODAY_NAME, NGX_UNESCAPE_URI_NAME,
-    NGX_UPDATE_TIME_NAME, NGX_UTCTIME_NAME, NgxPhase, host_allowed_in_phase, manifest_entry,
-    ngx_host_catalog, ngx_host_manifest,
+    NGX_UPDATE_TIME_NAME, NGX_UTCTIME_NAME, NGX_VAR_GET_NAME, NgxPhase, host_allowed_in_phase,
+    manifest_entry, ngx_host_catalog, ngx_host_manifest,
 };
 pub use context::{
     AllowedOps, ScopeError, VmEntryObservation, capture_vm_entries, current_allowed_ops,
@@ -152,6 +155,17 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         "ngx::log_level::notice",
         "ngx::log_level::info",
         "ngx::log_level::debug",
+        NGX_REQ_GET_METHOD_NAME,
+        NGX_REQ_HTTP_VERSION_NAME,
+        NGX_REQ_RAW_HEADER_NAME,
+        NGX_REQ_GET_HEADERS_NAME,
+        NGX_REQ_GET_URI_ARGS_NAME,
+        NGX_REQ_GET_POST_ARGS_NAME,
+        NGX_REQ_IS_INTERNAL_NAME,
+        NGX_REQ_START_TIME_NAME,
+        NGX_IS_SUBREQUEST_NAME,
+        NGX_HEADERS_SENT_NAME,
+        NGX_VAR_GET_NAME,
     ]
 }
 
@@ -428,6 +442,47 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
         "ngx::log_level::debug",
         layout::helpers::meta::log_level_debug,
     );
+    vm.bind_static_args_function(
+        NGX_REQ_GET_METHOD_NAME,
+        layout::helpers::request::get_method,
+    );
+    vm.bind_static_args_function(
+        NGX_REQ_HTTP_VERSION_NAME,
+        layout::helpers::request::http_version,
+    );
+    vm.bind_static_args_function(
+        NGX_REQ_RAW_HEADER_NAME,
+        layout::helpers::request::raw_header,
+    );
+    vm.bind_static_args_function(
+        NGX_REQ_GET_HEADERS_NAME,
+        layout::helpers::request::get_headers,
+    );
+    vm.bind_static_args_function(
+        NGX_REQ_GET_URI_ARGS_NAME,
+        layout::helpers::request::get_uri_args,
+    );
+    vm.bind_static_args_function(
+        NGX_REQ_GET_POST_ARGS_NAME,
+        layout::helpers::request::get_post_args,
+    );
+    vm.bind_static_args_function(
+        NGX_REQ_IS_INTERNAL_NAME,
+        layout::helpers::request::is_internal,
+    );
+    vm.bind_static_args_function(
+        NGX_REQ_START_TIME_NAME,
+        layout::helpers::request::start_time,
+    );
+    vm.bind_static_args_function(
+        NGX_IS_SUBREQUEST_NAME,
+        layout::helpers::request::is_subrequest,
+    );
+    vm.bind_static_args_function(
+        NGX_HEADERS_SENT_NAME,
+        layout::helpers::request::headers_sent,
+    );
+    vm.bind_static_args_function(NGX_VAR_GET_NAME, layout::helpers::variables::get);
 }
 
 #[cfg(test)]
@@ -461,6 +516,15 @@ mod layout {
         }
         pub mod log {
             include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/log.rs"));
+        }
+        pub mod request {
+            include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/request.rs"));
+        }
+        pub mod variables {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/host/variables.rs"
+            ));
         }
 
         pub mod functions {
