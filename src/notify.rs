@@ -1,27 +1,49 @@
-//! Linux eventfd completion bridge and bounded worker-local ready queue.
+//! Linux eventfd wake bridge and bounded worker-local identity queue.
 //!
-//! Tokio tasks hold only [`CompletionSender`] and a [`CompletionPermit`]: they
-//! enqueue an owned [`SleepToken`] under a mutex, then write the eventfd.
-//! They never call NGINX APIs. The worker main thread registers the fd with
-//! NGINX (`ngx_get_connection`, then the same add_conn/add split as
-//! `ngx_add_channel_event`) and harvests completions into a ready queue for
-//! Task 5.
+//! Generic wakers hold only a [`CompletionSender`] and a
+//! [`RequestIdentity`]. They enqueue the identity under a mutex, then write
+//! the eventfd. They never call NGINX APIs and never hold VM/pool/request
+//! pointers. The worker main thread registers the fd with NGINX and harvests
+//! identities for exact-generation lookup.
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Wake, Waker};
 
 use nginx_sys::{
     NGX_USE_EPOLL_EVENT, ngx_close_connection, ngx_connection_t, ngx_cycle_t, ngx_event_actions,
     ngx_event_flags, ngx_free_connection, ngx_get_connection, ngx_int_t, ngx_uint_t,
 };
 
-use crate::sleep_binding::SleepToken;
-
-/// Maximum in-flight sleep operations per worker, including pending and ready.
+/// Maximum in-flight async host waits per worker.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 1024;
+
+/// Generation-safe request identity. Never a pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RequestIdentity {
+    generation: u64,
+    request_id: u64,
+}
+
+impl RequestIdentity {
+    pub fn new(generation: u64, request_id: u64) -> Self {
+        Self {
+            generation,
+            request_id,
+        }
+    }
+
+    pub fn generation(self) -> u64 {
+        self.generation
+    }
+
+    pub fn request_id(self) -> u64 {
+        self.request_id
+    }
+}
 
 /// Fail-closed notify / queue errors. Never panics on mutex poison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,9 +64,9 @@ pub enum NotifyError {
 impl fmt::Display for NotifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::QueueFull => write!(f, "sleep completion queue is full"),
+            Self::QueueFull => write!(f, "async host wait queue is full"),
             Self::ShutDown => write!(f, "worker runtime is shut down"),
-            Self::Poisoned => write!(f, "sleep completion queue mutex is poisoned"),
+            Self::Poisoned => write!(f, "async host wait queue mutex is poisoned"),
             Self::EventFdCreate(err) => write!(f, "eventfd create failed: errno {err}"),
             Self::EventFdRead(err) => write!(f, "eventfd read failed: errno {err}"),
             Self::EventFdWrite(err) => write!(f, "eventfd write failed: errno {err}"),
@@ -114,10 +136,10 @@ impl EventFdIo for LibcEventFdIo {
 }
 
 pub(crate) struct Pending {
-    pub(crate) queue: VecDeque<SleepToken>,
+    pub(crate) queue: VecDeque<RequestIdentity>,
     in_flight: usize,
     cap: usize,
-    cancelled: HashSet<SleepToken>,
+    cancelled: HashSet<RequestIdentity>,
 }
 
 #[derive(Clone, Copy)]
@@ -126,19 +148,10 @@ enum FdInner {
     Closed,
 }
 
-/// RAII in-flight slot: task -> pending queue -> ready queue.
-///
-/// Drop releases the slot unless [`CompletionPermit::disarm`] transferred
-/// ownership into the completion queues.
+/// RAII in-flight slot held by the waiting request until Ready/error/cancel.
 pub struct CompletionPermit {
     pending: Arc<Mutex<Pending>>,
     live: bool,
-}
-
-impl CompletionPermit {
-    fn disarm(&mut self) {
-        self.live = false;
-    }
 }
 
 impl Drop for CompletionPermit {
@@ -153,43 +166,60 @@ impl Drop for CompletionPermit {
     }
 }
 
-/// Send-only handle owned by Tokio tasks: SleepToken + duration live on the
-/// task; this handle is the completion sender / bridge Arc.
+/// Send/Sync handle owned by generic wakers: this handle is the queue sender
+/// / eventfd writer. Duplicate wakes are coalesced in the identity queue.
 #[derive(Clone)]
 pub struct CompletionSender {
     fd: Arc<Mutex<FdInner>>,
     accepting: Arc<AtomicBool>,
     io: Arc<dyn EventFdIo>,
     pending: Arc<Mutex<Pending>>,
+    wake_error: Arc<Mutex<Option<NotifyError>>>,
 }
 
 impl CompletionSender {
-    /// Enqueue `token` under the mutex, then write the eventfd.
-    ///
-    /// The mutex release happens-before the wake write. Completions are never
-    /// dropped on a full queue: capacity was reserved at submit. `permit` is
-    /// disarmed so the slot stays occupied until the worker takes the ready
-    /// token.
-    pub fn complete(
-        &self,
-        token: SleepToken,
-        mut permit: CompletionPermit,
-    ) -> Result<(), NotifyError> {
-        {
-            let mut pending = self.pending.lock().map_err(|_| NotifyError::Poisoned)?;
-            if pending.cancelled.remove(&token) {
-                return Ok(());
-            }
-            pending.queue.push_back(token);
-            permit.disarm();
-        }
+    /// Queue `identity` before writing the eventfd. Duplicate identities are
+    /// coalesced. Never silently drops a first wake. Invalidated identities
+    /// are ignored. After `reject_new`, wakes do not enqueue.
+    pub fn wake_identity(&self, identity: RequestIdentity) -> Result<(), NotifyError> {
         if !self.accepting.load(Ordering::Acquire) {
             return Ok(());
         }
-        self.wake()
+        {
+            let mut pending = self.pending.lock().map_err(|_| NotifyError::Poisoned)?;
+            if !self.accepting.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if pending.cancelled.contains(&identity) {
+                return Ok(());
+            }
+            if !pending.queue.iter().any(|queued| *queued == identity) {
+                pending.queue.push_back(identity);
+            }
+        }
+        match self.write_eventfd() {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.note_wake_error(err);
+                Err(err)
+            }
+        }
     }
 
-    fn wake(&self) -> Result<(), NotifyError> {
+    fn note_wake_error(&self, err: NotifyError) {
+        if matches!(err, NotifyError::ShutDown) {
+            return;
+        }
+        if let Ok(mut slot) = self.wake_error.lock() {
+            *slot = Some(err);
+        }
+    }
+
+    fn take_wake_error(&self) -> Option<NotifyError> {
+        self.wake_error.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    fn write_eventfd(&self) -> Result<(), NotifyError> {
         let buf = 1u64.to_ne_bytes();
         let guard = self.fd.lock().map_err(|_| NotifyError::Poisoned)?;
         let FdInner::Open(fd) = *guard else {
@@ -207,6 +237,29 @@ impl CompletionSender {
     }
 }
 
+/// Eventfd-backed waker: owned sender and request identity.
+pub struct NgxWake {
+    sender: CompletionSender,
+    identity: RequestIdentity,
+}
+
+impl Wake for NgxWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        if let Err(err) = self.sender.wake_identity(self.identity) {
+            self.sender.note_wake_error(err);
+        }
+    }
+}
+
+/// Build a Send/Sync waker that queues `identity` then writes eventfd.
+pub fn eventfd_waker(sender: CompletionSender, identity: RequestIdentity) -> Waker {
+    Waker::from(Arc::new(NgxWake { sender, identity }))
+}
+
 enum FdState {
     Local,
     Nginx { conn: *mut ngx_connection_t },
@@ -218,7 +271,7 @@ pub struct NotifyBridge {
     io: Arc<dyn EventFdIo>,
     accepting: Arc<AtomicBool>,
     pending: Arc<Mutex<Pending>>,
-    ready: Mutex<VecDeque<SleepToken>>,
+    ready: Mutex<VecDeque<RequestIdentity>>,
     sender: CompletionSender,
     fd: Arc<Mutex<FdInner>>,
     fd_state: FdState,
@@ -250,6 +303,7 @@ impl NotifyBridge {
             accepting: Arc::clone(&accepting),
             io: Arc::clone(&io),
             pending: Arc::clone(&pending),
+            wake_error: Arc::new(Mutex::new(None)),
         };
         Ok(Self {
             io,
@@ -285,7 +339,7 @@ impl NotifyBridge {
         Ok(self.lock_pending()?.in_flight)
     }
 
-    /// Reserve one completion slot before spawning. Rejects when full or shut down.
+    /// Reserve one wait slot before the initial poll. Rejects when full or shut down.
     pub fn try_reserve(&self) -> Result<CompletionPermit, NotifyError> {
         if !self.accepting.load(Ordering::Acquire) {
             return Err(NotifyError::ShutDown);
@@ -308,17 +362,23 @@ impl NotifyBridge {
         self.pending.lock().map_err(|_| NotifyError::Poisoned)
     }
 
-    fn lock_ready(&self) -> Result<std::sync::MutexGuard<'_, VecDeque<SleepToken>>, NotifyError> {
+    fn lock_ready(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, VecDeque<RequestIdentity>>, NotifyError> {
         self.ready.lock().map_err(|_| NotifyError::Poisoned)
     }
 
     /// Drain eventfd (EINTR retry, EAGAIN = already readable) then move every
-    /// pending completion onto the worker-local ready queue.
+    /// pending identity onto the worker-local ready queue, coalescing dups.
     pub fn harvest(&self) -> Result<(), NotifyError> {
         let read_result = self.drain_eventfd();
         let mut pending = self.lock_pending()?;
         let mut ready = self.lock_ready()?;
-        ready.extend(pending.queue.drain(..));
+        for identity in pending.queue.drain(..) {
+            if !ready.iter().any(|queued| *queued == identity) {
+                ready.push_back(identity);
+            }
+        }
         drop(ready);
         drop(pending);
         read_result
@@ -359,32 +419,33 @@ impl NotifyBridge {
         }
     }
 
-    /// Take every ready token and free their reserved in-flight slots.
-    pub fn take_ready(&self) -> Result<Vec<SleepToken>, NotifyError> {
+    /// Take every ready identity. Capacity is owned by [`CompletionPermit`].
+    pub fn take_ready(&self) -> Result<Vec<RequestIdentity>, NotifyError> {
         let mut ready = self.lock_ready()?;
-        let out: Vec<SleepToken> = ready.drain(..).collect();
-        drop(ready);
-        if !out.is_empty() {
-            let mut pending = self.lock_pending()?;
-            pending.in_flight = pending.in_flight.saturating_sub(out.len());
-        }
-        Ok(out)
+        Ok(ready.drain(..).collect())
     }
 
-    pub fn pop_ready(&self) -> Result<Option<SleepToken>, NotifyError> {
-        let mut ready = self.lock_ready()?;
-        let token = ready.pop_front();
-        drop(ready);
-        if token.is_some() {
-            let mut pending = self.lock_pending()?;
-            pending.in_flight = pending.in_flight.saturating_sub(1);
-        }
-        Ok(token)
+    pub fn pop_ready(&self) -> Result<Option<RequestIdentity>, NotifyError> {
+        Ok(self.lock_ready()?.pop_front())
     }
 
-    pub fn harvest_and_take_ready(&self) -> Result<Vec<SleepToken>, NotifyError> {
-        self.harvest()?;
-        self.take_ready()
+    pub fn harvest_and_take_ready(&self) -> Result<Vec<RequestIdentity>, NotifyError> {
+        let (ready, err) = self.harvest_take();
+        match err {
+            Some(err) if ready.is_empty() => Err(err),
+            _ => Ok(ready),
+        }
+    }
+
+    /// Move queued identities onto the ready list even when eventfd drain
+    /// fails, then report the drain/wake error alongside them.
+    pub(crate) fn harvest_take(&self) -> (Vec<RequestIdentity>, Option<NotifyError>) {
+        let harvest_err = self.harvest().err();
+        let wake_err = self.sender.take_wake_error();
+        match self.take_ready() {
+            Ok(ready) => (ready, harvest_err.or(wake_err)),
+            Err(err) => (Vec::new(), harvest_err.or(wake_err).or(Some(err))),
+        }
     }
 
     /// Register read readiness with NGINX. Must run on the worker main thread.
@@ -423,6 +484,9 @@ impl NotifyBridge {
             (*rev).set_channel(1);
             (*wev).set_channel(1);
             (*rev).handler = handler;
+            // Non-epoll `add_conn` may arm write. eventfd is writable; a NULL
+            // write handler would SIGSEGV if that write event fires.
+            (*wev).handler = Some(empty_write_handler);
         }
         let rc = unsafe { add_read_event(conn) };
         if rc != 0 {
@@ -434,10 +498,6 @@ impl NotifyBridge {
     }
 
     /// Stop accepting, then close the fd only after callers cannot write.
-    ///
-    /// Write and close share one mutex, so a cloned sender cannot write after
-    /// the fd is invalidated. NGINX path: `ngx_close_connection` unregisters
-    /// and closes while the mutex is held. Local path: `close(2)`. Idempotent.
     pub fn shutdown_fd(&mut self) {
         self.accepting.store(false, Ordering::Release);
         if self.stopped {
@@ -470,14 +530,14 @@ impl NotifyBridge {
         self.accepting.load(Ordering::Acquire)
     }
 
-    /// Remove `token` from pending/ready and mark it cancelled so a racing
-    /// Tokio `complete` drops its permit instead of re-enqueueing.
-    pub fn reclaim_token(&self, token: SleepToken) -> Result<bool, NotifyError> {
+    /// Invalidate `identity` so later wakes are ignored until
+    /// [`Self::forget_invalidated`].
+    pub fn invalidate(&self, identity: RequestIdentity) -> Result<bool, NotifyError> {
         let mut pending = self.lock_pending()?;
-        pending.cancelled.insert(token);
+        pending.cancelled.insert(identity);
         let mut found = false;
         pending.queue.retain(|queued| {
-            if *queued == token {
+            if *queued == identity {
                 found = true;
                 false
             } else {
@@ -486,35 +546,43 @@ impl NotifyBridge {
         });
         let mut ready = self.lock_ready()?;
         ready.retain(|queued| {
-            if *queued == token {
+            if *queued == identity {
                 found = true;
                 false
             } else {
                 true
             }
         });
-        if found {
-            pending.cancelled.remove(&token);
-            pending.in_flight = pending.in_flight.saturating_sub(1);
-        }
         Ok(found)
     }
 
-    /// Drop queued completions and zero in-flight. Worker exit uses this
-    /// after aborting tasks so leftover tokens never resume a request.
+    /// Drop the invalidate tombstone after the VM/future for `identity` has
+    /// been dropped. Late stale wakes are ignored by generation lookup.
+    pub fn forget_invalidated(&self, identity: RequestIdentity) -> Result<(), NotifyError> {
+        self.lock_pending()?.cancelled.remove(&identity);
+        Ok(())
+    }
+
+    /// Drop queued identities. Worker exit uses this after invalidating
+    /// senders so leftover wakes never resume a request.
     pub fn reclaim_all(&self) -> Result<(), NotifyError> {
         let mut pending = self.lock_pending()?;
         let mut ready = self.lock_ready()?;
         pending.queue.clear();
         ready.clear();
-        pending.cancelled.clear();
         pending.in_flight = 0;
+        pending.cancelled.clear();
         Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn pending_arc(&self) -> Arc<Mutex<Pending>> {
         Arc::clone(&self.pending)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancelled_len(&self) -> Result<usize, NotifyError> {
+        Ok(self.lock_pending()?.cancelled.len())
     }
 
     #[cfg(test)]
@@ -533,8 +601,24 @@ impl Drop for NotifyBridge {
     }
 }
 
+unsafe extern "C" fn empty_write_handler(_ev: *mut nginx_sys::ngx_event_t) {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AddReadAction {
+    AddConn,
+    AddEpollIn,
+}
+
 /// Same split as NGINX `ngx_add_channel_event`: `add_conn` when it is not
 /// epoll (epoll `add_conn` is edge-triggered and also arms `EPOLLOUT`).
+fn add_read_action(has_add_conn: bool, use_epoll: bool) -> AddReadAction {
+    if has_add_conn && !use_epoll {
+        AddReadAction::AddConn
+    } else {
+        AddReadAction::AddEpollIn
+    }
+}
+
 /// Bindgen does not export `NGX_READ_EVENT`; the pinned epoll path uses
 /// `add` with `EPOLLIN`.
 unsafe fn add_read_event(conn: *mut ngx_connection_t) -> ngx_int_t {
@@ -542,100 +626,85 @@ unsafe fn add_read_event(conn: *mut ngx_connection_t) -> ngx_int_t {
         let actions = &*core::ptr::addr_of!(ngx_event_actions);
         (actions.add_conn, actions.add, ngx_event_flags)
     };
-    if let Some(add_conn) = add_conn {
-        if (flags & NGX_USE_EPOLL_EVENT as ngx_uint_t) == 0 {
-            return unsafe { add_conn(conn) };
-        }
-    }
-    match add {
-        Some(add) => {
-            let rev = unsafe { (*conn).read };
-            unsafe { add(rev, libc::EPOLLIN as ngx_int_t, 0) }
-        }
-        None => -1,
+    let use_epoll = (flags & NGX_USE_EPOLL_EVENT as ngx_uint_t) != 0;
+    match add_read_action(add_conn.is_some(), use_epoll) {
+        AddReadAction::AddConn => unsafe { add_conn.expect("add_conn present")(conn) },
+        AddReadAction::AddEpollIn => match add {
+            Some(add) => {
+                let rev = unsafe { (*conn).read };
+                unsafe { add(rev, libc::EPOLLIN as ngx_int_t, 0) }
+            }
+            None => -1,
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicI32, AtomicUsize};
     use std::thread;
     use std::time::Duration;
 
-    fn token(id: u64) -> SleepToken {
-        SleepToken::from_raw(1, id)
+    fn identity(id: u64) -> RequestIdentity {
+        RequestIdentity::new(1, id)
+    }
+
+    enum IoScript {
+        Real,
+        Err(i32),
+        Bytes(usize),
     }
 
     struct SpyIo {
         inner: LibcEventFdIo,
-        pending: StdMutex<Option<Arc<Mutex<Pending>>>>,
-        len_at_write: AtomicUsize,
         writes: AtomicUsize,
-        reads: AtomicUsize,
-        closed: AtomicBool,
         write_after_close: AtomicBool,
-        read_script: StdMutex<Vec<IoScript>>,
-        write_script: StdMutex<Vec<IoScript>>,
-    }
-
-    #[derive(Clone, Copy)]
-    enum IoScript {
-        Err(i32),
-        Bytes(usize),
-        Real,
+        write_script: Mutex<Vec<IoScript>>,
+        read_script: Mutex<Vec<IoScript>>,
+        closed: AtomicBool,
+        eventfd_flags: AtomicI32,
     }
 
     impl SpyIo {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 inner: LibcEventFdIo,
-                pending: StdMutex::new(None),
-                len_at_write: AtomicUsize::new(0),
                 writes: AtomicUsize::new(0),
-                reads: AtomicUsize::new(0),
-                closed: AtomicBool::new(false),
                 write_after_close: AtomicBool::new(false),
-                read_script: StdMutex::new(Vec::new()),
-                write_script: StdMutex::new(Vec::new()),
+                write_script: Mutex::new(Vec::new()),
+                read_script: Mutex::new(Vec::new()),
+                closed: AtomicBool::new(false),
+                eventfd_flags: AtomicI32::new(0),
             })
-        }
-
-        fn bind_pending(&self, pending: Arc<Mutex<Pending>>) {
-            *self.pending.lock().expect("spy pending") = Some(pending);
         }
     }
 
     impl EventFdIo for SpyIo {
         fn eventfd(&self, initval: u32, flags: i32) -> Result<RawFd, i32> {
+            self.eventfd_flags.store(flags, Ordering::SeqCst);
             self.inner.eventfd(initval, flags)
         }
 
         fn read(&self, fd: RawFd, buf: &mut [u8]) -> Result<usize, i32> {
-            self.reads.fetch_add(1, Ordering::SeqCst);
-            let script = self.read_script.lock().expect("read script").pop();
+            let script = self.read_script.lock().unwrap().pop();
             match script {
                 Some(IoScript::Err(err)) => Err(err),
-                Some(IoScript::Bytes(n)) => Ok(n.min(buf.len())),
-                Some(IoScript::Real) | None => self.inner.read(fd, buf),
+                Some(IoScript::Bytes(n)) => Ok(n),
+                _ => self.inner.read(fd, buf),
             }
         }
 
         fn write(&self, fd: RawFd, buf: &[u8]) -> Result<usize, i32> {
-            self.writes.fetch_add(1, Ordering::SeqCst);
             if self.closed.load(Ordering::SeqCst) {
                 self.write_after_close.store(true, Ordering::SeqCst);
             }
-            if let Some(pending) = self.pending.lock().expect("spy pending").as_ref() {
-                let len = pending.lock().map(|p| p.queue.len()).unwrap_or(0);
-                self.len_at_write.store(len, Ordering::SeqCst);
-            }
-            let script = self.write_script.lock().expect("write script").pop();
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            let script = self.write_script.lock().unwrap().pop();
             match script {
                 Some(IoScript::Err(err)) => Err(err),
-                Some(IoScript::Bytes(n)) => Ok(n.min(buf.len())),
-                Some(IoScript::Real) | None => self.inner.write(fd, buf),
+                Some(IoScript::Bytes(n)) => Ok(n),
+                _ => self.inner.write(fd, buf),
             }
         }
 
@@ -651,15 +720,17 @@ mod tests {
 
     fn bridge_with_spy(cap: usize) -> (NotifyBridge, Arc<SpyIo>) {
         let spy = SpyIo::new();
-        let bridge =
-            NotifyBridge::with_io(Arc::clone(&spy) as Arc<dyn EventFdIo>, cap).expect("eventfd");
-        spy.bind_pending(bridge.pending_arc());
+        let bridge = NotifyBridge::with_io(Arc::clone(&spy) as Arc<dyn EventFdIo>, cap).unwrap();
         (bridge, spy)
     }
 
     #[test]
     fn eventfd_is_nonblock_and_cloexec() {
-        let bridge = NotifyBridge::new().expect("eventfd");
+        let (bridge, spy) = bridge_with_spy(1);
+        assert_eq!(
+            spy.eventfd_flags.load(Ordering::SeqCst),
+            libc::EFD_NONBLOCK | libc::EFD_CLOEXEC
+        );
         let fl = bridge.fcntl(libc::F_GETFL).expect("F_GETFL");
         assert_ne!(fl & libc::O_NONBLOCK, 0, "EFD_NONBLOCK must set O_NONBLOCK");
         let fdfl = bridge.fcntl(libc::F_GETFD).expect("F_GETFD");
@@ -671,76 +742,19 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_happens_before_wake_write() {
-        let (bridge, spy) = bridge_with_spy(8);
-        let permit = bridge.try_reserve().unwrap();
-        bridge.sender().complete(token(1), permit).unwrap();
+    fn add_read_event_matches_nginx_channel_split() {
         assert_eq!(
-            spy.len_at_write.load(Ordering::SeqCst),
-            1,
-            "queue must contain the completion before the wake write"
+            add_read_action(true, true),
+            AddReadAction::AddEpollIn,
+            "epoll must use add(rev, EPOLLIN), not add_conn"
         );
-        assert!(spy.writes.load(Ordering::SeqCst) >= 1);
-    }
-
-    #[test]
-    fn one_completion_is_harvested_with_payload() {
-        let bridge = NotifyBridge::new().unwrap();
-        let permit = bridge.try_reserve().unwrap();
-        bridge.sender().complete(token(7), permit).unwrap();
-        let ready = bridge.harvest_and_take_ready().unwrap();
-        assert_eq!(ready, vec![token(7)]);
-        assert_eq!(bridge.in_flight().unwrap(), 0);
-    }
-
-    #[test]
-    fn many_coalesced_completions_drain_together() {
-        let (bridge, spy) = bridge_with_spy(8);
-        for id in 1..=4 {
-            let permit = bridge.try_reserve().unwrap();
-            bridge.sender().complete(token(id), permit).unwrap();
-        }
-        spy.read_script.lock().unwrap().clear();
-        let ready = bridge.harvest_and_take_ready().unwrap();
         assert_eq!(
-            ready,
-            vec![token(1), token(2), token(3), token(4)],
-            "one harvest must take every queued completion after coalesced writes"
+            add_read_action(true, false),
+            AddReadAction::AddConn,
+            "non-epoll must use add_conn"
         );
-        assert_eq!(bridge.in_flight().unwrap(), 0);
-    }
-
-    #[test]
-    fn multiple_completions_per_read_do_not_require_one_read_each() {
-        let (bridge, spy) = bridge_with_spy(8);
-        for id in 10..=12 {
-            let permit = bridge.try_reserve().unwrap();
-            bridge.sender().complete(token(id), permit).unwrap();
-        }
-        let before = spy.reads.load(Ordering::SeqCst);
-        let ready = bridge.harvest_and_take_ready().unwrap();
-        let reads = spy.reads.load(Ordering::SeqCst) - before;
-        assert_eq!(ready.len(), 3);
-        assert!(
-            reads <= 2,
-            "eventfd counter coalesces; harvest should not need one successful read per completion, got {reads}"
-        );
-    }
-
-    #[test]
-    fn capacity_rejects_before_spawn_and_recovers_after_drain() {
-        let bridge = NotifyBridge::with_capacity(1).unwrap();
-        let permit = bridge.try_reserve().unwrap();
-        assert_eq!(
-            bridge.try_reserve().map(|_| ()),
-            Err(NotifyError::QueueFull)
-        );
-        bridge.sender().complete(token(1), permit).unwrap();
-        let ready = bridge.harvest_and_take_ready().unwrap();
-        assert_eq!(ready, vec![token(1)]);
-        let permit = bridge.try_reserve().unwrap();
-        bridge.sender().complete(token(2), permit).unwrap();
-        assert_eq!(bridge.harvest_and_take_ready().unwrap(), vec![token(2)]);
+        assert_eq!(add_read_action(false, true), AddReadAction::AddEpollIn);
+        assert_eq!(add_read_action(false, false), AddReadAction::AddEpollIn);
     }
 
     #[test]
@@ -759,6 +773,64 @@ mod tests {
     }
 
     #[test]
+    fn coalesced_duplicate_wake_enqueues_once() {
+        let bridge = NotifyBridge::new().unwrap();
+        let waker = eventfd_waker(bridge.sender(), identity(3));
+        waker.wake_by_ref();
+        waker.wake_by_ref();
+        waker.wake_by_ref();
+        assert_eq!(bridge.harvest_and_take_ready().unwrap(), vec![identity(3)]);
+    }
+
+    #[test]
+    fn cached_waker_repeated_wake_after_harvest_enqueues_again() {
+        let bridge = NotifyBridge::new().unwrap();
+        let waker = eventfd_waker(bridge.sender(), identity(3));
+        waker.wake_by_ref();
+        assert_eq!(bridge.harvest_and_take_ready().unwrap(), vec![identity(3)]);
+        waker.wake_by_ref();
+        waker.wake_by_ref();
+        assert_eq!(
+            bridge.harvest_and_take_ready().unwrap(),
+            vec![identity(3)],
+            "a cached waker must be able to wake again after harvest"
+        );
+    }
+
+    #[test]
+    fn many_coalesced_identities_drain_together() {
+        let bridge = NotifyBridge::new().unwrap();
+        for id in 1..=4 {
+            bridge.sender().wake_identity(identity(id)).unwrap();
+        }
+        assert_eq!(
+            bridge.harvest_and_take_ready().unwrap(),
+            vec![identity(1), identity(2), identity(3), identity(4)],
+            "one harvest must take every queued identity after coalesced writes"
+        );
+    }
+
+    #[test]
+    fn queue_identity_before_eventfd_write() {
+        let (bridge, spy) = bridge_with_spy(4);
+        spy.write_script
+            .lock()
+            .unwrap()
+            .push(IoScript::Err(libc::EIO));
+        let err = bridge.sender().wake_identity(identity(9)).unwrap_err();
+        assert_eq!(err, NotifyError::EventFdWrite(libc::EIO));
+        spy.read_script
+            .lock()
+            .unwrap()
+            .push(IoScript::Err(libc::EAGAIN));
+        assert_eq!(
+            bridge.harvest_and_take_ready().unwrap(),
+            vec![identity(9)],
+            "failed wake must not drop the already-enqueued identity"
+        );
+    }
+
+    #[test]
     fn eintr_on_write_is_retried() {
         let (bridge, spy) = bridge_with_spy(4);
         spy.write_script.lock().unwrap().push(IoScript::Real);
@@ -766,37 +838,34 @@ mod tests {
             .lock()
             .unwrap()
             .push(IoScript::Err(libc::EINTR));
-        let permit = bridge.try_reserve().unwrap();
-        bridge.sender().complete(token(3), permit).unwrap();
-        assert_eq!(bridge.harvest_and_take_ready().unwrap(), vec![token(3)]);
+        bridge.sender().wake_identity(identity(3)).unwrap();
+        assert_eq!(bridge.harvest_and_take_ready().unwrap(), vec![identity(3)]);
     }
 
     #[test]
     fn eintr_on_read_is_retried() {
         let (bridge, spy) = bridge_with_spy(4);
-        let permit = bridge.try_reserve().unwrap();
-        bridge.sender().complete(token(4), permit).unwrap();
+        bridge.sender().wake_identity(identity(4)).unwrap();
         spy.read_script.lock().unwrap().push(IoScript::Real);
         spy.read_script
             .lock()
             .unwrap()
             .push(IoScript::Err(libc::EINTR));
-        assert_eq!(bridge.harvest_and_take_ready().unwrap(), vec![token(4)]);
+        assert_eq!(bridge.harvest_and_take_ready().unwrap(), vec![identity(4)]);
     }
 
     #[test]
     fn eagain_on_read_is_already_readable_and_still_drains_queue() {
         let (bridge, spy) = bridge_with_spy(4);
-        let permit = bridge.try_reserve().unwrap();
-        bridge.sender().complete(token(5), permit).unwrap();
+        bridge.sender().wake_identity(identity(5)).unwrap();
         spy.read_script
             .lock()
             .unwrap()
             .push(IoScript::Err(libc::EAGAIN));
         assert_eq!(
             bridge.harvest_and_take_ready().unwrap(),
-            vec![token(5)],
-            "EAGAIN means the counter is already drained; queued completions must still appear"
+            vec![identity(5)],
+            "EAGAIN means the counter is already drained; queued identities must still appear"
         );
     }
 
@@ -807,20 +876,28 @@ mod tests {
             .lock()
             .unwrap()
             .push(IoScript::Err(libc::EAGAIN));
-        let permit = bridge.try_reserve().unwrap();
-        bridge.sender().complete(token(6), permit).unwrap();
-        assert_eq!(bridge.harvest_and_take_ready().unwrap(), vec![token(6)]);
+        bridge.sender().wake_identity(identity(6)).unwrap();
+        assert_eq!(bridge.harvest_and_take_ready().unwrap(), vec![identity(6)]);
     }
 
     #[test]
-    fn short_read_is_a_hard_error_and_does_not_drop_the_completion() {
+    fn short_read_is_a_hard_error_and_does_not_drop_the_identity() {
         let (bridge, spy) = bridge_with_spy(4);
-        let permit = bridge.try_reserve().unwrap();
-        bridge.sender().complete(token(8), permit).unwrap();
+        bridge.sender().wake_identity(identity(8)).unwrap();
         spy.read_script.lock().unwrap().push(IoScript::Bytes(3));
         let err = bridge.harvest().expect_err("short read");
         assert_eq!(err, NotifyError::EventFdShortRead(3));
-        assert_eq!(bridge.take_ready().unwrap(), vec![token(8)]);
+        assert_eq!(bridge.take_ready().unwrap(), vec![identity(8)]);
+    }
+
+    #[test]
+    fn short_read_harvest_take_returns_identities_then_error() {
+        let (bridge, spy) = bridge_with_spy(4);
+        bridge.sender().wake_identity(identity(8)).unwrap();
+        spy.read_script.lock().unwrap().push(IoScript::Bytes(3));
+        let (ready, err) = bridge.harvest_take();
+        assert_eq!(ready, vec![identity(8)]);
+        assert_eq!(err, Some(NotifyError::EventFdShortRead(3)));
     }
 
     #[test]
@@ -831,35 +908,11 @@ mod tests {
     }
 
     #[test]
-    fn hard_write_is_surfaced_and_completion_stays_queued() {
-        let (bridge, spy) = bridge_with_spy(4);
-        spy.write_script
-            .lock()
-            .unwrap()
-            .push(IoScript::Err(libc::EIO));
-        let permit = bridge.try_reserve().unwrap();
-        assert_eq!(
-            bridge.sender().complete(token(9), permit),
-            Err(NotifyError::EventFdWrite(libc::EIO))
-        );
-        spy.read_script
-            .lock()
-            .unwrap()
-            .push(IoScript::Err(libc::EAGAIN));
-        assert_eq!(
-            bridge.harvest_and_take_ready().unwrap(),
-            vec![token(9)],
-            "failed wake must not drop the already-enqueued completion"
-        );
-    }
-
-    #[test]
     fn short_write_is_a_hard_error() {
         let (bridge, spy) = bridge_with_spy(4);
         spy.write_script.lock().unwrap().push(IoScript::Bytes(2));
-        let permit = bridge.try_reserve().unwrap();
         assert_eq!(
-            bridge.sender().complete(token(11), permit),
+            bridge.sender().wake_identity(identity(11)),
             Err(NotifyError::EventFdShortWrite(2))
         );
     }
@@ -875,12 +928,11 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_skips_wake_write_but_keeps_enqueued_completion() {
+    fn shutdown_skips_wake_write_and_does_not_enqueue() {
         let (mut bridge, spy) = bridge_with_spy(4);
-        let permit = bridge.try_reserve().unwrap();
         bridge.reject_new();
         let writes_before = spy.writes.load(Ordering::SeqCst);
-        bridge.sender().complete(token(12), permit).unwrap();
+        bridge.sender().wake_identity(identity(12)).unwrap();
         assert_eq!(
             spy.writes.load(Ordering::SeqCst),
             writes_before,
@@ -890,16 +942,31 @@ mod tests {
             .lock()
             .unwrap()
             .push(IoScript::Err(libc::EAGAIN));
-        assert_eq!(bridge.harvest_and_take_ready().unwrap(), vec![token(12)]);
+        assert!(
+            bridge.harvest_and_take_ready().unwrap().is_empty(),
+            "wake after reject_new must not enqueue"
+        );
         bridge.shutdown_fd();
+    }
+
+    #[test]
+    fn wake_after_reclaim_does_not_enqueue() {
+        let bridge = NotifyBridge::new().unwrap();
+        bridge.sender().wake_identity(identity(1)).unwrap();
+        bridge.reject_new();
+        bridge.reclaim_all().unwrap();
+        bridge.sender().wake_identity(identity(2)).unwrap();
+        assert!(
+            bridge.harvest_and_take_ready().unwrap().is_empty(),
+            "shutdown reclaim must not be followed by a new enqueue"
+        );
     }
 
     #[test]
     fn complete_after_close_does_not_write_closed_fd() {
         let (mut bridge, spy) = bridge_with_spy(4);
-        let permit = bridge.try_reserve().unwrap();
         bridge.shutdown_fd();
-        let _ = bridge.sender().complete(token(1), permit);
+        let _ = bridge.sender().wake_identity(identity(1));
         assert!(
             !spy.write_after_close.load(Ordering::SeqCst),
             "cloned sender must not write after close"
@@ -914,9 +981,8 @@ mod tests {
         let sender = bridge.sender();
         let mut joins = Vec::new();
         for id in 1..=8 {
-            let permit = bridge.try_reserve().unwrap();
             let sender = sender.clone();
-            joins.push(thread::spawn(move || sender.complete(token(id), permit)));
+            joins.push(thread::spawn(move || sender.wake_identity(identity(id))));
         }
         thread::sleep(Duration::from_millis(1));
         bridge.shutdown_fd();
@@ -930,52 +996,74 @@ mod tests {
     }
 
     #[test]
+    fn invalidate_drops_stale_identity() {
+        let bridge = NotifyBridge::new().unwrap();
+        bridge.sender().wake_identity(identity(1)).unwrap();
+        assert!(bridge.invalidate(identity(1)).unwrap());
+        assert!(bridge.harvest_and_take_ready().unwrap().is_empty());
+        bridge.sender().wake_identity(identity(1)).unwrap();
+        assert!(bridge.harvest_and_take_ready().unwrap().is_empty());
+        bridge.forget_invalidated(identity(1)).unwrap();
+        assert_eq!(bridge.cancelled_len().unwrap(), 0);
+    }
+
+    #[test]
+    fn repeated_invalidate_cleanup_does_not_grow_tombstones() {
+        let bridge = NotifyBridge::new().unwrap();
+        for id in 0..64 {
+            let identity = identity(id);
+            bridge.invalidate(identity).unwrap();
+            assert_eq!(bridge.cancelled_len().unwrap(), 1);
+            bridge.forget_invalidated(identity).unwrap();
+            assert_eq!(bridge.cancelled_len().unwrap(), 0);
+        }
+        assert_eq!(bridge.cancelled_len().unwrap(), 0);
+    }
+
+    #[test]
     fn poisoned_queue_does_not_panic() {
         let bridge = NotifyBridge::new().unwrap();
         let pending = bridge.pending_arc();
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
             let _guard = pending.lock().expect("lock before poison");
             panic!("test poison");
         }));
         std::panic::set_hook(prev);
         assert_eq!(bridge.try_reserve().map(|_| ()), Err(NotifyError::Poisoned));
-        let permit = CompletionPermit {
-            pending: bridge.pending_arc(),
-            live: true,
-        };
         assert_eq!(
-            bridge.sender().complete(token(1), permit),
+            bridge.sender().wake_identity(identity(1)),
             Err(NotifyError::Poisoned)
         );
         assert_eq!(bridge.harvest(), Err(NotifyError::Poisoned));
         assert_eq!(
             bridge.take_ready().expect("ready mutex is not poisoned"),
-            Vec::<SleepToken>::new()
+            Vec::<RequestIdentity>::new()
         );
     }
 
     #[test]
-    fn completion_sender_is_send_and_owns_no_nginx_pointers() {
-        fn assert_send<T: Send>() {}
-        assert_send::<CompletionSender>();
-        assert_send::<CompletionPermit>();
-        assert_send::<SleepToken>();
-        let name = std::any::type_name::<CompletionSender>();
-        assert!(
-            !name.contains("ngx_connection")
-                && !name.contains("ngx_http")
-                && !name.contains("ngx_pool")
-                && !name.contains("Request"),
-            "CompletionSender type must not mention NGINX data: {name}"
-        );
-        let permit_name = std::any::type_name::<CompletionPermit>();
-        assert!(
-            !permit_name.contains("ngx_connection")
-                && !permit_name.contains("ngx_http")
-                && !permit_name.contains("Request"),
-            "CompletionPermit type must not mention NGINX data: {permit_name}"
-        );
+    fn waker_is_send_sync_and_owns_no_nginx_pointers() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CompletionSender>();
+        assert_send_sync::<RequestIdentity>();
+        assert_send_sync::<NgxWake>();
+        for name in [
+            std::any::type_name::<CompletionSender>(),
+            std::any::type_name::<NgxWake>(),
+            std::any::type_name::<RequestIdentity>(),
+        ] {
+            assert!(
+                !name.contains("ngx_connection")
+                    && !name.contains("ngx_http")
+                    && !name.contains("ngx_pool")
+                    && !name.contains("*mut")
+                    && !name.contains("ngx_cycle"),
+                "waker/identity must not mention NGINX/VM data: {name}"
+            );
+        }
     }
+
+    use std::panic::AssertUnwindSafe;
 }

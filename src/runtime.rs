@@ -1,32 +1,31 @@
-//! Worker-local Tokio runtime for `tokio::time::sleep`.
+//! Worker-local Tokio runtime for polling generic host futures.
 //!
 //! Created in NGINX `init_process` after fork, only in `NGX_PROCESS_WORKER`
 //! or `NGX_PROCESS_SINGLE`. Helper, master, config, and `nginx -t` never
-//! create Tokio threads or the eventfd. Tokio tasks own only [`SleepToken`],
-//! an integer duration, a [`CompletionSender`], and a [`CompletionPermit`].
-//! They never hold NGINX request/pool/VM pointers and never call
-//! `ngx_post_event`.
+//! create Tokio threads or the eventfd. Wakers own only a
+//! [`crate::notify::CompletionSender`] and a
+//! [`crate::notify::RequestIdentity`]. They never hold NGINX request/pool/VM
+//! pointers and never call `ngx_post_event`.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::task::Waker;
 use std::time::Duration;
 
 use nginx_sys::{ngx_cycle_t, ngx_event_t, ngx_int_t, ngx_uint_t};
 use ngx::core::Status;
 use ngx::ffi::{NGX_LOG_ERR, NGX_LOG_NOTICE, NGX_PROCESS_SINGLE, NGX_PROCESS_WORKER, ngx_process};
 use ngx::ngx_log_error;
-use tokio::runtime::Runtime;
-use tokio::task::AbortHandle;
+use tokio::runtime::{Handle, Runtime};
 use vm::Program;
 
 use crate::notify::{
     CompletionPermit, CompletionSender, DEFAULT_MAX_IN_FLIGHT, NotifyBridge, NotifyError,
+    RequestIdentity, eventfd_waker,
 };
-use crate::request_state::AccessExec;
-use crate::sleep_binding::{SleepCoordinator, SleepOpsError, SleepSession, SleepToken};
+use crate::request_state::{AccessExec, AsyncWait, SubmitError};
 
 thread_local! {
     static WORKER: RefCell<Option<WorkerRuntime>> = const { RefCell::new(None) };
@@ -36,26 +35,16 @@ thread_local! {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeError {
     Notify(NotifyError),
-    SleepOps(SleepOpsError),
-    InvalidDuration,
     RuntimeBuild(String),
     AlreadyStarted,
-    DuplicateToken,
 }
 
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Notify(err) => write!(f, "{err}"),
-            Self::SleepOps(err) => write!(f, "{err}"),
-            Self::InvalidDuration => {
-                write!(f, "ngx::sleep duration is not a valid millisecond count")
-            }
             Self::RuntimeBuild(msg) => write!(f, "tokio runtime build failed: {msg}"),
             Self::AlreadyStarted => write!(f, "worker runtime is already started"),
-            Self::DuplicateToken => {
-                write!(f, "sleep token is already tracked by the worker runtime")
-            }
         }
     }
 }
@@ -68,12 +57,6 @@ impl From<NotifyError> for RuntimeError {
     }
 }
 
-impl From<SleepOpsError> for RuntimeError {
-    fn from(err: SleepOpsError) -> Self {
-        Self::SleepOps(err)
-    }
-}
-
 fn is_worker_or_single() -> bool {
     // SAFETY: `ngx_process` is NGINX process-lifetime state. Read on the
     // worker/main thread from `init_process`.
@@ -81,57 +64,11 @@ fn is_worker_or_single() -> bool {
     process == NGX_PROCESS_WORKER as ngx_uint_t || process == NGX_PROCESS_SINGLE as ngx_uint_t
 }
 
-/// Tokio task payload: no NGINX request, pool, VM, or raw pointer.
-struct SleepTask {
-    token: SleepToken,
-    duration_ms: u64,
-    sender: CompletionSender,
-    permit: CompletionPermit,
-}
-
-impl SleepTask {
-    async fn run(self) {
-        tokio::time::sleep(Duration::from_millis(self.duration_ms)).await;
-        let _ = self.sender.complete(self.token, self.permit);
-    }
-}
-
-/// Request-local sleep binding created on the worker main thread.
-///
-/// The [`SleepSession`] is not `Clone`. The completion handle is a clone of
-/// the worker-wide [`SleepCoordinator`].
-pub struct AccessSleepBinding {
-    session: SleepSession,
-    completion: SleepCoordinator,
-}
-
-impl AccessSleepBinding {
-    fn from_coordinator(coordinator: &SleepCoordinator) -> Result<Self, RuntimeError> {
-        Ok(Self {
-            session: SleepSession::new(coordinator)?,
-            completion: coordinator.clone(),
-        })
-    }
-
-    pub fn session_mut(&mut self) -> &mut SleepSession {
-        &mut self.session
-    }
-
-    pub fn completion(&self) -> &SleepCoordinator {
-        &self.completion
-    }
-
-    fn into_parts(self) -> (SleepSession, SleepCoordinator) {
-        (self.session, self.completion)
-    }
-}
-
-/// Per-worker Tokio runtime, eventfd bridge, and tracked abort handles.
+/// Per-worker Tokio runtime, eventfd bridge, and generation counter.
 pub struct WorkerRuntime {
     runtime: Option<Runtime>,
     notify: NotifyBridge,
-    tasks: std::sync::Mutex<HashMap<SleepToken, AbortHandle>>,
-    coordinator: SleepCoordinator,
+    next_generation: u64,
     stopped: bool,
 }
 
@@ -144,14 +81,13 @@ impl WorkerRuntime {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_time()
-            .thread_name("ngx-rustscript-sleep")
+            .thread_name("ngx-rustscript-async")
             .build()
             .map_err(|err| RuntimeError::RuntimeBuild(err.to_string()))?;
         Ok(Self {
             runtime: Some(runtime),
             notify: NotifyBridge::with_capacity(cap)?,
-            tasks: std::sync::Mutex::new(HashMap::new()),
-            coordinator: SleepCoordinator::new(),
+            next_generation: 1,
             stopped: false,
         })
     }
@@ -172,159 +108,65 @@ impl WorkerRuntime {
         self.notify.in_flight()
     }
 
-    /// Abort the matching sleep task and release its completion permit
-    /// whether the task is sleeping, queued, or already ready. Idempotent.
-    pub fn abort_sleep(&self, token: SleepToken) -> bool {
-        let aborted = match self.tasks.lock() {
-            Ok(mut tasks) => {
-                if let Some(handle) = tasks.remove(&token) {
-                    handle.abort();
-                    true
-                } else {
-                    false
-                }
-            }
-            Err(_) => false,
-        };
-        let reclaimed = self.notify.reclaim_token(token).unwrap_or(false);
-        aborted || reclaimed
+    pub fn handle(&self) -> Result<Handle, RuntimeError> {
+        self.runtime
+            .as_ref()
+            .map(|runtime| runtime.handle().clone())
+            .ok_or(NotifyError::ShutDown.into())
     }
 
-    /// Create a request-local non-`Clone` [`SleepSession`] from the worker-wide
-    /// coordinator and return the matching completion handle.
-    pub fn open_access_sleep(&self) -> Result<AccessSleepBinding, RuntimeError> {
-        AccessSleepBinding::from_coordinator(&self.coordinator)
+    /// Invalidate `identity` so stale wakes are ignored until forget.
+    pub fn invalidate(&self, identity: RequestIdentity) {
+        let _ = self.notify.invalidate(identity);
     }
 
-    /// Worker-main-thread access setup: bind one request-local sleep session.
+    pub fn forget_invalidated(&self, identity: RequestIdentity) {
+        let _ = self.notify.forget_invalidated(identity);
+    }
+
+    /// Worker-main-thread access setup: bind one request-local VM and bridge.
     pub fn bind_access_exec(
-        &self,
+        &mut self,
         program: Arc<Program>,
         request_id: u64,
     ) -> Result<AccessExec, String> {
-        let (session, completion) = self
-            .open_access_sleep()
-            .map_err(|err| err.to_string())?
-            .into_parts();
-        AccessExec::bind_program(program, request_id, session, completion)
-    }
-
-    /// Submit one Task 3 `(SleepToken, ms)` claim to a real `tokio::time::sleep`.
-    pub fn submit_sleep(&self, token: SleepToken, ms: i64) -> Result<(), RuntimeError> {
         if self.stopped || !self.notify.is_accepting() {
-            return Err(NotifyError::ShutDown.into());
+            return Err(NotifyError::ShutDown.to_string());
         }
-        let duration_ms = u64::try_from(ms).map_err(|_| RuntimeError::InvalidDuration)?;
-        let permit = self.notify.try_reserve()?;
-        self.spawn_sleep(token, duration_ms, permit)
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
+        if self.next_generation == 0 {
+            self.next_generation = 1;
+        }
+        let handle = self.handle().map_err(|err| err.to_string())?;
+        AccessExec::bind_program(program, request_id, generation, handle)
     }
 
-    fn spawn_sleep(
-        &self,
-        token: SleepToken,
-        duration_ms: u64,
-        permit: CompletionPermit,
-    ) -> Result<(), RuntimeError> {
-        let runtime = self.runtime.as_ref().ok_or(NotifyError::ShutDown)?;
-        let sender = self.notify.sender();
-        let handle = runtime.spawn(
-            SleepTask {
-                token,
-                duration_ms,
-                sender,
-                permit,
-            }
-            .run(),
-        );
-        match self.tasks.lock() {
-            Ok(mut tasks) => match tasks.entry(token) {
-                std::collections::hash_map::Entry::Occupied(_) => {
-                    handle.abort();
-                    return Err(RuntimeError::DuplicateToken);
-                }
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(handle.abort_handle());
-                }
-            },
-            Err(_) => {
-                handle.abort();
-                return Err(NotifyError::Poisoned.into());
-            }
-        }
-        Ok(())
-    }
-
-    /// Claim every queued Task 3 `(token, ms)` submission and spawn it.
-    ///
-    /// Capacity is reserved before `claim_submission`, so a full queue does
-    /// not consume the Task 3 item.
-    pub fn submit_claimed(&self, coordinator: &SleepCoordinator) -> Result<usize, RuntimeError> {
-        let mut n = 0;
-        loop {
-            if self.stopped || !self.notify.is_accepting() {
-                return Err(NotifyError::ShutDown.into());
-            }
-            let permit = match self.notify.try_reserve() {
-                Ok(permit) => permit,
-                Err(NotifyError::QueueFull) if n > 0 => return Ok(n),
-                Err(err) => return Err(err.into()),
-            };
-            match coordinator.claim_submission()? {
-                Some((token, ms)) => {
-                    let duration_ms =
-                        u64::try_from(ms).map_err(|_| RuntimeError::InvalidDuration)?;
-                    self.spawn_sleep(token, duration_ms, permit)?;
-                    n += 1;
-                }
-                None => return Ok(n),
-            }
+    pub fn drain_ready(&mut self) -> Result<Vec<RequestIdentity>, RuntimeError> {
+        let (ready, err) = self.drain_ready_outcome();
+        match err {
+            Some(err) if ready.is_empty() => Err(err),
+            _ => Ok(ready),
         }
     }
 
-    pub fn on_notify_readable(&mut self) -> Result<(), NotifyError> {
-        self.notify.harvest()
+    pub(crate) fn drain_ready_outcome(&mut self) -> (Vec<RequestIdentity>, Option<RuntimeError>) {
+        let (ready, err) = self.notify.harvest_take();
+        (ready, err.map(RuntimeError::from))
     }
 
-    pub fn pop_ready(&mut self) -> Result<Option<SleepToken>, NotifyError> {
-        let token = self.notify.pop_ready()?;
-        if let Some(token) = token {
-            if let Ok(mut tasks) = self.tasks.lock() {
-                tasks.remove(&token);
-            }
-            Ok(Some(token))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn drain_ready(&mut self) -> Result<Vec<SleepToken>, RuntimeError> {
-        self.notify.harvest()?;
-        let ready = self.notify.take_ready()?;
-        if let Ok(mut tasks) = self.tasks.lock() {
-            for token in &ready {
-                tasks.remove(token);
-            }
-        }
-        Ok(ready)
-    }
-
-    /// Unregister NGINX, abort tracked tasks, shut down Tokio, then close fd.
+    /// Reject new work, invalidate senders, drop the runtime (cancels timers
+    /// and in-flight futures), then close eventfd with the existing fd gate.
     pub fn shutdown(&mut self) {
         if self.stopped {
             return;
         }
         self.stopped = true;
         self.notify.reject_new();
-        if let Ok(mut tasks) = self.tasks.lock() {
-            for handle in tasks.values() {
-                handle.abort();
-            }
-            tasks.clear();
-        }
+        let _ = self.notify.reclaim_all();
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_timeout(Duration::from_secs(5));
         }
-        let _ = self.notify.reclaim_all();
         self.notify.shutdown_fd();
     }
 
@@ -336,6 +178,31 @@ impl WorkerRuntime {
     }
 }
 
+impl AsyncWait for WorkerRuntime {
+    fn reserve(&self) -> Result<CompletionPermit, SubmitError> {
+        if self.stopped || !self.notify.is_accepting() {
+            return Err(SubmitError::Closed);
+        }
+        match self.notify.try_reserve() {
+            Ok(permit) => Ok(permit),
+            Err(NotifyError::QueueFull) => Err(SubmitError::Full),
+            Err(_) => Err(SubmitError::Closed),
+        }
+    }
+
+    fn waker(&self, identity: RequestIdentity) -> Waker {
+        eventfd_waker(self.sender(), identity)
+    }
+
+    fn invalidate(&self, identity: RequestIdentity) {
+        WorkerRuntime::invalidate(self, identity);
+    }
+
+    fn forget_invalidated(&self, identity: RequestIdentity) {
+        WorkerRuntime::forget_invalidated(self, identity);
+    }
+}
+
 impl Drop for WorkerRuntime {
     fn drop(&mut self) {
         self.shutdown();
@@ -343,9 +210,6 @@ impl Drop for WorkerRuntime {
 }
 
 /// NGINX worker `init_process` entry: create runtime + eventfd + register read.
-///
-/// Helper processes return without starting. Must not run during
-/// configuration, master, or `nginx -t`.
 ///
 /// # Safety
 ///
@@ -397,12 +261,15 @@ unsafe extern "C" fn eventfd_read_handler(ev: *mut ngx_event_t) {
         unsafe { (*ev).log }
     };
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let ready = WORKER.with(|slot| match slot.borrow_mut().as_mut() {
-            Some(worker) => worker.drain_ready(),
-            None => Ok(Vec::new()),
-        })?;
-        crate::access::on_sleep_ready(ready);
-        Ok::<(), RuntimeError>(())
+        let (ready, err) = WORKER.with(|slot| match slot.borrow_mut().as_mut() {
+            Some(worker) => worker.drain_ready_outcome(),
+            None => (Vec::new(), None),
+        });
+        crate::access::on_async_ready(ready);
+        match err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }));
     match result {
         Ok(Ok(())) => {}
@@ -457,10 +324,12 @@ pub unsafe extern "C" fn exit_process(_cycle: *mut ngx_cycle_t) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sleep_binding::SleepSession;
+    use crate::config::compile_rss_source;
+    use crate::notify::RequestIdentity;
+    use crate::request_state::{AccessStatus, IdentityRegistry};
     use std::os::unix::io::RawFd;
     use std::time::{Duration, Instant};
-    use vm::{CallOutcome, HostArgsFunction, Value};
+    use vm::VmStatus;
 
     fn wait_readable(fd: RawFd, timeout: Duration) -> bool {
         let start = Instant::now();
@@ -478,92 +347,49 @@ mod tests {
         false
     }
 
-    fn token(id: u64) -> SleepToken {
-        SleepToken::from_raw(1, id)
+    fn sleep_once(ms: i64) -> Arc<Program> {
+        compile_rss_source(&format!("use ngx;\nngx::sleep({ms});\n")).expect("compile")
     }
 
     #[test]
-    fn sleep_task_payload_contains_no_nginx_data() {
-        fn assert_send<T: Send>() {}
-        assert_send::<SleepTask>();
-        assert_send::<SleepToken>();
-        assert_send::<u64>();
-        assert_send::<CompletionSender>();
-        assert_send::<CompletionPermit>();
+    fn waker_payload_contains_no_nginx_data() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CompletionSender>();
+        assert_send_sync::<RequestIdentity>();
         for name in [
-            std::any::type_name::<SleepTask>(),
             std::any::type_name::<CompletionSender>(),
-            std::any::type_name::<CompletionPermit>(),
+            std::any::type_name::<RequestIdentity>(),
+            std::any::type_name::<crate::notify::NgxWake>(),
         ] {
             assert!(
                 !name.contains("ngx_connection")
                     && !name.contains("ngx_http")
                     && !name.contains("ngx_pool")
                     && !name.contains("ngx_cycle")
-                    && !name.contains("Request")
-                    && !name.contains("Vm"),
-                "task payload must not mention NGINX/VM data: {name}"
+                    && !name.contains("*mut"),
+                "waker payload must not mention NGINX/VM data: {name}"
             );
         }
     }
 
     #[test]
-    fn real_tokio_sleep_completion_wakes_eventfd_with_token() {
+    fn waiting_sleep_wakes_eventfd_and_resumes() {
         let mut worker = WorkerRuntime::start().unwrap();
-        let fd = worker.raw_fd().expect("eventfd");
-        worker.submit_sleep(token(1), 1).unwrap();
-        assert!(
-            wait_readable(fd, Duration::from_secs(2)),
-            "eventfd must become readable after tokio::time::sleep"
-        );
-        let ready = worker.drain_ready().unwrap();
-        assert_eq!(ready, vec![token(1)]);
-        worker.shutdown();
-    }
-
-    #[test]
-    fn zero_ms_sleep_still_delivers_payload_not_just_elapsed_time() {
-        let mut worker = WorkerRuntime::start().unwrap();
-        let fd = worker.raw_fd().expect("eventfd");
-        worker.submit_sleep(token(2), 0).unwrap();
-        assert!(wait_readable(fd, Duration::from_secs(2)));
-        assert_eq!(worker.drain_ready().unwrap(), vec![token(2)]);
-        worker.shutdown();
-    }
-
-    #[test]
-    fn many_sleeps_complete_without_loss() {
-        let mut worker = WorkerRuntime::start_with_capacity(16).unwrap();
-        let fd = worker.raw_fd().expect("eventfd");
-        for id in 1..=8 {
-            worker.submit_sleep(token(id), 0).unwrap();
-        }
-        let start = Instant::now();
-        let mut got = Vec::new();
-        while got.len() < 8 && start.elapsed() < Duration::from_secs(2) {
-            let _ = wait_readable(fd, Duration::from_millis(50));
-            got.extend(worker.drain_ready().unwrap());
-        }
-        got.sort_by_key(|t| t.op_id());
-        let expected: Vec<_> = (1..=8).map(token).collect();
-        assert_eq!(got, expected);
-        worker.shutdown();
-    }
-
-    #[test]
-    fn capacity_rejection_recovers_after_drain() {
-        let mut worker = WorkerRuntime::start_with_capacity(1).unwrap();
-        worker.submit_sleep(token(1), 0).unwrap();
+        let mut exec = worker.bind_access_exec(sleep_once(5), 1).unwrap();
+        let mut registry = IdentityRegistry::with_capacity(8);
         assert_eq!(
-            worker.submit_sleep(token(2), 0),
-            Err(RuntimeError::Notify(NotifyError::QueueFull))
+            exec.handle_access(&mut registry, &worker),
+            AccessStatus::Again
         );
+        exec.commit_suspend();
+        assert!(matches!(exec.vm_status(), Some(VmStatus::Waiting(_))));
         let fd = worker.raw_fd().expect("eventfd");
         assert!(wait_readable(fd, Duration::from_secs(2)));
-        assert_eq!(worker.drain_ready().unwrap(), vec![token(1)]);
-        worker.submit_sleep(token(2), 0).unwrap();
-        assert!(wait_readable(fd, Duration::from_secs(2)));
-        assert_eq!(worker.drain_ready().unwrap(), vec![token(2)]);
+        let ready = worker.drain_ready().unwrap();
+        assert_eq!(ready, vec![exec.identity()]);
+        let effect = exec.apply_ready(exec.identity(), &mut registry, &worker);
+        assert_eq!(effect, crate::request_state::ReadyEffect::Halted);
+        assert_eq!(exec.handle_access(&mut registry, &worker), AccessStatus::Ok);
         worker.shutdown();
     }
 
@@ -571,22 +397,25 @@ mod tests {
     fn submit_after_shutdown_is_rejected() {
         let mut worker = WorkerRuntime::start().unwrap();
         worker.shutdown();
-        assert_eq!(
-            worker.submit_sleep(token(1), 0),
-            Err(RuntimeError::Notify(NotifyError::ShutDown))
-        );
+        assert_eq!(worker.reserve().map(|_| ()), Err(SubmitError::Closed));
         worker.shutdown();
     }
 
     #[test]
-    fn shutdown_vs_completion_does_not_hang_or_lose_fd_ownership() {
+    fn shutdown_does_not_hang_on_long_sleep() {
         let mut worker = WorkerRuntime::start().unwrap();
-        worker.submit_sleep(token(1), 60_000).unwrap();
+        let mut exec = worker.bind_access_exec(sleep_once(60_000), 1).unwrap();
+        let mut registry = IdentityRegistry::with_capacity(8);
+        assert_eq!(
+            exec.handle_access(&mut registry, &worker),
+            AccessStatus::Again
+        );
         let start = Instant::now();
+        exec.cleanup_wait(&worker);
         worker.shutdown();
         assert!(
             start.elapsed() < Duration::from_secs(2),
-            "abort + runtime shutdown must not wait out the sleep"
+            "runtime shutdown must not wait out the sleep"
         );
         assert!(worker.raw_fd().is_none());
         assert!(!worker.is_accepting());
@@ -596,8 +425,14 @@ mod tests {
     #[test]
     fn shutdown_releases_unfinished_reservation() {
         let mut worker = WorkerRuntime::start_with_capacity(1).unwrap();
-        worker.submit_sleep(token(1), 60_000).unwrap();
+        let mut exec = worker.bind_access_exec(sleep_once(60_000), 1).unwrap();
+        let mut registry = IdentityRegistry::with_capacity(1);
+        assert_eq!(
+            exec.handle_access(&mut registry, &worker),
+            AccessStatus::Again
+        );
         assert_eq!(worker.in_flight().unwrap(), 1);
+        exec.cleanup_wait(&worker);
         worker.shutdown();
         assert_eq!(worker.in_flight().unwrap(), 0);
     }
@@ -609,41 +444,6 @@ mod tests {
         worker.shutdown();
         worker.shutdown();
         assert!(!worker_is_active());
-    }
-
-    #[test]
-    fn task3_claim_submission_feeds_runtime_once() {
-        let coordinator = SleepCoordinator::new();
-        let mut session = SleepSession::new(&coordinator).unwrap();
-        let outcome = session.call(&[Value::Int(5)]).expect("first host entry");
-        assert!(matches!(outcome, CallOutcome::Yield));
-        let mut worker = WorkerRuntime::start().unwrap();
-        let n = worker.submit_claimed(&coordinator).unwrap();
-        assert_eq!(n, 1);
-        assert_eq!(worker.submit_claimed(&coordinator).unwrap(), 0);
-        let fd = worker.raw_fd().expect("eventfd");
-        assert!(wait_readable(fd, Duration::from_secs(2)));
-        let ready = worker.drain_ready().unwrap();
-        assert_eq!(ready.len(), 1);
-        worker.shutdown();
-    }
-
-    #[test]
-    fn reserve_before_claim_does_not_consume_task3_when_full() {
-        let coordinator = SleepCoordinator::new();
-        let mut session = SleepSession::new(&coordinator).unwrap();
-        let outcome = session.call(&[Value::Int(5)]).expect("first host entry");
-        assert!(matches!(outcome, CallOutcome::Yield));
-        let mut worker = WorkerRuntime::start_with_capacity(1).unwrap();
-        worker.submit_sleep(token(99), 60_000).unwrap();
-        let err = worker.submit_claimed(&coordinator).expect_err("full");
-        assert_eq!(err, RuntimeError::Notify(NotifyError::QueueFull));
-        let claimed = coordinator.claim_submission().unwrap();
-        assert!(
-            claimed.is_some(),
-            "Task 3 submission must remain claimable when reserve fails"
-        );
-        worker.shutdown();
     }
 
     #[test]
@@ -664,50 +464,61 @@ mod tests {
     }
 
     #[test]
-    fn poisoned_task_map_does_not_panic_on_submit() {
-        let worker = WorkerRuntime::start().unwrap();
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = worker.tasks.lock().expect("lock");
-            panic!("poison tasks");
-        }));
-        std::panic::set_hook(prev);
-        let err = worker.submit_sleep(token(1), 0).expect_err("poison");
-        assert_eq!(err, RuntimeError::Notify(NotifyError::Poisoned));
-        drop(worker);
-    }
-
-    #[test]
-    fn two_sessions_from_one_worker_receive_distinct_first_tokens() {
+    fn two_requests_receive_distinct_identities() {
         let mut worker = WorkerRuntime::start().unwrap();
-        let mut first = worker.open_access_sleep().unwrap();
-        let mut second = worker.open_access_sleep().unwrap();
-        assert!(matches!(
-            first.session_mut().call(&[Value::Int(1)]).unwrap(),
-            CallOutcome::Yield
-        ));
-        assert!(matches!(
-            second.session_mut().call(&[Value::Int(2)]).unwrap(),
-            CallOutcome::Yield
-        ));
-        let t1 = first.completion().claim_submission().unwrap().unwrap().0;
-        let t2 = second.completion().claim_submission().unwrap().unwrap().0;
-        assert_ne!(t1, t2);
+        let program = sleep_once(5);
+        let a = worker.bind_access_exec(Arc::clone(&program), 1).expect("a");
+        let b = worker.bind_access_exec(program, 2).expect("b");
+        assert_ne!(a.identity(), b.identity());
         worker.shutdown();
     }
 
     #[test]
-    fn duplicate_task_token_is_rejected_without_replacing() {
-        let mut worker = WorkerRuntime::start().unwrap();
-        worker.submit_sleep(token(1), 60_000).unwrap();
-        let err = worker.submit_sleep(token(1), 0).expect_err("duplicate");
-        assert_eq!(err, RuntimeError::DuplicateToken);
-        let start = Instant::now();
-        worker.shutdown();
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "original mapping must remain abortable on shutdown"
+    fn bounded_capacity_rejects_then_reclaims() {
+        let mut worker = WorkerRuntime::start_with_capacity(1).unwrap();
+        let program = sleep_once(60_000);
+        let mut a = worker.bind_access_exec(Arc::clone(&program), 1).expect("a");
+        let mut b = worker.bind_access_exec(program, 2).expect("b");
+        let mut registry = IdentityRegistry::with_capacity(8);
+        assert_eq!(a.handle_access(&mut registry, &worker), AccessStatus::Again);
+        assert_eq!(
+            b.handle_access(&mut registry, &worker),
+            AccessStatus::Error500
         );
+        a.cleanup_wait(&worker);
+        assert_eq!(worker.in_flight().unwrap(), 0);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn many_concurrent_sleeps_complete_without_loss() {
+        let mut worker = WorkerRuntime::start_with_capacity(16).unwrap();
+        let program = sleep_once(5);
+        let mut registry = IdentityRegistry::with_capacity(16);
+        let mut execs = Vec::new();
+        for id in 1..=8 {
+            let mut exec = worker
+                .bind_access_exec(Arc::clone(&program), id)
+                .expect("bind");
+            assert_eq!(
+                exec.handle_access(&mut registry, &worker),
+                AccessStatus::Again
+            );
+            exec.commit_suspend();
+            execs.push(exec);
+        }
+        let fd = worker.raw_fd().expect("eventfd");
+        let start = Instant::now();
+        let mut ready = Vec::new();
+        while ready.len() < 8 && start.elapsed() < Duration::from_secs(2) {
+            let _ = wait_readable(fd, Duration::from_millis(50));
+            ready.extend(worker.drain_ready().unwrap());
+        }
+        ready.sort_by_key(|identity| identity.request_id());
+        let expected: Vec<_> = execs.iter().map(|exec| exec.identity()).collect();
+        let mut expected = expected;
+        expected.sort_by_key(|identity| identity.request_id());
+        assert_eq!(ready, expected, "every concurrent sleep must drain");
+        worker.shutdown();
     }
 }

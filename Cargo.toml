@@ -22,6 +22,7 @@ doctest = false
 libc = { version = "0.2", default-features = false, features = ["std"] }
 nginx-sys = { git = "https://github.com/nginx/ngx-rust", rev = "cda9d8372ccd2e139ef2b03e5806e019e7796187" }
 ngx = { git = "https://github.com/nginx/ngx-rust", rev = "cda9d8372ccd2e139ef2b03e5806e019e7796187", default-features = false, features = ["std"] }
+pd-host-function = { git = "https://github.com/rustscript-lang/rustscript", rev = "4b749862ff1632ef1266d75709da3676de37356c" }
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "time"] }
 vm = { package = "pd-vm", git = "https://github.com/rustscript-lang/rustscript", rev = "4b749862ff1632ef1266d75709da3676de37356c", default-features = false, features = ["runtime"] }
 

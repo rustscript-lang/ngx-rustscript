@@ -17,7 +17,7 @@ use vm::{
     CompileSourceFileOptions, Program, SourceFlavor, Vm, compile_source_with_flavor_and_options,
 };
 
-use crate::sleep_binding::{NGX_SLEEP_NAME, ngx_sleep_catalog};
+use crate::host::{NGX_SLEEP_NAME, ngx_host_catalog};
 
 /// Compiled access-phase program stored on the location config.
 #[derive(Default)]
@@ -163,7 +163,7 @@ pub fn program_needs_sleep(program: &Program) -> bool {
 
 /// Compile with the Task 3 `ngx::sleep` catalog and reject every other import.
 pub fn compile_rss_source(source: &str) -> Result<Arc<Program>, ConfigError> {
-    let catalog = Arc::new(ngx_sleep_catalog());
+    let catalog = Arc::new(ngx_host_catalog());
     let compiled = compile_source_with_flavor_and_options(
         source,
         SourceFlavor::RustScript,

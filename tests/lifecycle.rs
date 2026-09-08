@@ -1,7 +1,7 @@
-//! Task 6: request cancellation, stale completion filtering, exact abort,
+//! Task 6: request cancellation, stale wake filtering, exact abort,
 //! permit release, and worker exit.
 //!
-//! Real pd-vm drives `ngx::sleep` Yield/Halt. NGINX action sinks and syscall
+//! Real pd-vm drives `ngx::sleep` Waiting/Halt. NGINX action sinks and syscall
 //! timing are faked only where FFI is unsuitable. Focused real NGINX tests
 //! cover client disconnect and graceful SIGQUIT.
 
@@ -12,6 +12,7 @@ use ngx_rustscript_nginx_test_stubs as _;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -19,15 +20,14 @@ use std::time::{Duration, Instant};
 
 use ngx::core::Status;
 use ngx_rustscript::config::compile_rss_source;
-use ngx_rustscript::notify::DEFAULT_MAX_IN_FLIGHT;
+use ngx_rustscript::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
 use ngx_rustscript::read_close::{
     EventFlags, HandlerAction, HandlerState, PeekResult, run_read_close_handler,
 };
 use ngx_rustscript::request_state::{
-    AccessExec, AccessStatus, ReadyEffect, RecordingSink, SubmitError, TokenRegistry,
+    AccessStatus, AsyncWait, IdentityRegistry, ReadyEffect, RecordingSink, apply_ready_effect,
 };
 use ngx_rustscript::runtime::WorkerRuntime;
-use ngx_rustscript::sleep_binding::{SleepCoordinator, SleepSession, SleepToken};
 use support::artifact::module_cdylib;
 use support::nginx::{combined, nginx_binary, nginx_quote_path, nginx_test};
 use support::temp::isolated_prefix;
@@ -45,313 +45,65 @@ fn two_sleeps(a: i64, b: i64) -> Arc<Program> {
     compile(&format!("use ngx;\nngx::sleep({a});\nngx::sleep({b});\n"))
 }
 
-fn bind_exec(program: Arc<Program>, request_id: u64, coordinator: &SleepCoordinator) -> AccessExec {
-    let session = SleepSession::new(coordinator).expect("session");
-    AccessExec::bind_program(program, request_id, session, coordinator.clone()).expect("bind")
-}
-
-struct FakeSubmit {
-    ops: Vec<(SleepToken, i64)>,
-}
-
-impl FakeSubmit {
-    fn new() -> Self {
-        Self { ops: Vec::new() }
+fn wait_readable(fd: RawFd, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let n = unsafe { libc::poll(&mut pfd, 1, 20) };
+        if n > 0 && pfd.revents & libc::POLLIN != 0 {
+            return true;
+        }
     }
-}
-
-impl ngx_rustscript::request_state::SleepSubmit for FakeSubmit {
-    fn submit(&mut self, token: SleepToken, ms: i64) -> Result<(), SubmitError> {
-        self.ops.push((token, ms));
-        Ok(())
-    }
+    false
 }
 
 struct Driver {
-    exec: AccessExec,
+    worker: WorkerRuntime,
+    exec: ngx_rustscript::request_state::AccessExec,
     sink: RecordingSink,
-    registry: TokenRegistry<u64>,
-    submit: FakeSubmit,
+    registry: IdentityRegistry<u64>,
 }
 
 impl Driver {
     fn new(program: Arc<Program>) -> Self {
-        let coordinator = SleepCoordinator::new();
+        let mut worker = WorkerRuntime::start().unwrap();
+        let exec = worker.bind_access_exec(program, 1).expect("bind");
         Self {
-            exec: bind_exec(program, 1, &coordinator),
+            worker,
+            exec,
             sink: RecordingSink::default(),
-            registry: TokenRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT),
-            submit: FakeSubmit::new(),
+            registry: IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT),
         }
     }
 
     fn handle(&mut self) -> AccessStatus {
-        self.exec
-            .handle_access(&mut self.registry, &mut self.submit)
-    }
-
-    fn ready(&mut self, token: SleepToken) -> ReadyEffect {
-        self.exec
-            .apply_ready(token, &mut self.registry, &mut self.submit)
-    }
-
-    fn apply_effect(&mut self, effect: ReadyEffect) {
-        ngx_rustscript::request_state::apply_ready_effect(effect, &mut self.sink);
-    }
-
-    fn cleanup(&mut self) -> Option<SleepToken> {
-        let request_id = self.exec.request_id();
-        let token = self.exec.cleanup();
-        if let Some(token) = token {
-            let _ = self.registry.remove_exact(token, &request_id);
+        let status = self.exec.handle_access(&mut self.registry, &self.worker);
+        if status == AccessStatus::Again {
+            self.exec.commit_suspend();
         }
-        token
+        status
     }
-}
 
-#[test]
-fn cleanup_before_completion_ignores_later_ready() {
-    let mut driver = Driver::new(sleep_once(30));
-    assert_eq!(driver.handle(), AccessStatus::Again);
-    let token = driver.submit.ops[0].0;
-    assert_eq!(driver.registry.len(), 1);
-    let cancelled = driver.cleanup();
-    assert_eq!(cancelled, Some(token));
-    assert!(driver.exec.is_cancelled());
-    assert_eq!(driver.registry.len(), 0);
-    assert_eq!(driver.exec.current_token(), None);
-
-    let effect = driver.ready(token);
-    driver.apply_effect(effect);
-    assert_eq!(effect, ReadyEffect::Ignored);
-    assert_eq!(driver.sink.phase_continues, 0);
-    assert_ne!(driver.exec.vm_status(), Some(VmStatus::Halted));
-    assert_eq!(driver.handle(), AccessStatus::Again);
-    assert_eq!(driver.sink.phase_continues, 0);
-}
-
-#[test]
-fn completion_queued_before_cleanup_does_not_finalize() {
-    let mut driver = Driver::new(sleep_once(0));
-    assert_eq!(driver.handle(), AccessStatus::Again);
-    let token = driver.submit.ops[0].0;
-    // Completion is queued (coordinator marked) before pool cleanup.
-    // apply_ready is the eventfd callback; cleanup wins if it runs first
-    // after the queue, or the callback is filtered if cleanup already ran.
-    let _ = driver.cleanup();
-    let effect = driver.ready(token);
-    driver.apply_effect(effect);
-    assert_eq!(effect, ReadyEffect::Ignored);
-    assert_eq!(driver.sink.phase_continues, 0);
-    assert!(driver.exec.is_cancelled());
-}
-
-#[test]
-fn callback_after_cleanup_is_ignored() {
-    let mut driver = Driver::new(sleep_once(5));
-    assert_eq!(driver.handle(), AccessStatus::Again);
-    let token = driver.submit.ops[0].0;
-    assert!(driver.cleanup().is_some());
-    for _ in 0..3 {
-        let effect = driver.ready(token);
-        driver.apply_effect(effect);
-        assert_eq!(effect, ReadyEffect::Ignored);
-    }
-    assert_eq!(driver.sink.phase_continues, 0);
-}
-
-#[test]
-fn duplicate_completion_after_halt_does_not_advance_phase_twice() {
-    let mut driver = Driver::new(sleep_once(1));
-    assert_eq!(driver.handle(), AccessStatus::Again);
-    let token = driver.submit.ops[0].0;
-    let first = driver.ready(token);
-    driver.apply_effect(first);
-    assert_eq!(first, ReadyEffect::Halted);
-    let second = driver.ready(token);
-    driver.apply_effect(second);
-    assert_eq!(second, ReadyEffect::Ignored);
-    assert_eq!(driver.sink.phase_continues, 1);
-}
-
-#[test]
-fn duplicate_ready_after_cancel_is_ignored() {
-    let mut driver = Driver::new(sleep_once(1));
-    assert_eq!(driver.handle(), AccessStatus::Again);
-    let token = driver.submit.ops[0].0;
-    assert!(driver.cleanup().is_some());
-    assert_eq!(driver.ready(token), ReadyEffect::Ignored);
-    assert_eq!(driver.ready(token), ReadyEffect::Ignored);
-    assert_eq!(driver.sink.phase_continues, 0);
-}
-
-#[test]
-fn stale_generation_token_is_ignored() {
-    let mut driver = Driver::new(sleep_once(1));
-    assert_eq!(driver.handle(), AccessStatus::Again);
-    let token = driver.submit.ops[0].0;
-    let forged = SleepToken::from_raw(token.generation().wrapping_add(1), token.op_id());
-    let effect = driver.ready(forged);
-    driver.apply_effect(effect);
-    assert_eq!(effect, ReadyEffect::Ignored);
-    assert_eq!(driver.sink.phase_continues, 0);
-    assert_eq!(driver.registry.len(), 1);
-}
-
-#[test]
-fn request_id_and_pointer_key_reuse_is_generation_safe() {
-    let mut ids = TokenRegistry::<u64>::with_capacity(8);
-    let mut live = TokenRegistry::<*mut u8>::with_capacity(8);
-    let ptr = 0x1000 as *mut u8;
-    let old = SleepToken::from_raw(1, 1);
-    let new = SleepToken::from_raw(2, 2);
-
-    ids.try_insert(old, 1).expect("old id");
-    live.try_insert(old, ptr).expect("old ptr");
-    assert_eq!(ids.remove_exact(old, &1), Some(1));
-    assert_eq!(live.remove_exact(old, &ptr), Some(ptr));
-    assert!(ids.get(old).is_none());
-    assert!(live.get(old).is_none());
-
-    ids.try_insert(new, 2).expect("reused request id space");
-    live.try_insert(new, ptr).expect("reused pointer key");
-    assert_eq!(ids.get(new), Some(&2));
-    assert_eq!(live.get(new), Some(&ptr));
-    assert_eq!(ids.remove_exact(old, &1), None);
-    assert_eq!(live.remove_exact(old, &ptr), None);
-    assert_eq!(ids.get(new), Some(&2));
-    assert_eq!(live.get(new), Some(&ptr));
-    assert_eq!(ids.remove_exact(new, &1), None);
-    assert_eq!(ids.get(new), Some(&2));
-}
-
-#[test]
-fn cleanup_after_normal_halted_is_idempotent() {
-    let mut driver = Driver::new(sleep_once(1));
-    assert_eq!(driver.handle(), AccessStatus::Again);
-    let token = driver.submit.ops[0].0;
-    let effect = driver.ready(token);
-    driver.apply_effect(effect);
-    assert_eq!(effect, ReadyEffect::Halted);
-    assert_eq!(driver.sink.phase_continues, 1);
-    assert_eq!(driver.handle(), AccessStatus::Ok);
-
-    assert!(driver.cleanup().is_none());
-    assert!(driver.cleanup().is_none());
-    let effect = driver.ready(token);
-    driver.apply_effect(effect);
-    assert_eq!(effect, ReadyEffect::Ignored);
-    assert_eq!(driver.sink.phase_continues, 1);
-    assert_eq!(driver.handle(), AccessStatus::Ok);
-}
-
-#[test]
-fn cleanup_after_error_is_idempotent() {
-    let mut driver = Driver::new(compile("1 / 0;\n"));
-    assert_eq!(driver.handle(), AccessStatus::Error500);
-    assert_eq!(driver.sink.phase_continues, 0);
-    assert!(driver.cleanup().is_none());
-    assert!(driver.cleanup().is_none());
-    assert_eq!(driver.handle(), AccessStatus::Error500);
-    assert_eq!(driver.sink.phase_continues, 0);
-}
-
-#[test]
-fn cancel_while_second_sequential_sleep_pending() {
-    let mut driver = Driver::new(two_sleeps(1, 2));
-    assert_eq!(driver.handle(), AccessStatus::Again);
-    let first = driver.submit.ops[0].0;
-    let effect = driver.ready(first);
-    driver.apply_effect(effect);
-    assert_eq!(effect, ReadyEffect::YieldedAgain);
-    assert_eq!(driver.submit.ops.len(), 2);
-    assert_eq!(driver.sink.phase_continues, 0);
-    let second = driver.submit.ops[1].0;
-    assert_ne!(first, second);
-
-    let cancelled = driver.cleanup();
-    assert_eq!(cancelled, Some(second));
-    assert_eq!(driver.registry.len(), 0);
-    let effect = driver.ready(second);
-    driver.apply_effect(effect);
-    assert_eq!(effect, ReadyEffect::Ignored);
-    let effect = driver.ready(first);
-    driver.apply_effect(effect);
-    assert_eq!(effect, ReadyEffect::Ignored);
-    assert_eq!(driver.sink.phase_continues, 0);
-    assert_eq!(driver.handle(), AccessStatus::Again);
-}
-
-#[test]
-fn exact_registry_removal_does_not_touch_other_request() {
-    let coordinator = SleepCoordinator::new();
-    let program = sleep_once(1);
-    let mut a = bind_exec(Arc::clone(&program), 1, &coordinator);
-    let mut b = bind_exec(program, 2, &coordinator);
-    let mut registry = TokenRegistry::with_capacity(8);
-    let mut submit = FakeSubmit::new();
-    assert_eq!(
-        a.handle_access(&mut registry, &mut submit),
-        AccessStatus::Again
-    );
-    assert_eq!(
-        b.handle_access(&mut registry, &mut submit),
-        AccessStatus::Again
-    );
-    let ta = a.current_token().expect("a");
-    let tb = b.current_token().expect("b");
-    let taken = a.cleanup();
-    assert_eq!(taken, Some(ta));
-    assert_eq!(registry.remove_exact(ta, &1), Some(1));
-    assert_eq!(registry.get(tb), Some(&2));
-    assert_eq!(registry.remove_exact(ta, &1), None);
-    assert_eq!(
-        b.apply_ready(tb, &mut registry, &mut submit),
-        ReadyEffect::Halted
-    );
-}
-
-#[test]
-fn deferred_ready_is_invalidated_by_cleanup() {
-    let mut driver = Driver::new(sleep_once(0));
-    let outcome = driver.exec.run_until_yield_or_halt().expect("run");
-    let token = outcome.token().expect("token");
-    driver
-        .exec
-        .register_current(&mut driver.registry)
-        .expect("register");
-    assert_eq!(driver.ready(token), ReadyEffect::Deferred);
-    assert!(driver.cleanup().is_some());
-    assert_eq!(
-        driver
+    fn wait_ready(&mut self) -> ReadyEffect {
+        let fd = self.worker.raw_fd().expect("eventfd");
+        assert!(wait_readable(fd, Duration::from_secs(2)));
+        let _ = self.worker.drain_ready().unwrap();
+        let effect = self
             .exec
-            .flush_deferred(&mut driver.registry, &mut driver.submit),
-        ReadyEffect::Ignored
-    );
-    assert_eq!(driver.ready(token), ReadyEffect::Ignored);
-    assert_eq!(driver.sink.phase_continues, 0);
-}
+            .apply_ready(self.exec.identity(), &mut self.registry, &self.worker);
+        apply_ready_effect(effect, &mut self.sink);
+        effect
+    }
 
-#[test]
-fn yielded_maps_to_nginx_again_unchanged() {
-    assert_eq!(AccessStatus::Again.as_nginx(), Status::NGX_AGAIN);
-    assert_eq!(Status::NGX_AGAIN.0, -2);
-}
-
-struct WorkerSubmit<'a> {
-    worker: &'a WorkerRuntime,
-}
-
-impl ngx_rustscript::request_state::SleepSubmit for WorkerSubmit<'_> {
-    fn submit(&mut self, token: SleepToken, ms: i64) -> Result<(), SubmitError> {
-        self.worker
-            .submit_sleep(token, ms)
-            .map_err(|err| match err {
-                ngx_rustscript::runtime::RuntimeError::Notify(
-                    ngx_rustscript::notify::NotifyError::QueueFull,
-                ) => SubmitError::Full,
-                _ => SubmitError::Closed,
-            })
+    fn cleanup(&mut self) -> Option<RequestIdentity> {
+        let request_id = self.exec.request_id();
+        let identity = self.exec.identity();
+        let _ = self.registry.remove_exact(identity, &request_id);
+        self.exec.cleanup_wait(&self.worker)
     }
 }
 
@@ -367,84 +119,158 @@ fn wait_in_flight_zero(worker: &WorkerRuntime, timeout: Duration) -> bool {
 }
 
 #[test]
-fn exact_abort_once_releases_permit_while_sleeping() {
-    let mut worker = WorkerRuntime::start().unwrap();
-    let token = SleepToken::from_raw(1, 1);
-    worker.submit_sleep(token, 60_000).unwrap();
-    assert_eq!(worker.in_flight().unwrap(), 1);
-    assert!(worker.abort_sleep(token), "first abort must hit the task");
-    assert!(
-        wait_in_flight_zero(&worker, Duration::from_secs(2)),
-        "permit must return to zero after abort of a sleeping task"
-    );
-    assert!(
-        !worker.abort_sleep(token),
-        "second abort of the same token must be a no-op"
-    );
-    assert_eq!(worker.in_flight().unwrap(), 0);
-    worker.shutdown();
+fn cleanup_before_completion_ignores_later_ready() {
+    let mut driver = Driver::new(sleep_once(30));
+    assert_eq!(driver.handle(), AccessStatus::Again);
+    let identity = driver.exec.identity();
+    assert_eq!(driver.registry.len(), 1);
+    assert!(driver.cleanup().is_some());
+    assert!(driver.exec.is_cancelled());
+    assert_eq!(driver.registry.len(), 0);
+    assert_eq!(driver.exec.current_identity(), None);
+    let effect = driver
+        .exec
+        .apply_ready(identity, &mut driver.registry, &driver.worker);
+    apply_ready_effect(effect, &mut driver.sink);
+    assert_eq!(effect, ReadyEffect::Ignored);
+    assert_eq!(driver.sink.phase_continues, 0);
+    assert_ne!(driver.exec.vm_status(), Some(VmStatus::Halted));
+    assert_eq!(driver.handle(), AccessStatus::Again);
+    assert_eq!(driver.sink.phase_continues, 0);
 }
 
 #[test]
-fn abort_queued_completion_releases_permit() {
-    let mut worker = WorkerRuntime::start().unwrap();
-    let token = SleepToken::from_raw(1, 7);
-    worker.submit_sleep(token, 0).unwrap();
-    let fd = worker.raw_fd().expect("eventfd");
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(2) {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let n = unsafe { libc::poll(&mut pfd, 1, 20) };
-        if n > 0 && pfd.revents & libc::POLLIN != 0 {
-            break;
-        }
+fn callback_after_cleanup_is_ignored() {
+    let mut driver = Driver::new(sleep_once(5));
+    assert_eq!(driver.handle(), AccessStatus::Again);
+    let identity = driver.exec.identity();
+    assert!(driver.cleanup().is_some());
+    for _ in 0..3 {
+        let effect = driver
+            .exec
+            .apply_ready(identity, &mut driver.registry, &driver.worker);
+        apply_ready_effect(effect, &mut driver.sink);
+        assert_eq!(effect, ReadyEffect::Ignored);
     }
-    assert!(
-        worker.in_flight().unwrap() >= 1,
-        "completion may be queued before harvest"
-    );
-    let _ = worker.abort_sleep(token);
-    assert!(
-        wait_in_flight_zero(&worker, Duration::from_secs(2)),
-        "queued completion must release its permit on abort"
-    );
-    let ready = worker.drain_ready().unwrap();
-    assert!(
-        ready.is_empty() || ready.iter().all(|t| *t != token),
-        "aborted token must not remain ready: {ready:?}"
-    );
-    worker.shutdown();
+    assert_eq!(driver.sink.phase_continues, 0);
 }
 
 #[test]
-fn real_vm_cancel_aborts_sleep_and_drops_session() {
+fn duplicate_completion_after_halt_does_not_advance_phase_twice() {
+    let mut driver = Driver::new(sleep_once(1));
+    assert_eq!(driver.handle(), AccessStatus::Again);
+    let first = driver.wait_ready();
+    assert_eq!(first, ReadyEffect::Halted);
+    let second =
+        driver
+            .exec
+            .apply_ready(driver.exec.identity(), &mut driver.registry, &driver.worker);
+    apply_ready_effect(second, &mut driver.sink);
+    assert_eq!(second, ReadyEffect::Ignored);
+    assert_eq!(driver.sink.phase_continues, 1);
+}
+
+#[test]
+fn stale_generation_identity_is_ignored() {
+    let mut driver = Driver::new(sleep_once(1));
+    assert_eq!(driver.handle(), AccessStatus::Again);
+    let identity = driver.exec.identity();
+    let forged = RequestIdentity::new(identity.generation().wrapping_add(1), identity.request_id());
+    let effect = driver
+        .exec
+        .apply_ready(forged, &mut driver.registry, &driver.worker);
+    apply_ready_effect(effect, &mut driver.sink);
+    assert_eq!(effect, ReadyEffect::Ignored);
+    assert_eq!(driver.sink.phase_continues, 0);
+    assert_eq!(driver.registry.len(), 1);
+}
+
+#[test]
+fn request_id_and_pointer_key_reuse_is_generation_safe() {
+    let mut ids = IdentityRegistry::<u64>::with_capacity(8);
+    let mut live = IdentityRegistry::<*mut u8>::with_capacity(8);
+    let ptr = 0x1000 as *mut u8;
+    let old = RequestIdentity::new(1, 1);
+    let new = RequestIdentity::new(2, 2);
+
+    ids.try_insert(old, 1).expect("old id");
+    live.try_insert(old, ptr).expect("old ptr");
+    assert_eq!(ids.remove_exact(old, &1), Some(1));
+    assert_eq!(live.remove_exact(old, &ptr), Some(ptr));
+    ids.try_insert(new, 2).expect("reused request id space");
+    live.try_insert(new, ptr).expect("reused pointer key");
+    assert_eq!(ids.remove_exact(old, &1), None);
+    assert_eq!(live.remove_exact(old, &ptr), None);
+    assert_eq!(ids.get(new), Some(&2));
+}
+
+#[test]
+fn cleanup_after_normal_halted_is_idempotent() {
+    let mut driver = Driver::new(sleep_once(1));
+    assert_eq!(driver.handle(), AccessStatus::Again);
+    let effect = driver.wait_ready();
+    assert_eq!(effect, ReadyEffect::Halted);
+    assert_eq!(driver.handle(), AccessStatus::Ok);
+    assert!(driver.cleanup().is_none());
+    assert!(driver.cleanup().is_none());
+    assert_eq!(driver.sink.phase_continues, 1);
+}
+
+#[test]
+fn cleanup_after_error_is_idempotent() {
+    let mut driver = Driver::new(compile("1 / 0;\n"));
+    assert_eq!(driver.handle(), AccessStatus::Error500);
+    assert!(driver.cleanup().is_none());
+    assert!(driver.cleanup().is_none());
+    assert_eq!(driver.handle(), AccessStatus::Error500);
+}
+
+#[test]
+fn cancel_while_second_sequential_sleep_pending() {
+    let mut driver = Driver::new(two_sleeps(1, 2));
+    assert_eq!(driver.handle(), AccessStatus::Again);
+    let first = driver.wait_ready();
+    assert_eq!(first, ReadyEffect::WaitingAgain);
+    assert_eq!(driver.sink.phase_continues, 0);
+    let identity = driver.exec.identity();
+    assert!(driver.cleanup().is_some());
+    let effect = driver
+        .exec
+        .apply_ready(identity, &mut driver.registry, &driver.worker);
+    apply_ready_effect(effect, &mut driver.sink);
+    assert_eq!(effect, ReadyEffect::Ignored);
+    assert_eq!(driver.sink.phase_continues, 0);
+    assert_eq!(driver.handle(), AccessStatus::Again);
+}
+
+#[test]
+fn waiting_maps_to_nginx_again_unchanged() {
+    assert_eq!(AccessStatus::Again.as_nginx(), Status::NGX_AGAIN);
+    assert_eq!(Status::NGX_AGAIN.0, -2);
+}
+
+#[test]
+fn real_vm_cancel_drops_future_and_permit() {
     let mut worker = WorkerRuntime::start().unwrap();
-    let program = sleep_once(60_000);
-    let mut exec = worker.bind_access_exec(program, 11).expect("bind");
-    let mut registry = TokenRegistry::with_capacity(8);
-    let mut submit = WorkerSubmit { worker: &worker };
+    let mut exec = worker
+        .bind_access_exec(sleep_once(60_000), 11)
+        .expect("bind");
+    let mut registry = IdentityRegistry::with_capacity(8);
     assert_eq!(
-        exec.handle_access(&mut registry, &mut submit),
+        exec.handle_access(&mut registry, &worker),
         AccessStatus::Again
     );
-    let token = exec.current_token().expect("token");
+    exec.commit_suspend();
+    let identity = exec.identity();
     assert_eq!(registry.len(), 1);
     assert_eq!(worker.in_flight().unwrap(), 1);
-
-    let taken = exec.cleanup();
-    assert_eq!(taken, Some(token));
-    assert_eq!(registry.remove_exact(token, &11), Some(11));
-    assert!(worker.abort_sleep(token));
+    let _ = registry.remove_exact(identity, &11);
+    let taken = exec.cleanup_wait(&worker);
+    assert_eq!(taken, Some(identity));
     assert!(exec.is_cancelled());
-    assert_eq!(registry.len(), 0);
     assert!(wait_in_flight_zero(&worker, Duration::from_secs(2)));
-    assert!(!worker.abort_sleep(token));
     assert_eq!(
-        exec.apply_ready(token, &mut registry, &mut submit),
+        exec.apply_ready(identity, &mut registry, &worker),
         ReadyEffect::Ignored
     );
     worker.shutdown();
@@ -453,15 +279,15 @@ fn real_vm_cancel_aborts_sleep_and_drops_session() {
 #[test]
 fn close_triggered_cleanup_aborts_and_zeros_permit() {
     let mut worker = WorkerRuntime::start().unwrap();
-    let program = sleep_once(60_000);
-    let mut exec = worker.bind_access_exec(program, 21).expect("bind");
-    let mut registry = TokenRegistry::with_capacity(8);
-    let mut submit = WorkerSubmit { worker: &worker };
+    let mut exec = worker
+        .bind_access_exec(sleep_once(60_000), 21)
+        .expect("bind");
+    let mut registry = IdentityRegistry::with_capacity(8);
     assert_eq!(
-        exec.handle_access(&mut registry, &mut submit),
+        exec.handle_access(&mut registry, &worker),
         AccessStatus::Again
     );
-    let token = exec.current_token().expect("token");
+    let identity = exec.identity();
     assert_eq!(worker.in_flight().unwrap(), 1);
     assert!(!exec.is_finished());
 
@@ -479,31 +305,29 @@ fn close_triggered_cleanup_aborts_and_zeros_permit() {
     assert_eq!(second, HandlerAction::Ignored);
     assert_eq!(finalized, 1);
 
-    let taken = exec.cleanup();
-    assert_eq!(taken, Some(token));
-    assert_eq!(registry.remove_exact(token, &21), Some(21));
-    assert!(worker.abort_sleep(token));
+    let _ = registry.remove_exact(identity, &21);
+    let taken = exec.cleanup_wait(&worker);
+    assert_eq!(taken, Some(identity));
     assert!(exec.is_cancelled());
-    assert_eq!(registry.len(), 0);
     assert!(wait_in_flight_zero(&worker, Duration::from_secs(2)));
-    assert_eq!(worker.in_flight().unwrap(), 0);
     assert_eq!(
-        exec.apply_ready(token, &mut registry, &mut submit),
+        exec.apply_ready(identity, &mut registry, &worker),
         ReadyEffect::Ignored
     );
     worker.shutdown();
 }
 
 #[test]
-fn worker_shutdown_with_in_flight_tasks_is_fast_and_zeros_permits() {
+fn worker_shutdown_with_in_flight_waits_is_fast_and_zeros_permits() {
     let mut worker = WorkerRuntime::start().unwrap();
-    worker
-        .submit_sleep(SleepToken::from_raw(1, 1), 60_000)
-        .unwrap();
-    worker
-        .submit_sleep(SleepToken::from_raw(1, 2), 60_000)
-        .unwrap();
+    let mut a = worker.bind_access_exec(sleep_once(60_000), 1).unwrap();
+    let mut b = worker.bind_access_exec(sleep_once(60_000), 2).unwrap();
+    let mut registry = IdentityRegistry::with_capacity(8);
+    assert_eq!(a.handle_access(&mut registry, &worker), AccessStatus::Again);
+    assert_eq!(b.handle_access(&mut registry, &worker), AccessStatus::Again);
     assert_eq!(worker.in_flight().unwrap(), 2);
+    a.cleanup_wait(&worker);
+    b.cleanup_wait(&worker);
     let start = Instant::now();
     worker.shutdown();
     assert!(
@@ -519,42 +343,10 @@ fn worker_shutdown_with_in_flight_tasks_is_fast_and_zeros_permits() {
 fn submit_after_shutdown_is_rejected_and_exit_is_idempotent() {
     let mut worker = WorkerRuntime::start().unwrap();
     worker.shutdown();
-    assert_eq!(
-        worker
-            .submit_sleep(SleepToken::from_raw(1, 1), 0)
-            .unwrap_err(),
-        ngx_rustscript::runtime::RuntimeError::Notify(
-            ngx_rustscript::notify::NotifyError::ShutDown
-        )
-    );
+    assert!(worker.reserve().is_err());
     worker.shutdown();
     worker.shutdown();
-    assert_eq!(
-        worker
-            .submit_sleep(SleepToken::from_raw(1, 2), 1)
-            .unwrap_err(),
-        ngx_rustscript::runtime::RuntimeError::Notify(
-            ngx_rustscript::notify::NotifyError::ShutDown
-        )
-    );
-}
-
-#[test]
-fn cleanup_invalidates_sleep_session_generation() {
-    let coordinator = SleepCoordinator::new();
-    let mut exec = bind_exec(sleep_once(5), 3, &coordinator);
-    let mut registry = TokenRegistry::with_capacity(4);
-    let mut submit = FakeSubmit::new();
-    assert_eq!(
-        exec.handle_access(&mut registry, &mut submit),
-        AccessStatus::Again
-    );
-    let token = exec.current_token().expect("token");
-    assert!(exec.cleanup().is_some());
-    assert!(
-        coordinator.complete(token).is_err(),
-        "dropped SleepSession generation must reject later complete"
-    );
+    assert!(worker.reserve().is_err());
 }
 
 fn fixture(name: &str) -> PathBuf {

@@ -5,12 +5,13 @@ use ngx::ffi::{NGX_HTTP_MODULE, ngx_conf_t, ngx_http_module_t, ngx_int_t, ngx_mo
 use ngx::http::{self, HttpModule, HttpModuleLocationConf};
 
 pub mod access;
+pub mod async_bridge;
 pub mod config;
+pub mod host;
 pub mod notify;
 pub mod read_close;
 pub mod request_state;
 pub mod runtime;
-pub mod sleep_binding;
 pub(crate) mod vm_pool;
 
 #[cfg(test)]

@@ -1,30 +1,27 @@
-//! Request-local access execution state and worker-local token registry.
+//! Access-phase VM driver: `VmStatus::Waiting` suspend/resume.
 //!
-//! NGINX 1.30.4 `ngx_http_core_access_phase` treats `NGX_AGAIN` as the wait
-//! code: the checker returns `NGX_OK` and stops the phase engine without
-//! advancing `phase_handler`. That path does not increment `r->main->count`;
-//! the connection still owns the request. Resume continues the same VM, then
-//! `ngx_http_core_run_phases` exactly once so the access handler can return
-//! `NGX_OK` (or 500). Completions that arrive before the handler commits to
-//! suspend are deferred and never resume the VM on the access stack.
+//! Before the initial poll the driver reserves bounded capacity and registers
+//! a generation-safe identity plus an eventfd-backed waker. A Ready poll
+//! unregisters, releases the slot, and resumes. Pending returns `NGX_AGAIN`.
+//! A wake during the initial poll only queues for a later NGINX event turn.
 
 use std::collections::HashMap;
-use std::fmt;
-use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 
 use ngx::core::Status;
 use ngx::http::HTTPStatus;
+use tokio::runtime::Handle;
 use vm::{Program, Vm, VmStatus};
 
-use crate::notify::DEFAULT_MAX_IN_FLIGHT;
-use crate::sleep_binding::{NGX_SLEEP_NAME, SleepCoordinator, SleepSession, SleepToken};
+use crate::async_bridge::NgxAsyncBridge;
+use crate::host::bind_ngx_hosts;
+use crate::notify::{CompletionPermit, RequestIdentity};
 
-/// Access-handler return mapped onto the phase engine.
+/// Result of one access-phase entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessStatus {
     Ok,
     Again,
-    Declined,
     Error500,
 }
 
@@ -33,95 +30,78 @@ impl AccessStatus {
         match self {
             Self::Ok => Status::NGX_OK,
             Self::Again => Status::NGX_AGAIN,
-            Self::Declined => Status::NGX_DECLINED,
             Self::Error500 => HTTPStatus::INTERNAL_SERVER_ERROR.into(),
         }
     }
 }
 
-/// Result of delivering a ready [`SleepToken`].
+/// Result of delivering a ready [`RequestIdentity`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadyEffect {
-    Ignored,
-    Deferred,
     Halted,
-    YieldedAgain,
+    WaitingAgain,
     Failed,
+    Deferred,
+    Ignored,
 }
 
-/// Fail-closed registry errors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RegistryError {
-    Full,
-    Duplicate,
-}
-
-impl fmt::Display for RegistryError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Full => write!(f, "request sleep registry is full"),
-            Self::Duplicate => write!(f, "sleep token is already registered"),
-        }
-    }
-}
-
-impl std::error::Error for RegistryError {}
-
-/// Fail-closed submit errors matching Task 4 capacity / shutdown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SubmitError {
-    Full,
-    Closed,
-}
-
-impl fmt::Display for SubmitError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Full => write!(f, "sleep completion queue is full"),
-            Self::Closed => write!(f, "worker runtime is shut down"),
-        }
-    }
-}
-
-impl std::error::Error for SubmitError {}
-
-/// One-shot submit of a claimed `(token, ms)` pair.
-pub trait SleepSubmit {
-    fn submit(&mut self, token: SleepToken, ms: i64) -> Result<(), SubmitError>;
-}
-
-/// Recording NGINX action sink for unit tests.
-#[derive(Default, Debug)]
+/// Recording sink used by unit tests.
+#[derive(Clone, Debug, Default)]
 pub struct RecordingSink {
     pub retains: usize,
     pub releases: usize,
     pub phase_continues: usize,
 }
 
-/// Apply phase-engine side effects after [`AccessExec::apply_ready`].
-///
-/// Halted and Failed schedule exactly one `ngx_http_core_run_phases`. Yield
-/// wait uses `NGX_AGAIN` and does not retain (`r->main->count` stays 1).
-pub fn apply_ready_effect(effect: ReadyEffect, sink: &mut RecordingSink) {
-    match effect {
-        ReadyEffect::Halted | ReadyEffect::Failed => {
-            sink.phase_continues = sink.phase_continues.saturating_add(1);
-        }
-        ReadyEffect::Ignored | ReadyEffect::Deferred | ReadyEffect::YieldedAgain => {}
+/// Side effects applied after a ready identity is processed.
+pub trait AccessSink {
+    fn retain(&mut self);
+    fn release(&mut self);
+    fn continue_phases(&mut self);
+}
+
+impl AccessSink for RecordingSink {
+    fn retain(&mut self) {
+        self.retains += 1;
+    }
+    fn release(&mut self) {
+        self.releases += 1;
+    }
+    fn continue_phases(&mut self) {
+        self.phase_continues += 1;
     }
 }
 
-/// Bounded worker-local token map. Capacity matches Task 4 in-flight.
-pub struct TokenRegistry<T> {
-    cap: usize,
-    map: HashMap<SleepToken, T>,
+pub fn apply_ready_effect(effect: ReadyEffect, sink: &mut impl AccessSink) {
+    match effect {
+        ReadyEffect::Halted | ReadyEffect::Failed => sink.continue_phases(),
+        ReadyEffect::WaitingAgain | ReadyEffect::Deferred | ReadyEffect::Ignored => {}
+    }
 }
 
-impl<T> TokenRegistry<T> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubmitError {
+    Full,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegistryError {
+    Full,
+    Duplicate,
+}
+
+/// Bounded identity -> value map with exact-generation lookup.
+pub struct IdentityRegistry<T> {
+    map: HashMap<RequestIdentity, T>,
+    cap: usize,
+}
+
+impl<T> IdentityRegistry<T> {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
+            map: HashMap::with_capacity(cap),
             cap,
-            map: HashMap::new(),
         }
     }
 
@@ -137,107 +117,99 @@ impl<T> TokenRegistry<T> {
         self.map.is_empty()
     }
 
-    pub fn try_insert(&mut self, token: SleepToken, value: T) -> Result<(), RegistryError>
+    pub fn try_insert(&mut self, identity: RequestIdentity, value: T) -> Result<(), RegistryError>
     where
         T: PartialEq,
     {
-        match self.map.get(&token) {
+        match self.map.get(&identity) {
             Some(existing) if existing == &value => Ok(()),
             Some(_) => Err(RegistryError::Duplicate),
             None if self.map.len() >= self.cap => Err(RegistryError::Full),
             None => {
-                self.map.insert(token, value);
+                self.map.insert(identity, value);
                 Ok(())
             }
         }
     }
 
-    pub fn get(&self, token: SleepToken) -> Option<&T> {
-        self.map.get(&token)
+    pub fn get(&self, identity: RequestIdentity) -> Option<&T> {
+        self.map.get(&identity)
     }
 
-    pub fn remove(&mut self, token: SleepToken) -> Option<T> {
-        self.map.remove(&token)
+    pub fn remove(&mut self, identity: RequestIdentity) -> Option<T> {
+        self.map.remove(&identity)
     }
 
-    /// Remove `token` only when it still maps to `expected`.
-    pub fn remove_exact(&mut self, token: SleepToken, expected: &T) -> Option<T>
+    pub fn remove_exact(&mut self, identity: RequestIdentity, expected: &T) -> Option<T>
     where
         T: PartialEq,
     {
-        match self.map.get(&token) {
-            Some(existing) if existing == expected => self.map.remove(&token),
+        match self.map.get(&identity) {
+            Some(value) if value == expected => self.map.remove(&identity),
             _ => None,
         }
     }
 
-    /// Drop every mapping without inspecting values. Worker exit uses this
-    /// so leftover request pointers are never dereferenced.
     pub fn clear(&mut self) {
         self.map.clear();
     }
 }
 
-impl<T> Default for TokenRegistry<T> {
+impl<T> Default for IdentityRegistry<T> {
     fn default() -> Self {
-        Self::with_capacity(DEFAULT_MAX_IN_FLIGHT)
+        Self::with_capacity(crate::notify::DEFAULT_MAX_IN_FLIGHT)
     }
+}
+
+/// Wait-slot + waker factory used by [`AccessExec`].
+pub trait AsyncWait {
+    fn reserve(&self) -> Result<CompletionPermit, SubmitError>;
+    fn waker(&self, identity: RequestIdentity) -> Waker;
+    fn invalidate(&self, identity: RequestIdentity);
+    fn forget_invalidated(&self, identity: RequestIdentity);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExecState {
     New,
+    Suspended,
     Halted,
     Failed,
-    Yielded,
-    Suspended,
     Cancelled,
 }
 
-/// First VM run outcome used by the early-completion test.
-pub struct RunOutcome {
-    token: Option<SleepToken>,
-}
-
-impl RunOutcome {
-    pub fn token(&self) -> Option<SleepToken> {
-        self.token
-    }
-}
-
-/// Request-local VM, sleep coordinator, and suspend/resume state.
+/// Request-local VM plus generation-safe wait identity.
 pub struct AccessExec {
     vm: Option<Vm>,
-    coordinator: SleepCoordinator,
     request_id: u64,
-    current: Option<(SleepToken, i64)>,
+    identity: RequestIdentity,
     state: ExecState,
     suspend_committed: bool,
-    deferred: Option<SleepToken>,
+    deferred: bool,
+    permit: Option<CompletionPermit>,
+    last_status: Option<VmStatus>,
 }
 
 impl AccessExec {
-    /// Bind `program` with a request-local, non-`Clone` [`SleepSession`].
-    ///
-    /// `session` and `coordinator` must come from the same worker-wide
-    /// coordinator. Access setup obtains them from
-    /// [`crate::runtime::WorkerRuntime::open_access_sleep`].
     pub fn bind_program(
-        program: Arc<Program>,
+        program: std::sync::Arc<Program>,
         request_id: u64,
-        session: SleepSession,
-        coordinator: SleepCoordinator,
+        generation: u64,
+        runtime: Handle,
     ) -> Result<Self, String> {
         let mut vm = Vm::new_shared(program);
-        vm.bind_args_function(NGX_SLEEP_NAME, Box::new(session));
+        bind_ngx_hosts(&mut vm);
+        vm.set_async_bridge(Box::new(NgxAsyncBridge::new(runtime)))
+            .map_err(|err| err.to_string())?;
         Ok(Self {
             vm: Some(vm),
-            coordinator,
             request_id,
-            current: None,
+            identity: RequestIdentity::new(generation, request_id),
             state: ExecState::New,
             suspend_committed: false,
-            deferred: None,
+            deferred: false,
+            permit: None,
+            last_status: None,
         })
     }
 
@@ -245,23 +217,21 @@ impl AccessExec {
         self.request_id
     }
 
-    pub fn current_token(&self) -> Option<SleepToken> {
-        self.current.map(|(token, _)| token)
+    pub fn identity(&self) -> RequestIdentity {
+        self.identity
     }
 
-    pub fn vm_status(&self) -> Option<VmStatus> {
+    pub fn current_identity(&self) -> Option<RequestIdentity> {
         match self.state {
-            ExecState::Halted => Some(VmStatus::Halted),
-            ExecState::Yielded | ExecState::Suspended => Some(VmStatus::Yielded),
-            ExecState::Failed | ExecState::New | ExecState::Cancelled => None,
+            ExecState::Suspended => Some(self.identity),
+            _ => None,
         }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        matches!(self.state, ExecState::Cancelled)
+        self.state == ExecState::Cancelled
     }
 
-    /// Halted, Failed, or Cancelled: do not finalize again on client close.
     pub fn is_finished(&self) -> bool {
         matches!(
             self.state,
@@ -269,237 +239,220 @@ impl AccessExec {
         )
     }
 
-    /// Request-pool cleanup entry. Commits Cancelled (or stays Halted/Failed)
-    /// before the caller unregisters, aborts, or drops. Idempotent.
-    pub fn cleanup(&mut self) -> Option<SleepToken> {
-        let token = self.current.take().map(|(token, _)| token);
-        self.deferred = None;
-        self.suspend_committed = false;
-        self.vm = None;
-        match self.state {
-            ExecState::Halted | ExecState::Failed | ExecState::Cancelled => {}
-            ExecState::New | ExecState::Yielded | ExecState::Suspended => {
-                self.state = ExecState::Cancelled;
-            }
-        }
-        token
-    }
-
-    /// Run the VM until Halted, Yielded, or error. Does not submit or commit.
-    pub fn run_until_yield_or_halt(&mut self) -> Result<RunOutcome, String> {
-        let vm = self.vm.as_mut().ok_or_else(|| "missing VM".to_string())?;
-        match vm.run() {
-            Ok(VmStatus::Halted) => {
-                self.vm = None;
-                self.state = ExecState::Halted;
-                Ok(RunOutcome { token: None })
-            }
-            Ok(VmStatus::Yielded) => {
-                let (token, ms) = self
-                    .coordinator
-                    .claim_submission()
-                    .map_err(|err| err.to_string())?
-                    .ok_or_else(|| "yielded without sleep submission".to_string())?;
-                self.current = Some((token, ms));
-                self.state = ExecState::Yielded;
-                Ok(RunOutcome { token: Some(token) })
-            }
-            Ok(status) => {
-                self.fail_local();
-                Err(format!("unexpected VM status {status:?}"))
-            }
-            Err(err) => {
-                self.fail_local();
-                Err(err.to_string())
-            }
-        }
-    }
-
-    pub fn register_current(
-        &mut self,
-        registry: &mut TokenRegistry<u64>,
-    ) -> Result<(), RegistryError> {
-        let Some((token, _)) = self.current else {
-            return Ok(());
-        };
-        registry.try_insert(token, self.request_id)
+    pub fn vm_status(&self) -> Option<VmStatus> {
+        self.last_status
     }
 
     pub fn commit_suspend(&mut self) {
-        if matches!(self.state, ExecState::Yielded) {
-            self.suspend_committed = true;
-            self.state = ExecState::Suspended;
-        }
+        self.suspend_committed = true;
     }
 
-    /// Access-handler entry. Never resumes a yielded VM on this stack.
     pub fn handle_access(
         &mut self,
-        registry: &mut TokenRegistry<u64>,
-        submit: &mut impl SleepSubmit,
+        registry: &mut IdentityRegistry<u64>,
+        waiter: &impl AsyncWait,
     ) -> AccessStatus {
         match self.state {
             ExecState::Halted => AccessStatus::Ok,
             ExecState::Failed => AccessStatus::Error500,
-            ExecState::Suspended | ExecState::Yielded | ExecState::Cancelled => AccessStatus::Again,
-            ExecState::New => match self.run_until_yield_or_halt() {
-                Ok(outcome) if outcome.token.is_some() => {
-                    if self.arm_suspend(registry, submit).is_err() {
-                        AccessStatus::Error500
-                    } else {
-                        AccessStatus::Again
-                    }
-                }
-                Ok(_) => AccessStatus::Ok,
-                Err(_) => AccessStatus::Error500,
-            },
+            ExecState::Cancelled | ExecState::Suspended => AccessStatus::Again,
+            ExecState::New => self.run_and_arm(registry, waiter),
         }
     }
 
-    fn arm_suspend(
+    fn run_and_arm(
         &mut self,
-        registry: &mut TokenRegistry<u64>,
-        submit: &mut impl SleepSubmit,
-    ) -> Result<(), AccessArmError> {
-        let (token, ms) = self.current.ok_or(AccessArmError::Failed)?;
-        if self.register_current(registry).is_err() {
-            self.fail_local();
-            return Err(AccessArmError::Failed);
+        registry: &mut IdentityRegistry<u64>,
+        waiter: &impl AsyncWait,
+    ) -> AccessStatus {
+        let vm = match self.vm.as_mut() {
+            Some(vm) => vm,
+            None => {
+                self.state = ExecState::Failed;
+                return AccessStatus::Error500;
+            }
+        };
+        match vm.run() {
+            Ok(VmStatus::Halted) => {
+                self.last_status = Some(VmStatus::Halted);
+                self.state = ExecState::Halted;
+                AccessStatus::Ok
+            }
+            Ok(VmStatus::Waiting(op_id)) => {
+                self.last_status = Some(VmStatus::Waiting(op_id));
+                self.arm_wait(registry, waiter)
+                    .unwrap_or_else(|status| status)
+            }
+            Ok(VmStatus::Yielded) => {
+                self.state = ExecState::Failed;
+                AccessStatus::Error500
+            }
+            Err(_) => {
+                self.state = ExecState::Failed;
+                AccessStatus::Error500
+            }
         }
-        if let Err(err) = submit.submit(token, ms) {
-            registry.remove_exact(token, &self.request_id);
-            self.current = None;
+    }
+
+    fn arm_wait(
+        &mut self,
+        registry: &mut IdentityRegistry<u64>,
+        waiter: &impl AsyncWait,
+    ) -> Result<AccessStatus, AccessStatus> {
+        let permit = waiter.reserve().map_err(|_| {
+            self.state = ExecState::Failed;
+            AccessStatus::Error500
+        })?;
+        if let Err(err) = registry.try_insert(self.identity, self.request_id) {
+            drop(permit);
+            self.state = ExecState::Failed;
             let _ = err;
-            self.fail_local();
-            return Err(AccessArmError::Failed);
+            return Err(AccessStatus::Error500);
         }
-        self.commit_suspend();
-        Ok(())
+        self.permit = Some(permit);
+        let waker = waiter.waker(self.identity);
+        let mut cx = Context::from_waker(&waker);
+        let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
+        match vm.poll_waiting_host_op(&mut cx) {
+            Poll::Pending => {
+                self.state = ExecState::Suspended;
+                self.last_status = match self.last_status {
+                    Some(VmStatus::Waiting(op_id)) => Some(VmStatus::Waiting(op_id)),
+                    other => other,
+                };
+                Ok(AccessStatus::Again)
+            }
+            Poll::Ready(Ok(())) => {
+                registry.remove_exact(self.identity, &self.request_id);
+                self.permit = None;
+                self.resume_after_ready(registry, waiter)
+            }
+            Poll::Ready(Err(_)) => {
+                registry.remove_exact(self.identity, &self.request_id);
+                self.permit = None;
+                self.state = ExecState::Failed;
+                Err(AccessStatus::Error500)
+            }
+        }
+    }
+
+    fn resume_after_ready(
+        &mut self,
+        registry: &mut IdentityRegistry<u64>,
+        waiter: &impl AsyncWait,
+    ) -> Result<AccessStatus, AccessStatus> {
+        let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
+        match vm.resume() {
+            Ok(VmStatus::Halted) => {
+                self.last_status = Some(VmStatus::Halted);
+                self.state = ExecState::Halted;
+                Ok(AccessStatus::Ok)
+            }
+            Ok(VmStatus::Waiting(op_id)) => {
+                self.last_status = Some(VmStatus::Waiting(op_id));
+                self.arm_wait(registry, waiter)
+            }
+            Ok(VmStatus::Yielded) | Err(_) => {
+                self.state = ExecState::Failed;
+                Err(AccessStatus::Error500)
+            }
+        }
     }
 
     pub fn apply_ready(
         &mut self,
-        token: SleepToken,
-        registry: &mut TokenRegistry<u64>,
-        submit: &mut impl SleepSubmit,
+        identity: RequestIdentity,
+        registry: &mut IdentityRegistry<u64>,
+        waiter: &impl AsyncWait,
     ) -> ReadyEffect {
-        if matches!(
-            self.state,
-            ExecState::Cancelled | ExecState::Halted | ExecState::Failed
-        ) {
+        if identity != self.identity {
             return ReadyEffect::Ignored;
         }
-        match registry.get(token) {
-            Some(&id) if id == self.request_id => {}
-            Some(_) => return ReadyEffect::Ignored,
-            None => return ReadyEffect::Ignored,
-        }
-        let Some((current, _)) = self.current else {
-            return ReadyEffect::Ignored;
-        };
-        if current != token {
+        if self.state == ExecState::Cancelled || self.state == ExecState::Halted {
             return ReadyEffect::Ignored;
         }
         if !self.suspend_committed {
-            self.deferred = Some(token);
+            self.deferred = true;
             return ReadyEffect::Deferred;
         }
-        self.resume_after_complete(token, registry, submit)
+        if registry.get(identity) != Some(&self.request_id) {
+            return ReadyEffect::Ignored;
+        }
+        self.poll_ready(registry, waiter)
     }
 
     pub fn flush_deferred(
         &mut self,
-        registry: &mut TokenRegistry<u64>,
-        submit: &mut impl SleepSubmit,
+        registry: &mut IdentityRegistry<u64>,
+        waiter: &impl AsyncWait,
     ) -> ReadyEffect {
-        let Some(token) = self.deferred.take() else {
+        if !self.deferred || self.state == ExecState::Cancelled {
             return ReadyEffect::Ignored;
-        };
-        self.apply_ready(token, registry, submit)
+        }
+        self.deferred = false;
+        if !self.suspend_committed {
+            return ReadyEffect::Deferred;
+        }
+        self.poll_ready(registry, waiter)
     }
 
-    fn resume_after_complete(
+    fn poll_ready(
         &mut self,
-        token: SleepToken,
-        registry: &mut TokenRegistry<u64>,
-        submit: &mut impl SleepSubmit,
+        registry: &mut IdentityRegistry<u64>,
+        waiter: &impl AsyncWait,
     ) -> ReadyEffect {
-        match self.coordinator.complete(token) {
-            Ok(()) => {}
-            Err(_) => return ReadyEffect::Ignored,
-        }
         let Some(vm) = self.vm.as_mut() else {
-            self.fail_resume(registry);
-            return ReadyEffect::Failed;
+            return ReadyEffect::Ignored;
         };
-        match vm.resume() {
-            Ok(VmStatus::Halted) => {
-                self.finish_halted(registry);
-                ReadyEffect::Halted
-            }
-            Ok(VmStatus::Yielded) => match self.claim_next(registry, submit) {
-                Ok(()) => ReadyEffect::YieldedAgain,
-                Err(_) => {
-                    self.fail_resume(registry);
-                    ReadyEffect::Failed
+        let waker = waiter.waker(self.identity);
+        let mut cx = Context::from_waker(&waker);
+        match vm.poll_waiting_host_op(&mut cx) {
+            Poll::Pending => ReadyEffect::Ignored,
+            Poll::Ready(Ok(())) => {
+                registry.remove_exact(self.identity, &self.request_id);
+                self.permit = None;
+                match self.resume_after_ready(registry, waiter) {
+                    Ok(AccessStatus::Ok) => ReadyEffect::Halted,
+                    Ok(AccessStatus::Again) => ReadyEffect::WaitingAgain,
+                    _ => ReadyEffect::Failed,
                 }
-            },
-            Ok(_) | Err(_) => {
-                self.fail_resume(registry);
+            }
+            Poll::Ready(Err(_)) => {
+                registry.remove_exact(self.identity, &self.request_id);
+                self.permit = None;
+                self.state = ExecState::Failed;
                 ReadyEffect::Failed
             }
         }
     }
 
-    fn claim_next(
-        &mut self,
-        registry: &mut TokenRegistry<u64>,
-        submit: &mut impl SleepSubmit,
-    ) -> Result<(), AccessArmError> {
-        if let Some((old, _)) = self.current.take() {
-            registry.remove_exact(old, &self.request_id);
+    /// Invalidate this wait, then drop the VM/bridge future.
+    pub fn cleanup(&mut self) -> Option<RequestIdentity> {
+        if self.state == ExecState::Cancelled {
+            return None;
         }
-        let (token, ms) = self
-            .coordinator
-            .claim_submission()
-            .map_err(|_| AccessArmError::Failed)?
-            .ok_or(AccessArmError::Failed)?;
-        self.current = Some((token, ms));
-        self.state = ExecState::Yielded;
-        self.suspend_committed = false;
-        self.arm_suspend(registry, submit)
-    }
-
-    fn finish_halted(&mut self, registry: &mut TokenRegistry<u64>) {
-        if let Some((token, _)) = self.current.take() {
-            registry.remove_exact(token, &self.request_id);
+        if matches!(self.state, ExecState::Halted | ExecState::Failed) {
+            self.vm = None;
+            self.permit = None;
+            return None;
         }
-        self.deferred = None;
+        let identity = Some(self.identity);
+        self.state = ExecState::Cancelled;
+        self.deferred = false;
+        self.permit = None;
         self.vm = None;
-        self.state = ExecState::Halted;
+        identity
     }
 
-    fn fail_local(&mut self) {
-        self.current = None;
-        self.deferred = None;
-        self.vm = None;
-        self.state = ExecState::Failed;
-    }
-
-    fn fail_resume(&mut self, registry: &mut TokenRegistry<u64>) {
-        if let Some((token, _)) = self.current.take() {
-            registry.remove_exact(token, &self.request_id);
+    /// Tombstone, drop the VM/future, then forget the tombstone.
+    pub fn cleanup_wait(&mut self, waiter: &impl AsyncWait) -> Option<RequestIdentity> {
+        if self.is_finished() {
+            return self.cleanup();
         }
-        self.fail_local();
-    }
-}
-
-enum AccessArmError {
-    Failed,
-}
-
-impl Drop for AccessExec {
-    fn drop(&mut self) {
-        let _ = self.cleanup();
+        let identity = self.identity;
+        waiter.invalidate(identity);
+        let taken = self.cleanup();
+        waiter.forget_invalidated(identity);
+        taken
     }
 }

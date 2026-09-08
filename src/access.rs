@@ -1,11 +1,11 @@
 //! Access-phase VM execution: sync Halted via the worker pool, or
-//! `ngx::sleep` suspend/resume through the worker eventfd bridge.
+//! generic async host suspend/resume through the worker eventfd bridge.
 //!
-//! Yield wait returns `NGX_AGAIN`. `ngx_http_core_access_phase` stops the
-//! checker without advancing `phase_handler` and without incrementing
-//! `r->main->count`. Resume runs on the worker main event turn after the
-//! original handler returns: complete the coordinator, resume the same VM,
-//! then `ngx_http_core_run_phases` exactly once so this handler can return
+//! Wait returns `NGX_AGAIN`. `ngx_http_core_access_phase` stops the checker
+//! without advancing `phase_handler` and without incrementing `r->main->count`.
+//! Resume runs on the worker main event turn after the original handler
+//! returns: poll the waiting host op, resume the same VM, then
+//! `ngx_http_core_run_phases` exactly once so this handler can return
 //! `NGX_OK` or 500. Host-bound VMs are never returned to the Task 2 pool.
 
 use std::cell::RefCell;
@@ -24,12 +24,8 @@ use vm::{Program, VmError, VmStatus};
 
 use crate::Module;
 use crate::config::{self, LocationConf};
-use crate::notify::{DEFAULT_MAX_IN_FLIGHT, NotifyError};
-use crate::request_state::{
-    AccessExec, AccessStatus, ReadyEffect, SleepSubmit, SubmitError, TokenRegistry,
-};
-use crate::runtime::RuntimeError;
-use crate::sleep_binding::SleepToken;
+use crate::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
+use crate::request_state::{AccessExec, AccessStatus, IdentityRegistry, ReadyEffect};
 use crate::vm_pool;
 
 struct AccessCtx {
@@ -37,18 +33,18 @@ struct AccessCtx {
 }
 
 struct WorkerAccess {
-    ids: TokenRegistry<u64>,
-    live: TokenRegistry<*mut ngx_http_request_t>,
+    ids: IdentityRegistry<u64>,
+    live: IdentityRegistry<*mut ngx_http_request_t>,
     in_handler: bool,
-    deferred: Vec<SleepToken>,
+    deferred: Vec<RequestIdentity>,
     next_id: u64,
 }
 
 impl WorkerAccess {
     fn new() -> Self {
         Self {
-            ids: TokenRegistry::default(),
-            live: TokenRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT),
+            ids: IdentityRegistry::default(),
+            live: IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT),
             in_handler: false,
             deferred: Vec::new(),
             next_id: 1,
@@ -84,31 +80,31 @@ impl Drop for AccessCtx {
         // `Pool::allocate` registers this Drop as `ngx_pool_cleanup_add`.
         // NGINX 1.30.4 runs it from `ngx_destroy_pool` inside
         // `ngx_http_free_request`, after `r->cleanup` handlers and after
-        // `r->pool = NULL`. Commit Cancelled before unregister/abort/drop.
+        // `r->pool = NULL`. Invalidate identity first, then drop the VM.
         cleanup_access_ctx(self.exec.get_mut());
     }
 }
 
 fn cleanup_access_ctx(exec: &mut AccessExec) {
     let request_id = exec.request_id();
-    let token = exec.cleanup();
-    if let Some(token) = token {
-        unregister_exact(token, request_id, None);
-        invalidate_deferred(token);
-        let _ = crate::runtime::with_worker(|worker| worker.abort_sleep(token));
+    let identity = exec.identity();
+    unregister_exact(identity, request_id, None);
+    invalidate_deferred(identity);
+    if crate::runtime::with_worker(|worker| exec.cleanup_wait(worker)).is_none() {
+        let _ = exec.cleanup();
     }
 }
 
-fn invalidate_deferred(token: SleepToken) {
+fn invalidate_deferred(identity: RequestIdentity) {
     WORKER_ACCESS.with(|state| {
         state
             .borrow_mut()
             .deferred
-            .retain(|queued| *queued != token);
+            .retain(|queued| *queued != identity);
     });
 }
 
-/// Worker exit: drop token maps without dereferencing request pointers.
+/// Worker exit: drop identity maps without dereferencing request pointers.
 pub(crate) fn clear_worker_access() {
     WORKER_ACCESS.with(|state| {
         let mut state = state.borrow_mut();
@@ -117,20 +113,6 @@ pub(crate) fn clear_worker_access() {
         state.deferred.clear();
         state.in_handler = false;
     });
-}
-
-struct WorkerSleepSubmit;
-
-impl SleepSubmit for WorkerSleepSubmit {
-    fn submit(&mut self, token: SleepToken, ms: i64) -> Result<(), SubmitError> {
-        crate::runtime::with_worker(|worker| worker.submit_sleep(token, ms))
-            .ok_or(SubmitError::Closed)?
-            .map_err(|err| match err {
-                RuntimeError::Notify(NotifyError::QueueFull) => SubmitError::Full,
-                RuntimeError::Notify(NotifyError::ShutDown) => SubmitError::Closed,
-                _ => SubmitError::Closed,
-            })
-    }
 }
 
 /// Run a compiled program on a worker-local pooled VM until the first status.
@@ -236,28 +218,30 @@ fn finish_from_raw(raw: *mut ngx_http_request_t) -> Status {
         );
         return HTTPStatus::INTERNAL_SERVER_ERROR.into();
     };
-    let status = WORKER_ACCESS.with(|state| {
-        let mut state = state.borrow_mut();
-        ctx.exec
-            .borrow_mut()
-            .handle_access(&mut state.ids, &mut WorkerSleepSubmit)
-    });
+    let status = crate::runtime::with_worker(|worker| {
+        WORKER_ACCESS.with(|state| {
+            let mut state = state.borrow_mut();
+            ctx.exec.borrow_mut().handle_access(&mut state.ids, worker)
+        })
+    })
+    .unwrap_or(AccessStatus::Error500);
     if status == AccessStatus::Again {
-        if let Some(token) = ctx.exec.borrow().current_token() {
+        let identity = ctx.exec.borrow().current_identity();
+        if let Some(identity) = identity {
             let request_id = ctx.exec.borrow().request_id();
             let inserted =
-                WORKER_ACCESS.with(|state| state.borrow_mut().live.try_insert(token, raw));
+                WORKER_ACCESS.with(|state| state.borrow_mut().live.try_insert(identity, raw));
             if inserted.is_err() {
-                unregister_exact(token, request_id, Some(raw));
+                unregister_exact(identity, request_id, Some(raw));
                 ngx_log_error!(
                     NGX_LOG_ERR,
                     request.log(),
-                    "access_by_rss_file: duplicate sleep token mapping"
+                    "access_by_rss_file: duplicate async wait mapping"
                 );
                 return HTTPStatus::INTERNAL_SERVER_ERROR.into();
             }
             if !arm_read_close(raw) {
-                unregister_exact(token, request_id, Some(raw));
+                unregister_exact(identity, request_id, Some(raw));
                 ngx_log_error!(
                     NGX_LOG_ERR,
                     request.log(),
@@ -265,12 +249,13 @@ fn finish_from_raw(raw: *mut ngx_http_request_t) -> Status {
                 );
                 return HTTPStatus::INTERNAL_SERVER_ERROR.into();
             }
+            ctx.exec.borrow_mut().commit_suspend();
         }
     } else if status == AccessStatus::Error500 {
         ngx_log_error!(
             NGX_LOG_ERR,
             request.log(),
-            "access_by_rss_file: sleep access failed"
+            "access_by_rss_file: async access failed"
         );
     }
     status.as_nginx()
@@ -288,38 +273,42 @@ fn next_request_id() -> u64 {
     })
 }
 
-fn unregister_exact(token: SleepToken, request_id: u64, raw: Option<*mut ngx_http_request_t>) {
+fn unregister_exact(
+    identity: RequestIdentity,
+    request_id: u64,
+    raw: Option<*mut ngx_http_request_t>,
+) {
     WORKER_ACCESS.with(|state| {
         let mut state = state.borrow_mut();
-        let ids_removed = state.ids.remove_exact(token, &request_id).is_some();
+        let ids_removed = state.ids.remove_exact(identity, &request_id).is_some();
         if let Some(raw) = raw {
-            let _ = state.live.remove_exact(token, &raw);
+            let _ = state.live.remove_exact(identity, &raw);
         } else if ids_removed {
-            state.live.remove(token);
+            state.live.remove(identity);
         }
     });
 }
 
-/// Consume Task 4 ready tokens on the worker main event turn.
-pub fn on_sleep_ready(tokens: Vec<SleepToken>) {
+/// Consume ready identities on the worker main event turn.
+pub fn on_async_ready(identities: Vec<RequestIdentity>) {
     let deferred = WORKER_ACCESS.with(|state| {
         let mut state = state.borrow_mut();
         core::mem::take(&mut state.deferred)
     });
-    for token in deferred.into_iter().chain(tokens) {
-        dispatch_ready_token(token);
+    for identity in deferred.into_iter().chain(identities) {
+        dispatch_ready_identity(identity);
     }
 }
 
-fn dispatch_ready_token(token: SleepToken) {
+fn dispatch_ready_identity(identity: RequestIdentity) {
     let lookup = WORKER_ACCESS.with(|state| {
         let state = state.borrow();
         if state.in_handler {
             return ReadyLookup::InHandler;
         }
         match (
-            state.ids.get(token).copied(),
-            state.live.get(token).copied(),
+            state.ids.get(identity).copied(),
+            state.live.get(identity).copied(),
         ) {
             (Some(request_id), Some(raw)) => ReadyLookup::Live { raw, request_id },
             _ => ReadyLookup::Unknown,
@@ -327,32 +316,32 @@ fn dispatch_ready_token(token: SleepToken) {
     });
     let (raw, request_id) = match lookup {
         ReadyLookup::InHandler => {
-            WORKER_ACCESS.with(|state| state.borrow_mut().deferred.push(token));
+            WORKER_ACCESS.with(|state| state.borrow_mut().deferred.push(identity));
             return;
         }
         ReadyLookup::Unknown => return,
         ReadyLookup::Live { raw, request_id } => (raw, request_id),
     };
-    let effect = apply_on_request(raw, token, request_id);
+    let effect = apply_on_request(raw, identity, request_id);
     match effect {
         ReadyEffect::Halted | ReadyEffect::Failed => {
-            unregister_exact(token, request_id, Some(raw));
+            unregister_exact(identity, request_id, Some(raw));
             restore_block_reading(raw);
             // SAFETY: the request stayed alive because the access handler
             // returned NGX_AGAIN without finalizing. Resume is on the worker
             // main thread after that handler returned.
             unsafe { nginx_sys::ngx_http_core_run_phases(raw) };
         }
-        ReadyEffect::YieldedAgain => {
+        ReadyEffect::WaitingAgain => {
             WORKER_ACCESS.with(|state| {
-                let _ = state.borrow_mut().live.remove_exact(token, &raw);
+                let _ = state.borrow_mut().live.remove_exact(identity, &raw);
             });
-            if let Some(next) = current_token_on_request(raw) {
+            if let Some(next) = current_identity_on_request(raw) {
                 let _ = WORKER_ACCESS.with(|state| state.borrow_mut().live.try_insert(next, raw));
             }
         }
         ReadyEffect::Deferred => {
-            WORKER_ACCESS.with(|state| state.borrow_mut().deferred.push(token));
+            WORKER_ACCESS.with(|state| state.borrow_mut().deferred.push(identity));
         }
         ReadyEffect::Ignored => {}
     }
@@ -369,11 +358,11 @@ enum ReadyLookup {
 
 fn apply_on_request(
     raw: *mut ngx_http_request_t,
-    token: SleepToken,
+    identity: RequestIdentity,
     request_id: u64,
 ) -> ReadyEffect {
-    // SAFETY: both worker-local maps contained this exact token, so `raw`
-    // is the live request that armed it. Stale/unknown tokens never reach here.
+    // SAFETY: both worker-local maps contained this exact identity, so `raw`
+    // is the live request that armed it. Stale/unknown identities never reach here.
     let request = unsafe { Request::from_ngx_http_request(raw) };
     let Some(ctx) = request.get_module_ctx::<AccessCtx>(Module::module()) else {
         return ReadyEffect::Ignored;
@@ -381,19 +370,22 @@ fn apply_on_request(
     if ctx.exec.borrow().request_id() != request_id || ctx.exec.borrow().is_cancelled() {
         return ReadyEffect::Ignored;
     }
-    WORKER_ACCESS.with(|state| {
-        let mut state = state.borrow_mut();
-        ctx.exec
-            .borrow_mut()
-            .apply_ready(token, &mut state.ids, &mut WorkerSleepSubmit)
+    crate::runtime::with_worker(|worker| {
+        WORKER_ACCESS.with(|state| {
+            let mut state = state.borrow_mut();
+            ctx.exec
+                .borrow_mut()
+                .apply_ready(identity, &mut state.ids, worker)
+        })
     })
+    .unwrap_or(ReadyEffect::Ignored)
 }
 
-fn current_token_on_request(raw: *mut ngx_http_request_t) -> Option<SleepToken> {
+fn current_identity_on_request(raw: *mut ngx_http_request_t) -> Option<RequestIdentity> {
     // SAFETY: same liveness as [`apply_on_request`].
     let request = unsafe { Request::from_ngx_http_request(raw) };
     let ctx = request.get_module_ctx::<AccessCtx>(Module::module())?;
-    ctx.exec.borrow().current_token()
+    ctx.exec.borrow().current_identity()
 }
 
 /// Install the module read-close handler and re-arm like auth delay / limit_req.

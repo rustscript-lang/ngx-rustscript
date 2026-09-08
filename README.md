@@ -6,10 +6,10 @@ once at configuration time.
 
 Import-free scripts run synchronously to `Halted` on a worker-local VM
 pool. Scripts that import exactly `ngx::sleep` bind a request-local VM,
-return `NGX_AGAIN` while the worker runtime sleeps, and resume the same VM
-from the eventfd callback. Client disconnect during a sleep finalizes the
-request as HTTP 499. Graceful master shutdown aborts in-flight sleeps
-instead of waiting them out.
+return `NGX_AGAIN` while a generic host future is pending, and resume the
+same VM from the eventfd callback. Client disconnect during a wait
+finalizes the request as HTTP 499. Graceful master shutdown cancels
+in-flight host futures instead of waiting them out.
 
 ## Requirements
 
@@ -198,24 +198,26 @@ ngx::sleep(10);
 ngx::sleep(10);
 ```
 
-`ngx::sleep` takes one nonnegative integer argument `ms` (milliseconds) and
-returns `null`. The first host entry registers one in-flight sleep and
-yields; the script does not continue until that sleep completes. Two
-sequential sleeps use distinct tokens and each submit once.
+`ngx::sleep` is a `pd-host-function` async host (`ms:int -> null`). The
+generated wrapper submits an owned host future; the impl validates a
+nonnegative millisecond count and awaits Tokio. The first host entry
+returns `VmStatus::Waiting`. Two sequential sleeps reuse the same
+generation-safe request identity and each wait once.
 
 On each request the access handler leases a worker-thread-local VM via
 `Vm::new_shared(Arc<Program>)`. Import-free programs run to
 `VmStatus::Halted` and return `NGX_OK` so the content phase proceeds. After
 `Halted` and after a recoverable runtime error the VM is reset with
 `Vm::reset_for_reuse` and parked only when `Vm::is_reusable` is true. Idle
-pool size is bounded. VM errors and unexpected `Yielded` / `Waiting` on
-import-free programs fail the request with 500.
+pool size is bounded. VM errors and unexpected `Waiting` on import-free
+programs fail the request with 500.
 
 Scripts that imported `ngx::sleep` bind a request-local VM instead of the
-pool. Yield returns `NGX_AGAIN` without incrementing `r->main->count`. The
-eventfd callback resumes the same VM on the worker main thread and continues
-`ngx_http_core_run_phases` exactly once so the access handler can return
-`NGX_OK`. Host-bound / yielded VMs are never returned to the pool.
+pool. `Waiting` returns `NGX_AGAIN` without incrementing `r->main->count`.
+The eventfd callback polls the waiting host op, resumes the same VM on the
+worker main thread, and continues `ngx_http_core_run_phases` exactly once
+so the access handler can return `NGX_OK`. Host-bound waiting VMs are never
+returned to the pool.
 
 ## Runtime and compatibility limits
 
@@ -225,26 +227,28 @@ eventfd callback resumes the same VM on the worker main thread and continues
   master, and config never create Tokio threads or the eventfd.
   `exit_process` shuts the runtime down and is idempotent.
 - Tokio features: `rt` + `rt-multi-thread` + `time` only (no HTTP/network
-  client). One worker thread named `ngx-rustscript-sleep`.
-- Sleep capacity is `DEFAULT_MAX_IN_FLIGHT` (1024). Submit is rejected when
-  full. Tokio tasks own only sleep tokens and durations — no NGINX
-  request/pool/VM pointers cross into Tokio, and Tokio never calls
-  `ngx_post_event`.
-- Completions enqueue under a mutex, then write `eventfd(2)` created with
-  `EFD_NONBLOCK|EFD_CLOEXEC`. The worker main thread registers the fd with
-  `ngx_get_connection`. The pinned Linux epoll path uses `add` with
-  `EPOLLIN`.
-- Client close while a sleep is in flight is detected with a worker-thread
+  client). One worker thread named `ngx-rustscript-async`.
+- Async wait capacity is `DEFAULT_MAX_IN_FLIGHT` (1024). Reserve is rejected
+  when full. Host futures and wakers own only a queue sender and request
+  identity — no NGINX request/pool/VM pointers cross into Tokio, and Tokio
+  never calls `ngx_post_event`.
+- Completions enqueue the request identity under a mutex, then write
+  `eventfd(2)` created with `EFD_NONBLOCK|EFD_CLOEXEC`. The worker main
+  thread registers the fd with `ngx_get_connection`. The pinned Linux epoll
+  path uses `add` with `EPOLLIN`.
+- Client close while a wait is in flight is detected with a worker-thread
   wrapper around `ngx_http_test_reading`. Confirmed close finalizes once
   with `NGX_HTTP_CLIENT_CLOSED_REQUEST` (access log 499), then request-pool
-  cleanup unregisters the token and aborts the sleep.
-- Worker `exit_process` rejects new work, aborts tracked sleeps, shuts down
-  Tokio, unregisters/closes eventfd once, and clears worker registries
-  without touching request pointers. Long sleeps do not delay graceful
-  worker exit (SIGQUIT).
-- `pd-vm` pin `4b749862ff1632ef1266d75709da3676de37356c`, package `pd-vm`,
-  lib name `vm`. This pin has `Vm::new_shared(Arc<Program>)`; `try_new` only
-  wraps owned `Vm::new` after frame-limit validation. Normal termination is
+  cleanup invalidates the identity and drops the host future.
+- Worker `exit_process` rejects new work, invalidates senders/wakers,
+  cancels/drops host futures, unregisters/closes eventfd once, and clears
+  worker registries without touching request pointers. Long sleeps do not
+  delay graceful worker exit (SIGQUIT).
+- `pd-vm` pin `4b749862ff1632ef1266d75709da3676de37356c`, packages `pd-vm`
+  and `pd-host-function`. This pin has `Vm::new_shared(Arc<Program>)`,
+  `HostAsyncBridge`, `Vm::set_async_bridge`, `VmStatus::Waiting`,
+  `Vm::poll_waiting_host_op`, and `Vm::resume`. `try_new` only wraps owned
+  `Vm::new` after frame-limit validation. Normal termination is
   `Ok(VmStatus::Halted)`. Drop of `Vm` owns cancellation and resource
   closure.
 
@@ -296,7 +300,7 @@ to a directory to place them elsewhere.
   `NGINX_SOURCE_DIR` / `NGINX_BUILD_DIR` at the configured 1.30.4 tree.
 - `script imports are not supported` / `failed to compile script` — only
   `ngx::sleep` may be imported. `print` and `runtime::sleep` are rejected.
-- HTTP 500 from an access script — VM runtime error or unexpected yield on
+- HTTP 500 from an access script — VM runtime error or unexpected Waiting on
   an import-free program. Check the error log.
 - HTTP 499 on a sleep route — the client closed the connection before the
   sleep completed.

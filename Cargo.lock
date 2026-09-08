@@ -229,6 +229,7 @@ dependencies = [
  "nginx-sys",
  "ngx",
  "ngx-rustscript-nginx-test-stubs",
+ "pd-host-function",
  "pd-vm",
  "tokio",
 ]
