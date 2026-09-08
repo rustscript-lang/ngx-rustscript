@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::time::Duration;
 
 use nginx_sys::{ngx_cycle_t, ngx_event_t, ngx_int_t, ngx_uint_t};
@@ -19,11 +20,13 @@ use ngx::ffi::{NGX_LOG_ERR, NGX_LOG_NOTICE, NGX_PROCESS_SINGLE, NGX_PROCESS_WORK
 use ngx::ngx_log_error;
 use tokio::runtime::Runtime;
 use tokio::task::AbortHandle;
+use vm::Program;
 
 use crate::notify::{
     CompletionPermit, CompletionSender, DEFAULT_MAX_IN_FLIGHT, NotifyBridge, NotifyError,
 };
-use crate::sleep_binding::{SleepCoordinator, SleepOpsError, SleepToken};
+use crate::request_state::AccessExec;
+use crate::sleep_binding::{SleepCoordinator, SleepOpsError, SleepSession, SleepToken};
 
 thread_local! {
     static WORKER: RefCell<Option<WorkerRuntime>> = const { RefCell::new(None) };
@@ -37,6 +40,7 @@ pub enum RuntimeError {
     InvalidDuration,
     RuntimeBuild(String),
     AlreadyStarted,
+    DuplicateToken,
 }
 
 impl fmt::Display for RuntimeError {
@@ -49,6 +53,9 @@ impl fmt::Display for RuntimeError {
             }
             Self::RuntimeBuild(msg) => write!(f, "tokio runtime build failed: {msg}"),
             Self::AlreadyStarted => write!(f, "worker runtime is already started"),
+            Self::DuplicateToken => {
+                write!(f, "sleep token is already tracked by the worker runtime")
+            }
         }
     }
 }
@@ -89,11 +96,42 @@ impl SleepTask {
     }
 }
 
+/// Request-local sleep binding created on the worker main thread.
+///
+/// The [`SleepSession`] is not `Clone`. The completion handle is a clone of
+/// the worker-wide [`SleepCoordinator`].
+pub struct AccessSleepBinding {
+    session: SleepSession,
+    completion: SleepCoordinator,
+}
+
+impl AccessSleepBinding {
+    fn from_coordinator(coordinator: &SleepCoordinator) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            session: SleepSession::new(coordinator)?,
+            completion: coordinator.clone(),
+        })
+    }
+
+    pub fn session_mut(&mut self) -> &mut SleepSession {
+        &mut self.session
+    }
+
+    pub fn completion(&self) -> &SleepCoordinator {
+        &self.completion
+    }
+
+    fn into_parts(self) -> (SleepSession, SleepCoordinator) {
+        (self.session, self.completion)
+    }
+}
+
 /// Per-worker Tokio runtime, eventfd bridge, and tracked abort handles.
 pub struct WorkerRuntime {
     runtime: Option<Runtime>,
     notify: NotifyBridge,
     tasks: std::sync::Mutex<HashMap<SleepToken, AbortHandle>>,
+    coordinator: SleepCoordinator,
     stopped: bool,
 }
 
@@ -113,6 +151,7 @@ impl WorkerRuntime {
             runtime: Some(runtime),
             notify: NotifyBridge::with_capacity(cap)?,
             tasks: std::sync::Mutex::new(HashMap::new()),
+            coordinator: SleepCoordinator::new(),
             stopped: false,
         })
     }
@@ -132,6 +171,25 @@ impl WorkerRuntime {
     #[cfg(test)]
     pub(crate) fn in_flight(&self) -> Result<usize, NotifyError> {
         self.notify.in_flight()
+    }
+
+    /// Create a request-local non-`Clone` [`SleepSession`] from the worker-wide
+    /// coordinator and return the matching completion handle.
+    pub fn open_access_sleep(&self) -> Result<AccessSleepBinding, RuntimeError> {
+        AccessSleepBinding::from_coordinator(&self.coordinator)
+    }
+
+    /// Worker-main-thread access setup: bind one request-local sleep session.
+    pub fn bind_access_exec(
+        &self,
+        program: Arc<Program>,
+        request_id: u64,
+    ) -> Result<AccessExec, String> {
+        let (session, completion) = self
+            .open_access_sleep()
+            .map_err(|err| err.to_string())?
+            .into_parts();
+        AccessExec::bind_program(program, request_id, session, completion)
     }
 
     /// Submit one Task 3 `(SleepToken, ms)` claim to a real `tokio::time::sleep`.
@@ -162,9 +220,15 @@ impl WorkerRuntime {
             .run(),
         );
         match self.tasks.lock() {
-            Ok(mut tasks) => {
-                tasks.insert(token, handle.abort_handle());
-            }
+            Ok(mut tasks) => match tasks.entry(token) {
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    handle.abort();
+                    return Err(RuntimeError::DuplicateToken);
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(handle.abort_handle());
+                }
+            },
             Err(_) => {
                 handle.abort();
                 return Err(NotifyError::Poisoned.into());
@@ -314,10 +378,12 @@ unsafe extern "C" fn eventfd_read_handler(ev: *mut ngx_event_t) {
         unsafe { (*ev).log }
     };
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        WORKER.with(|slot| match slot.borrow_mut().as_mut() {
-            Some(worker) => worker.on_notify_readable(),
-            None => Ok(()),
-        })
+        let ready = WORKER.with(|slot| match slot.borrow_mut().as_mut() {
+            Some(worker) => worker.drain_ready(),
+            None => Ok(Vec::new()),
+        })?;
+        crate::access::on_sleep_ready(ready);
+        Ok::<(), RuntimeError>(())
     }));
     match result {
         Ok(Ok(())) => {}
@@ -591,5 +657,38 @@ mod tests {
         let err = worker.submit_sleep(token(1), 0).expect_err("poison");
         assert_eq!(err, RuntimeError::Notify(NotifyError::Poisoned));
         drop(worker);
+    }
+
+    #[test]
+    fn two_sessions_from_one_worker_receive_distinct_first_tokens() {
+        let mut worker = WorkerRuntime::start().unwrap();
+        let mut first = worker.open_access_sleep().unwrap();
+        let mut second = worker.open_access_sleep().unwrap();
+        assert!(matches!(
+            first.session_mut().call(&[Value::Int(1)]).unwrap(),
+            CallOutcome::Yield
+        ));
+        assert!(matches!(
+            second.session_mut().call(&[Value::Int(2)]).unwrap(),
+            CallOutcome::Yield
+        ));
+        let t1 = first.completion().claim_submission().unwrap().unwrap().0;
+        let t2 = second.completion().claim_submission().unwrap().unwrap().0;
+        assert_ne!(t1, t2);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn duplicate_task_token_is_rejected_without_replacing() {
+        let mut worker = WorkerRuntime::start().unwrap();
+        worker.submit_sleep(token(1), 60_000).unwrap();
+        let err = worker.submit_sleep(token(1), 0).expect_err("duplicate");
+        assert_eq!(err, RuntimeError::DuplicateToken);
+        let start = Instant::now();
+        worker.shutdown();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "original mapping must remain abortable on shutdown"
+        );
     }
 }

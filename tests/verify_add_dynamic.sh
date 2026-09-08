@@ -71,7 +71,7 @@ fi
 
 NM_OUT="$(nm -D --defined-only --format=posix "$MODULE_SO" || true)"
 for stub in ngx_conf_full_name ngx_conf_log_error ngx_array_push ngx_log_error_core \
-  ngx_pool_cleanup_add ngx_palloc ngx_http_core_module ngx_get_connection \
+  ngx_pool_cleanup_add ngx_palloc ngx_http_core_module ngx_http_core_run_phases ngx_get_connection \
   ngx_free_connection ngx_close_connection ngx_event_actions ngx_event_flags ngx_process; do
   if printf '%s\n' "$NM_OUT" | awk '{print $1}' | grep -qx "$stub"; then
     echo "add-dynamic module must not define test NGINX stub $stub" >&2

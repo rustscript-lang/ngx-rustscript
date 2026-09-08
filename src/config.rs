@@ -13,7 +13,11 @@ use ngx::ffi::{
 };
 use ngx::http::{Merge, MergeConfigError};
 use ngx::{ngx_conf_log_error, ngx_string};
-use vm::{Program, Vm, compile_source};
+use vm::{
+    CompileSourceFileOptions, Program, SourceFlavor, Vm, compile_source_with_flavor_and_options,
+};
+
+use crate::sleep_binding::{NGX_SLEEP_NAME, ngx_sleep_catalog};
 
 /// Compiled access-phase program stored on the location config.
 #[derive(Default)]
@@ -133,24 +137,39 @@ pub fn load_rss_file(path: &Path) -> Result<String, ConfigError> {
     String::from_utf8(bytes).map_err(|_| ConfigError::NotUtf8(path.to_path_buf()))
 }
 
-/// Task2 does not bind `print`, `runtime::sleep`, `ngx::sleep`, or any other
-/// host import. Reject every non-empty `Program.imports` at config time.
+/// Accept exactly `ngx::sleep`. Reject `print`, `runtime::sleep`, and every
+/// other host import.
 pub fn reject_program_imports(program: &Program) -> Result<(), ConfigError> {
-    if program.imports.is_empty() {
-        return Ok(());
-    }
     let names = program
         .imports
         .iter()
         .map(|import| import.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(ConfigError::UnsupportedImport(names))
+        .filter(|name| *name != NGX_SLEEP_NAME)
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        Ok(())
+    } else {
+        Err(ConfigError::UnsupportedImport(names.join(", ")))
+    }
 }
 
-/// Compile source and reject every host import for this sync milestone.
+/// True when the compiled program imported the Task 3 `ngx::sleep` host.
+pub fn program_needs_sleep(program: &Program) -> bool {
+    program
+        .imports
+        .iter()
+        .any(|import| import.name.as_str() == NGX_SLEEP_NAME)
+}
+
+/// Compile with the Task 3 `ngx::sleep` catalog and reject every other import.
 pub fn compile_rss_source(source: &str) -> Result<Arc<Program>, ConfigError> {
-    let compiled = compile_source(source).map_err(|err| ConfigError::Compile(err.to_string()))?;
+    let catalog = Arc::new(ngx_sleep_catalog());
+    let compiled = compile_source_with_flavor_and_options(
+        source,
+        SourceFlavor::RustScript,
+        CompileSourceFileOptions::default().with_host_api_catalog(catalog),
+    )
+    .map_err(|err| ConfigError::Compile(err.to_string()))?;
     reject_program_imports(&compiled.program)?;
     Vm::try_new(compiled.program.clone())
         .map_err(|err| ConfigError::VmConstruct(err.to_string()))?;

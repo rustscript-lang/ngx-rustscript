@@ -2,11 +2,10 @@
 
 NGINX dynamic HTTP module that hosts RustScript (`pd-vm`) at the access
 phase. Location directive `access_by_rss_file <path>` compiles the script
-once at configuration time and runs it synchronously to `Halted` on each
-request. `ngx::sleep` is a locked VM host contract with a one-time
-`(SleepToken, ms)` claim API. A worker-local Tokio runtime and Linux
-eventfd bridge exist after `init_process`; they are not bound into
-production access yet.
+once at configuration time. Import-free scripts run synchronously to
+`Halted` on a worker-local VM pool. Scripts that import exactly `ngx::sleep`
+bind a request-local VM, return `NGX_AGAIN` while the worker runtime sleeps,
+and resume the same VM from the eventfd callback.
 
 ## Pinned revisions
 
@@ -273,9 +272,10 @@ Contract:
   (`GenerationInvalid`). Duplicate, unknown, not-completed, exhausted-id,
   and poisoned-mutex errors are distinct. Coordinator state is bounded by
   in-flight operations.
-- Config still rejects every import, including `ngx::sleep`. Access-phase
-  NGINX/Tokio integration remains pending. A `Yielded` VM is still
-  non-reusable and dropped by the worker-local pool.
+- Config accepts exactly `ngx::sleep` and compiles with that host catalog.
+  `print`, `runtime::sleep`, and every other import are still rejected.
+  Access suspend/resume is Task 5: `NGX_AGAIN` wait, worker-local token
+  registry, eventfd resume of the same VM, then one phase continuation.
 
 ## Worker runtime and eventfd bridge (Task 4)
 
@@ -311,9 +311,45 @@ idempotent.
   cannot write after the fd is invalidated. Reject new tasks, abort
   tracked sleeps, shut down Tokio, unregister (`ngx_close_connection`)
   and close the fd only after writers cannot use it.
-- Not in this milestone: production `access_by_rss_file` still rejects
-  `ngx::sleep`, does not bind sleep, retain requests, resume the VM,
-  advance phases, or look up a request registry.
+- Not in Task 4: production access did not yet bind sleep or resume a request.
+  Task 5 consumes `drain_ready` on the eventfd callback.
+
+## Access suspend and resume (Task 5)
+
+Pinned NGINX 1.30.4 `ngx_http_core_access_phase` treats `NGX_AGAIN` (and
+`NGX_DONE`) as the wait codes: the checker returns `NGX_OK` and stops
+without advancing `phase_handler`. `NGX_AGAIN` does not increment
+`r->main->count`; the connection still owns the request. This module
+returns `NGX_AGAIN` on Yield and does not retain/release the count.
+
+- Config compiles with the Task 3 `ngx::sleep` catalog and accepts that
+  import only. Import-free programs still use the Task 2 VM pool.
+  Host-bound / yielded VMs are dropped; they never enter the pool.
+- On an access request that imported `ngx::sleep`, the worker-wide
+  `SleepCoordinator` (owned by `WorkerRuntime` for the worker lifetime)
+  creates one non-`Clone` `SleepSession`. Tokens are unique within the
+  worker. The handler runs until Halted, error, or Yielded.
+- Request state lives in NGINX module ctx (`pool.allocate` + cleanup).
+  A worker-local TLS registry maps `SleepToken` to the live request.
+  Tokio tasks still own only tokens and durations — no request/VM/pool
+  pointer crosses into Tokio. Registry, live-request, and abort-handle
+  maps reject duplicate insertion without replacing an existing entry.
+  Cleanup removes only the matching request/generation mapping.
+- Register the token on the worker main thread, then submit the claimed
+  `(token, ms)` to Task 4. Completions that arrive before the handler
+  commits to suspend are deferred and never resume the VM on the access
+  stack.
+- The eventfd callback drains ready tokens, looks up a live generation,
+  marks `SleepCoordinator::complete`, and resumes only after the original
+  handler has returned. Halted: clear registry/ctx, continue
+  `ngx_http_core_run_phases` exactly once so the access handler returns
+  `NGX_OK`. Yield again: claim/register/submit once and stay suspended.
+  Errors: one HTTP 500 path, no phase double-advance.
+- Registry capacity matches Task 4 `DEFAULT_MAX_IN_FLIGHT` (1024). Full
+  submit/registry rejects before retain/submit. Unknown, mismatched, and
+  stale tokens fail closed.
+- Not in this milestone (Task 6): client disconnect cleanup, abort
+  handles, and full cancellation races.
 
 ## Related projects
 

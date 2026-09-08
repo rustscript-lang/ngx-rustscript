@@ -741,20 +741,11 @@ fn mutex_poison_returns_error_and_does_not_panic() {
 }
 
 #[test]
-fn config_compile_path_still_rejects_ngx_sleep_imports() {
-    let err = ngx_rustscript::config::compile_rss_source(include_str!("fixtures/ngx_sleep.rss"))
-        .expect_err("config path must still reject ngx::sleep");
-    match err {
-        ngx_rustscript::config::ConfigError::Compile(msg)
-        | ngx_rustscript::config::ConfigError::UnsupportedImport(msg) => {
-            let lower = msg.to_ascii_lowercase();
-            assert!(
-                lower.contains("ngx") || lower.contains("sleep"),
-                "error should name ngx::sleep, got {msg}"
-            );
-        }
-        other => panic!("expected compile or unsupported import, got {other:?}"),
-    }
+fn config_compile_path_accepts_ngx_sleep_imports() {
+    let program =
+        ngx_rustscript::config::compile_rss_source(include_str!("fixtures/ngx_sleep.rss"))
+            .expect("config path accepts ngx::sleep");
+    assert!(ngx_rustscript::config::program_needs_sleep(&program));
 }
 
 #[test]

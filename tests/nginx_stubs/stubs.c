@@ -95,3 +95,8 @@ void ngx_close_connection(void *c)
 __attribute__((aligned(8))) unsigned char ngx_event_actions[80];
 uintptr_t ngx_event_flags;
 uintptr_t ngx_process;
+
+void ngx_http_core_run_phases(void *r)
+{
+    (void)r;
+}

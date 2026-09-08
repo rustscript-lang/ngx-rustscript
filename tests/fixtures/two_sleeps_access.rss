@@ -1,0 +1,3 @@
+use ngx;
+ngx::sleep(10);
+ngx::sleep(10);

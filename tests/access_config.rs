@@ -46,6 +46,19 @@ fn assert_unsupported_import(err: ConfigError, needle: &str) {
     }
 }
 
+fn assert_rejected_host(err: ConfigError, needle: &str) {
+    match err {
+        ConfigError::UnsupportedImport(msg) | ConfigError::Compile(msg) => {
+            let lower = msg.to_ascii_lowercase();
+            assert!(
+                lower.contains(&needle.to_ascii_lowercase()),
+                "host rejection should name {needle}, got {msg}"
+            );
+        }
+        other => panic!("expected UnsupportedImport or Compile containing {needle}, got {other:?}"),
+    }
+}
+
 #[test]
 fn resolve_absolute_path_is_unchanged() {
     let conf_prefix = Path::new("/prefix/conf");
@@ -133,7 +146,7 @@ fn print_import_is_rejected() {
         reject_program_imports(&compiled.program).expect_err("print"),
         "print",
     );
-    assert_unsupported_import(
+    assert_rejected_host(
         compile_rss_source(include_str!("fixtures/print.rss")).expect_err("print"),
         "print",
     );
@@ -155,26 +168,19 @@ fn runtime_sleep_import_is_rejected() {
         reject_program_imports(&compiled.program).expect_err("runtime::sleep"),
         "runtime::sleep",
     );
-    assert_unsupported_import(
+    assert_rejected_host(
         compile_rss_source(include_str!("fixtures/runtime_sleep.rss")).expect_err("runtime::sleep"),
         "runtime::sleep",
     );
 }
 
 #[test]
-fn ngx_sleep_is_rejected_at_config_time() {
-    let err = compile_rss_source(include_str!("fixtures/ngx_sleep.rss"))
-        .expect_err("ngx::sleep must not bind in this milestone");
-    match err {
-        ConfigError::Compile(msg) | ConfigError::UnsupportedImport(msg) => {
-            let lower = msg.to_ascii_lowercase();
-            assert!(
-                lower.contains("ngx") || lower.contains("sleep"),
-                "error should name ngx::sleep, got {msg}"
-            );
-        }
-        other => panic!("expected compile or unsupported import, got {other:?}"),
-    }
+fn ngx_sleep_is_accepted_at_config_time() {
+    let program = compile_rss_source(include_str!("fixtures/ngx_sleep.rss")).expect("ngx::sleep");
+    assert!(
+        ngx_rustscript::config::program_needs_sleep(&program),
+        "ngx::sleep import must be recorded"
+    );
 }
 
 #[test]
@@ -295,6 +301,7 @@ fn test_binary_defines_exact_nginx_stub_symbols() {
         "ngx_pool_cleanup_add",
         "ngx_palloc",
         "ngx_http_core_module",
+        "ngx_http_core_run_phases",
     ] {
         assert!(
             stdout

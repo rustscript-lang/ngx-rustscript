@@ -28,6 +28,7 @@ pub const FORBIDDEN_DEFINED_NGINX_STUBS: &[&str] = &[
     "ngx_event_actions",
     "ngx_event_flags",
     "ngx_process",
+    "ngx_http_core_run_phases",
 ];
 
 pub fn resolve_module_candidate(

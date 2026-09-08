@@ -42,7 +42,7 @@ pub fn sleep_function_schema() -> HostFunctionSchema {
     )
 }
 
-/// Catalog containing only [`NGX_SLEEP_NAME`]. Config still rejects this import.
+/// Catalog containing only [`NGX_SLEEP_NAME`]. Config accepts this import.
 pub fn ngx_sleep_catalog() -> HostApiCatalog {
     let mut builder = HostApiBuilder::new();
     builder.function(sleep_function_schema());

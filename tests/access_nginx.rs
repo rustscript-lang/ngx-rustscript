@@ -251,8 +251,22 @@ fn nginx_t_rejects_runtime_sleep_import() {
 }
 
 #[test]
-fn nginx_t_rejects_ngx_sleep_import() {
-    nginx_t_rejects_import_fixture("t-ngx-sleep", "ngx_sleep.rss", &["ngx"]);
+fn nginx_t_accepts_ngx_sleep_import() {
+    let nginx = nginx_binary();
+    let module = module_cdylib();
+    let prefix = isolated_prefix("t-ngx-sleep");
+    let conf = conf_skeleton(
+        &module,
+        &prefix,
+        &location_with_script("/", &fixture("ngx_sleep.rss")),
+    );
+    write_conf(&prefix, &conf);
+    let out = nginx_test(&nginx, &prefix);
+    let text = combined(&out);
+    assert!(
+        out.status.success(),
+        "ngx::sleep must pass nginx -t:\n{text}"
+    );
 }
 
 #[test]

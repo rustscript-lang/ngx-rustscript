@@ -7,6 +7,7 @@ use ngx::http::{self, HttpModule, HttpModuleLocationConf};
 pub mod access;
 pub mod config;
 pub mod notify;
+pub mod request_state;
 pub mod runtime;
 pub mod sleep_binding;
 pub(crate) mod vm_pool;
