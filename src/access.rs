@@ -24,6 +24,7 @@ use vm::{Program, VmError, VmStatus};
 
 use crate::Module;
 use crate::config::{self, LocationConf};
+use crate::host::{AllowedOps, NgxPhase, RequestExecutionScope};
 use crate::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
 use crate::request_state::{AccessExec, AccessStatus, IdentityRegistry, ReadyEffect};
 use crate::vm_pool;
@@ -115,6 +116,24 @@ pub(crate) fn clear_worker_access() {
     });
 }
 
+fn enter_access_scope(
+    raw: *mut ngx_http_request_t,
+    identity: RequestIdentity,
+) -> RequestExecutionScope {
+    RequestExecutionScope::enter(
+        raw,
+        identity,
+        NgxPhase::Access,
+        AllowedOps::for_phase(NgxPhase::Access),
+    )
+}
+
+/// Identity for the synchronous pooled-VM path, which never registers a live
+/// request. `request_id` 0 is reserved so this cannot collide with AccessExec.
+fn sync_scope_identity() -> RequestIdentity {
+    RequestIdentity::new(0, 0)
+}
+
 /// Run a compiled program on a worker-local pooled VM until the first status.
 pub fn run_access_program(program: &Arc<Program>) -> Result<VmStatus, VmError> {
     vm_pool::run(program)
@@ -148,6 +167,8 @@ fn run_configured_access(request: &mut Request, conf: &LocationConf) -> Status {
         return Status::NGX_DECLINED;
     };
     if !config::program_needs_sleep(program) {
+        let raw = request.as_mut() as *mut ngx_http_request_t;
+        let _scope = enter_access_scope(raw, sync_scope_identity());
         return match run_access_program(program) {
             Ok(VmStatus::Halted) => Status::NGX_OK,
             Ok(status) => {
@@ -218,13 +239,17 @@ fn finish_from_raw(raw: *mut ngx_http_request_t) -> Status {
         );
         return HTTPStatus::INTERNAL_SERVER_ERROR.into();
     };
-    let status = crate::runtime::with_worker(|worker| {
-        WORKER_ACCESS.with(|state| {
-            let mut state = state.borrow_mut();
-            ctx.exec.borrow_mut().handle_access(&mut state.ids, worker)
+    let status = {
+        let identity = ctx.exec.borrow().identity();
+        let _scope = enter_access_scope(raw, identity);
+        crate::runtime::with_worker(|worker| {
+            WORKER_ACCESS.with(|state| {
+                let mut state = state.borrow_mut();
+                ctx.exec.borrow_mut().handle_access(&mut state.ids, worker)
+            })
         })
-    })
-    .unwrap_or(AccessStatus::Error500);
+        .unwrap_or(AccessStatus::Error500)
+    };
     if status == AccessStatus::Again {
         let identity = ctx.exec.borrow().current_identity();
         if let Some(identity) = identity {
@@ -373,6 +398,7 @@ fn apply_on_request(
     crate::runtime::with_worker(|worker| {
         WORKER_ACCESS.with(|state| {
             let mut state = state.borrow_mut();
+            let _scope = enter_access_scope(raw, identity);
             ctx.exec
                 .borrow_mut()
                 .apply_ready(identity, &mut state.ids, worker)

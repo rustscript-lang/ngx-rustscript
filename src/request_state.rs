@@ -14,8 +14,17 @@ use tokio::runtime::Handle;
 use vm::{Program, Vm, VmStatus};
 
 use crate::async_bridge::NgxAsyncBridge;
-use crate::host::bind_ngx_hosts;
+use crate::host::{AllowedOps, NgxPhase, RequestExecutionScope, bind_ngx_hosts};
 use crate::notify::{CompletionPermit, RequestIdentity};
+
+fn with_vm_entry<T>(identity: RequestIdentity, f: impl FnOnce() -> T) -> T {
+    let _scope = RequestExecutionScope::enter_for_vm(
+        identity,
+        NgxPhase::Access,
+        AllowedOps::for_phase(NgxPhase::Access),
+    );
+    f()
+}
 
 /// Result of one access-phase entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -272,7 +281,8 @@ impl AccessExec {
                 return AccessStatus::Error500;
             }
         };
-        match vm.run() {
+        let identity = self.identity;
+        match with_vm_entry(identity, || vm.run()) {
             Ok(VmStatus::Halted) => {
                 self.last_status = Some(VmStatus::Halted);
                 self.state = ExecState::Halted;
@@ -312,8 +322,9 @@ impl AccessExec {
         self.permit = Some(permit);
         let waker = waiter.waker(self.identity);
         let mut cx = Context::from_waker(&waker);
+        let identity = self.identity;
         let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
-        match vm.poll_waiting_host_op(&mut cx) {
+        match with_vm_entry(identity, || vm.poll_waiting_host_op(&mut cx)) {
             Poll::Pending => {
                 self.state = ExecState::Suspended;
                 self.last_status = match self.last_status {
@@ -341,8 +352,9 @@ impl AccessExec {
         registry: &mut IdentityRegistry<u64>,
         waiter: &impl AsyncWait,
     ) -> Result<AccessStatus, AccessStatus> {
+        let identity = self.identity;
         let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
-        match vm.resume() {
+        match with_vm_entry(identity, || vm.resume()) {
             Ok(VmStatus::Halted) => {
                 self.last_status = Some(VmStatus::Halted);
                 self.state = ExecState::Halted;
@@ -401,12 +413,13 @@ impl AccessExec {
         registry: &mut IdentityRegistry<u64>,
         waiter: &impl AsyncWait,
     ) -> ReadyEffect {
+        let identity = self.identity;
         let Some(vm) = self.vm.as_mut() else {
             return ReadyEffect::Ignored;
         };
-        let waker = waiter.waker(self.identity);
+        let waker = waiter.waker(identity);
         let mut cx = Context::from_waker(&waker);
-        match vm.poll_waiting_host_op(&mut cx) {
+        match with_vm_entry(identity, || vm.poll_waiting_host_op(&mut cx)) {
             Poll::Pending => ReadyEffect::Ignored,
             Poll::Ready(Ok(())) => {
                 registry.remove_exact(self.identity, &self.request_id);

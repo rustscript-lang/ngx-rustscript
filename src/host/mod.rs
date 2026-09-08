@@ -8,10 +8,15 @@
 use vm::Vm;
 
 pub mod catalog;
+pub mod context;
 
 pub use catalog::{
     HostCapability, HostFamily, HostManifestEntry, HostSyncKind, NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME,
     NgxPhase, host_allowed_in_phase, manifest_entry, ngx_host_catalog, ngx_host_manifest,
+};
+pub use context::{
+    AllowedOps, RequestExecutionScope, ScopeError, current_allowed_ops, current_identity,
+    current_phase, is_active, with_current_request, with_current_request_mut,
 };
 
 /// Names bound by [`bind_ngx_hosts`]. Kept next to the explicit bind list so

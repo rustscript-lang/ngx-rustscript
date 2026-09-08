@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use ngx::core::Status;
 use ngx_rustscript::config::compile_rss_source;
+use ngx_rustscript::host::{ScopeError, current_identity, is_active};
 use ngx_rustscript::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
 use ngx_rustscript::read_close::{
     EventFlags, HandlerAction, HandlerState, PeekResult, run_read_close_handler,
@@ -139,6 +140,31 @@ fn cleanup_before_completion_ignores_later_ready() {
     assert_ne!(driver.exec.vm_status(), Some(VmStatus::Halted));
     assert_eq!(driver.handle(), AccessStatus::Again);
     assert_eq!(driver.sink.phase_continues, 0);
+}
+
+#[test]
+fn handle_poll_resume_leave_request_scope_inactive() {
+    let mut driver = Driver::new(sleep_once(1));
+    assert!(!is_active());
+    assert_eq!(driver.handle(), AccessStatus::Again);
+    assert!(!is_active());
+    assert_eq!(current_identity(), Err(ScopeError::NotInRequestScope));
+    let effect = driver.wait_ready();
+    assert_eq!(effect, ReadyEffect::Halted);
+    assert!(!is_active());
+    assert_eq!(current_identity(), Err(ScopeError::NotInRequestScope));
+}
+
+#[test]
+fn cancel_and_error_leave_request_scope_inactive() {
+    let mut driver = Driver::new(sleep_once(30));
+    assert_eq!(driver.handle(), AccessStatus::Again);
+    assert!(driver.cleanup().is_some());
+    assert!(!is_active());
+
+    let mut driver = Driver::new(compile("1 / 0;\n"));
+    assert_eq!(driver.handle(), AccessStatus::Error500);
+    assert!(!is_active());
 }
 
 #[test]
