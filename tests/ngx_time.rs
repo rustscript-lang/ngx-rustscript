@@ -7,11 +7,11 @@
 use ngx_rustscript_nginx_test_stubs as _;
 
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 
 use ngx_rustscript::config::compile_rss_source;
-use ngx_rustscript::host::bind_ngx_hosts;
+use ngx_rustscript::host::{
+    bind_ngx_hosts, clear_os_clock_override, notify_cached_clock_event_boundary, override_os_clock,
+};
 use vm::{Program, Value, Vm, VmStatus};
 
 fn compile(source: &str) -> Arc<Program> {
@@ -28,6 +28,16 @@ fn eval(source: &str) -> Value {
         .last()
         .cloned()
         .unwrap_or_else(|| panic!("expected a stack value for {source}"))
+}
+
+fn eval_err(source: &str) -> String {
+    let program = compile(source);
+    let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
+    bind_ngx_hosts(&mut vm);
+    match vm.run() {
+        Err(err) => err.to_string(),
+        Ok(status) => panic!("expected host failure, got {status:?}"),
+    }
 }
 
 fn expect_string(value: Value) -> String {
@@ -51,6 +61,11 @@ fn expect_float(value: Value) -> f64 {
     }
 }
 
+fn reset_clock(sec: i64, msec: u32) {
+    override_os_clock(sec, msec);
+    notify_cached_clock_event_boundary();
+}
+
 #[test]
 fn http_cookie_and_parse_time_are_fixed() {
     assert_eq!(
@@ -70,6 +85,37 @@ fn http_cookie_and_parse_time_are_fixed() {
     assert_eq!(
         eval("use ngx;\nngx::parse_http_time(\"not a date\");\n"),
         Value::Null
+    );
+}
+
+#[test]
+fn parse_http_time_accepts_rfc850_and_asctime() {
+    assert_eq!(
+        expect_int(eval(
+            "use ngx;\nngx::parse_http_time(\"Thursday, 18-Nov-10 11:27:35 GMT\");\n"
+        )),
+        1290079655
+    );
+    assert_eq!(
+        expect_int(eval(
+            "use ngx;\nngx::parse_http_time(\"Thu Nov 18 11:27:35 2010\");\n"
+        )),
+        1290079655
+    );
+}
+
+#[test]
+fn parse_http_time_rejects_pre_1970_and_over_128_bytes() {
+    assert_eq!(
+        eval("use ngx;\nngx::parse_http_time(\"Wed, 31 Dec 1969 23:59:59 GMT\");\n"),
+        Value::Null
+    );
+    let over = "x".repeat(129);
+    let err = eval_err(&format!("use ngx;\nngx::parse_http_time(\"{over}\");\n"));
+    let lower = err.to_ascii_lowercase();
+    assert!(
+        lower.contains("128") || lower.contains("too long") || lower.contains("limit"),
+        "parse_http_time must reject inputs over 128 bytes, got {err}"
     );
 }
 
@@ -108,18 +154,41 @@ fn today_localtime_and_utctime_use_fixed_formats() {
 }
 
 #[test]
-fn update_time_refreshes_the_cached_clock() {
+fn intra_script_now_reads_share_the_cached_snapshot() {
+    reset_clock(1_700_000_000, 250);
+    let value = eval("use ngx;\nlet a = ngx::now();\nlet b = ngx::now();\na == b;\n");
+    assert_eq!(value, Value::Bool(true));
+    clear_os_clock_override();
+}
+
+#[test]
+fn event_boundary_and_update_time_refresh_cached_clock_across_vms() {
+    reset_clock(1_700_000_000, 0);
     let first = expect_float(eval("use ngx;\nngx::now();\n"));
-    thread::sleep(Duration::from_millis(30));
+    assert!((first - 1_700_000_000.0).abs() < f64::EPSILON);
+
+    override_os_clock(1_700_000_100, 500);
     let cached = expect_float(eval("use ngx;\nngx::now();\n"));
     assert_eq!(
-        first, cached,
-        "ngx::now must keep returning the cached snapshot until update_time"
+        cached, first,
+        "without an event/request boundary, ngx::now keeps the cached snapshot"
     );
-    thread::sleep(Duration::from_millis(30));
+
+    notify_cached_clock_event_boundary();
+    let after_boundary = expect_float(eval("use ngx;\nngx::now();\n"));
+    assert!(
+        (after_boundary - 1_700_000_100.5).abs() < 1e-9,
+        "event/request boundary must refresh the cached clock, got {after_boundary}"
+    );
+
+    override_os_clock(1_700_000_200, 0);
+    let still_cached = expect_float(eval("use ngx;\nngx::now();\n"));
+    assert_eq!(still_cached, after_boundary);
+
     let updated = expect_float(eval("use ngx;\nngx::update_time();\nngx::now();\n"));
     assert!(
-        updated > cached,
-        "ngx::update_time must refresh the cached clock, cached={cached} updated={updated}"
+        (updated - 1_700_000_200.0).abs() < f64::EPSILON,
+        "ngx::update_time must sample the OS clock, got {updated}"
     );
+    clear_os_clock_override();
 }

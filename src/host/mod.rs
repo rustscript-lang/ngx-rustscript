@@ -26,6 +26,24 @@ pub use context::{
     with_current_request_mut, with_request_scope, with_vm_request_scope,
 };
 
+/// Override the OS clock sampled by time hosts. Used by tests and by
+/// `notify_cached_clock_event_boundary` to model nginx's event-loop refresh
+/// without sleeping.
+pub fn override_os_clock(sec: i64, msec: u32) {
+    layout::helpers::time::override_os_clock(sec, msec);
+}
+
+/// Clear a previous [`override_os_clock`] so the next snapshot reads the OS.
+pub fn clear_os_clock_override() {
+    layout::helpers::time::clear_os_clock_override();
+}
+
+/// Mark an event/request-like boundary so the cached clock is eligible to
+/// refresh, matching nginx `ngx_time_update` on the event loop.
+pub fn notify_cached_clock_event_boundary() {
+    layout::helpers::time::notify_cached_clock_event_boundary();
+}
+
 /// Names bound by [`bind_ngx_hosts`]. Kept next to the explicit bind list so
 /// catalog correspondence can be tested without generating dispatch from
 /// catalog metadata.
@@ -107,7 +125,7 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
 pub(crate) fn bind_test_hosts(vm: &mut Vm) {
     bind_ngx_hosts(vm);
     vm.bind_static_function("ngx::probe", layout::helpers::functions::probe);
-    vm.bind_static_function("ngx::now", layout::helpers::functions::now);
+    vm.bind_static_function("ngx::ready", layout::helpers::functions::ready);
     vm.bind_static_function("ngx::fail", layout::helpers::functions::fail);
 }
 
@@ -230,10 +248,11 @@ mod layout {
                 Ok(ms)
             }
 
-            /// Test-only immediately-ready async host sharing the generic bridge.
+            /// Test-only immediately-ready async host. Named `ngx::ready` so it
+            /// cannot shadow production `ngx::now`.
             #[cfg(test)]
-            #[pd_host_function(name = "ngx::now")]
-            pub async fn now() -> VmResult<i64> {
+            #[pd_host_function(name = "ngx::ready")]
+            pub async fn ready() -> VmResult<i64> {
                 Ok(7)
             }
 
@@ -283,5 +302,7 @@ mod tests {
         let catalog = ngx_host_catalog();
         assert!(catalog.function("ngx::probe").is_none());
         assert!(catalog.function("ngx::fail").is_none());
+        assert!(catalog.function("ngx::ready").is_none());
+        assert!(catalog.function(NGX_NOW_NAME).is_some());
     }
 }

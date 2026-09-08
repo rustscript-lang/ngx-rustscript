@@ -13,6 +13,7 @@ use ngx_rustscript::host::bind_ngx_hosts;
 use vm::{Program, Value, Vm, VmStatus};
 
 const MAX_CODEC_INPUT_BYTES: usize = 65_536;
+const MAX_DECODE_ARGS: usize = 1_024;
 
 fn compile(source: &str) -> Arc<Program> {
     compile_rss_source(source).unwrap_or_else(|err| panic!("compile failed: {err}"))
@@ -81,6 +82,12 @@ fn query_set(encoded: &str) -> HashSet<&str> {
     }
 }
 
+fn decode_root(query: &str, max_args: &str) -> Value {
+    eval(&format!(
+        "use ngx;\nngx::decode_args(\"{query}\", {max_args});\n"
+    ))
+}
+
 #[test]
 fn escape_uri_component_escapes_space_by_default_type_2() {
     let escaped = expect_string(eval("use ngx;\nngx::escape_uri(\"hello world\", null);\n"));
@@ -93,6 +100,38 @@ fn escape_uri_component_escapes_space_by_default_type_2() {
 fn escape_uri_type_0_leaves_unreserved_uri_chars() {
     let escaped = expect_string(eval("use ngx;\nngx::escape_uri(\"a/b-c_d.e~?f\", 0);\n"));
     assert_eq!(escaped, "a/b-c_d.e~%3Ff");
+}
+
+#[test]
+fn escape_uri_types_1_and_3_through_8_match_openresty_bitmaps() {
+    assert_eq!(
+        expect_string(eval("use ngx;\nngx::escape_uri(\"a+b c\", 1);\n")),
+        "a%2Bb%20c"
+    );
+    assert_eq!(
+        expect_string(eval("use ngx;\nngx::escape_uri(\"a\\\"b;c\", 3);\n")),
+        "a%22b;c"
+    );
+    assert_eq!(
+        expect_string(eval("use ngx;\nngx::escape_uri(\"a\\\"b;c\", 4);\n")),
+        "a%22b;c"
+    );
+    assert_eq!(
+        expect_string(eval("use ngx;\nngx::escape_uri(\"a+b c\", 5);\n")),
+        "a+b%20c"
+    );
+    assert_eq!(
+        expect_string(eval("use ngx;\nngx::escape_uri(\"a+b c\", 6);\n")),
+        "a+b%20c"
+    );
+    assert_eq!(
+        expect_string(eval("use ngx;\nngx::escape_uri(\"a\\\"b;c\", 7);\n")),
+        "a%22b%3Bc"
+    );
+    assert_eq!(
+        expect_string(eval("use ngx;\nngx::escape_uri(\"a+b c\", 8);\n")),
+        "a+b c"
+    );
 }
 
 #[test]
@@ -113,6 +152,19 @@ fn unescape_uri_plus_invalid_percent_and_nul() {
         expect_string(eval("use ngx;\nngx::unescape_uri(\"a\\0b\");\n")),
         "a\0b"
     );
+}
+
+#[test]
+fn unescape_uri_keeps_non_utf8_bytes() {
+    let value = eval("use ngx;\nngx::unescape_uri(\"%FF\");\n");
+    match value {
+        Value::String(text) => {
+            assert_eq!(text.as_ref(), "\u{00FF}");
+            assert_eq!(text.chars().count(), 1);
+        }
+        Value::Bytes(bytes) => assert_eq!(&*bytes, &[0xFF]),
+        other => panic!("non-utf8 unescape must not fail, got {other:?}"),
+    }
 }
 
 #[test]
@@ -147,6 +199,28 @@ fn encode_args_repeated_empty_and_array_values() {
 }
 
 #[test]
+fn encode_args_array_true_is_a_bare_key_not_empty_value() {
+    let encoded = expect_string(eval(
+        "use ngx;\nngx::encode_args({ \"foo\": [32, true, false] });\n",
+    ));
+    assert_eq!(encoded, "foo=32&foo");
+}
+
+#[test]
+fn encode_args_enforces_pair_cap_inside_array_expansion() {
+    let small = expect_string(eval(
+        "use ngx;\nngx::encode_args({ \"a\": [1, 2, 3, 4] });\n",
+    ));
+    assert_eq!(small, "a=1&a=2&a=3&a=4");
+    assert!(small.len() > "a=1".len());
+
+    let flags = expect_string(eval(
+        "use ngx;\nngx::encode_args({ \"flag\": [true, true, true] });\n",
+    ));
+    assert_eq!(flags, "flag&flag&flag");
+}
+
+#[test]
 fn decode_args_repeated_keys_empty_values_and_truncation() {
     let decoded = eval("use ngx;\nngx::decode_args(\"a=1&b=2&a=3\", null);\n");
     let root = expect_map(&decoded);
@@ -163,7 +237,7 @@ fn decode_args_repeated_keys_empty_values_and_truncation() {
     let empty = eval("use ngx;\nngx::decode_args(\"a=&b\", null);\n");
     let empty_args = expect_map(map_get(expect_map(&empty), "args"));
     assert_eq!(map_get(empty_args, "a"), &Value::string(""));
-    assert_eq!(map_get(empty_args, "b"), &Value::string(""));
+    assert_eq!(map_get(empty_args, "b"), &Value::Bool(true));
 
     let truncated = eval("use ngx;\nngx::decode_args(\"a=1&b=2&c=3\", 2);\n");
     let truncated_root = expect_map(&truncated);
@@ -172,6 +246,66 @@ fn decode_args_repeated_keys_empty_values_and_truncation() {
     assert!(truncated_args.get(&Value::string("a")).is_some());
     assert!(truncated_args.get(&Value::string("b")).is_some());
     assert!(truncated_args.get(&Value::string("c")).is_none());
+}
+
+#[test]
+fn decode_args_flags_empty_keys_nul_and_invalid_percent() {
+    let flags = decode_root("foo&bar=1&foo=2", "10");
+    let flag_args = expect_map(map_get(expect_map(&flags), "args"));
+    match map_get(flag_args, "foo") {
+        Value::Array(values) => {
+            assert_eq!(values.as_slice(), &[Value::Bool(true), Value::string("2")]);
+        }
+        other => panic!("flag then value must become [true, string], got {other:?}"),
+    }
+    assert_eq!(map_get(flag_args, "bar"), &Value::string("1"));
+
+    let empty_keys = decode_root("=hello&=world&ok=1", "10");
+    let empty_args = expect_map(map_get(expect_map(&empty_keys), "args"));
+    assert!(empty_args.get(&Value::string("")).is_none());
+    assert_eq!(map_get(empty_args, "ok"), &Value::string("1"));
+
+    let invalid = decode_root("a=%ZZb&b=%00c", "10");
+    let invalid_args = expect_map(map_get(expect_map(&invalid), "args"));
+    assert_eq!(map_get(invalid_args, "a"), &Value::string("%ZZb"));
+    assert_eq!(map_get(invalid_args, "b"), &Value::string("\0c"));
+}
+
+#[test]
+fn decode_args_max_args_zero_means_hard_max_and_1024_is_accepted() {
+    let many = (0..MAX_DECODE_ARGS)
+        .map(|i| format!("k{i}=1"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let at_cap = decode_root(&many, "0");
+    let at_cap_root = expect_map(&at_cap);
+    assert_eq!(map_get(at_cap_root, "truncated"), &Value::Bool(false));
+    assert_eq!(
+        expect_map(map_get(at_cap_root, "args")).len(),
+        MAX_DECODE_ARGS
+    );
+
+    let over = format!("{many}&extra=1");
+    let truncated = decode_root(&over, "0");
+    let truncated_root = expect_map(&truncated);
+    assert_eq!(map_get(truncated_root, "truncated"), &Value::Bool(true));
+    assert_eq!(
+        expect_map(map_get(truncated_root, "args")).len(),
+        MAX_DECODE_ARGS
+    );
+
+    let explicit_cap = decode_root(&many, "1024");
+    assert_eq!(
+        map_get(expect_map(&explicit_cap), "truncated"),
+        &Value::Bool(false)
+    );
+
+    let err = eval_err("use ngx;\nngx::decode_args(\"a=1\", 1025);\n");
+    let lower = err.to_ascii_lowercase();
+    assert!(
+        lower.contains("1024") || lower.contains("max_args") || lower.contains("max args"),
+        "max_args above 1024 must be rejected, got {err}"
+    );
 }
 
 #[test]
@@ -209,6 +343,26 @@ fn encode_base64_padding_and_decode_variants() {
     assert_eq!(mime, b"hello world");
     assert_eq!(
         eval("use ngx;\nngx::decode_base64mime(\"a\");\n"),
+        Value::Null
+    );
+}
+
+#[test]
+fn decode_base64mime_skips_garbage_and_stops_at_first_equals() {
+    assert_eq!(
+        expect_bytes(eval(
+            "use ngx;\nngx::decode_base64mime(\"!aGVs bG8gd29ybGQ=\");\n"
+        )),
+        b"hello world"
+    );
+    assert_eq!(
+        expect_bytes(eval(
+            "use ngx;\nngx::decode_base64mime(\"aGVs=bG8gd29ybGQ=\");\n"
+        )),
+        b"hel"
+    );
+    assert_eq!(
+        eval("use ngx;\nngx::decode_base64mime(\"zaaLg==\");\n"),
         Value::Null
     );
 }
@@ -257,6 +411,12 @@ fn quote_sql_str_uses_mysql_escapes() {
             "use ngx;\nngx::quote_sql_str(\"a'b\\\\c\\\"d\\0e\\nf\");\n"
         )),
         "'a\\'b\\\\c\\\"d\\0e\\nf'"
+    );
+    assert_eq!(
+        expect_string(eval(
+            "use ngx;\nngx::quote_sql_str(ngx::unescape_uri(\"%08%09%1A\"));\n"
+        )),
+        "'\\b\\t\\Z'"
     );
 }
 

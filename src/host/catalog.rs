@@ -55,6 +55,8 @@ pub enum NgxPhase {
     SslCertificate,
     SslSessionFetch,
     SslSessionStore,
+    SslClientHello,
+    ExitWorker,
     Timer,
 }
 
@@ -74,6 +76,8 @@ impl fmt::Display for NgxPhase {
             Self::SslCertificate => "ssl_certificate",
             Self::SslSessionFetch => "ssl_session_fetch",
             Self::SslSessionStore => "ssl_session_store",
+            Self::SslClientHello => "ssl_client_hello",
+            Self::ExitWorker => "exit_worker",
             Self::Timer => "timer",
         })
     }
@@ -122,7 +126,9 @@ const SLEEP_PHASES: &[NgxPhase] = &[
     NgxPhase::SslSessionFetch,
 ];
 
-const L1_PHASES: &[NgxPhase] = &[
+/// `ngx.escape_uri` contexts from OpenResty v0.10.29.
+const PHASE_ESCAPE_URI: &[NgxPhase] = &[
+    NgxPhase::Init,
     NgxPhase::InitWorker,
     NgxPhase::Set,
     NgxPhase::Rewrite,
@@ -131,11 +137,98 @@ const L1_PHASES: &[NgxPhase] = &[
     NgxPhase::HeaderFilter,
     NgxPhase::BodyFilter,
     NgxPhase::Log,
+    NgxPhase::Timer,
     NgxPhase::Balancer,
     NgxPhase::SslCertificate,
     NgxPhase::SslSessionFetch,
     NgxPhase::SslSessionStore,
+    NgxPhase::ExitWorker,
+    NgxPhase::SslClientHello,
+];
+
+/// `ngx.unescape_uri` contexts: like escape_uri minus ssl_session_fetch/store.
+const PHASE_UNESCAPE_URI: &[NgxPhase] = &[
+    NgxPhase::Init,
+    NgxPhase::InitWorker,
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
     NgxPhase::Timer,
+    NgxPhase::Balancer,
+    NgxPhase::SslCertificate,
+    NgxPhase::ExitWorker,
+    NgxPhase::SslClientHello,
+];
+
+/// `ngx.encode_args` has no init / init_worker / ssl_session_* / exit_worker.
+const PHASE_ENCODE_ARGS: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Timer,
+    NgxPhase::Balancer,
+    NgxPhase::SslCertificate,
+    NgxPhase::SslClientHello,
+];
+
+/// `ngx.decode_args` has ssl_session_fetch/store and ssl_client_hello, not init*.
+const PHASE_DECODE_ARGS: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Timer,
+    NgxPhase::Balancer,
+    NgxPhase::SslCertificate,
+    NgxPhase::SslSessionFetch,
+    NgxPhase::SslSessionStore,
+    NgxPhase::SslClientHello,
+];
+
+/// Most remaining codec APIs: no init, init_worker, ssl_client_hello, exit_worker.
+const PHASE_CODEC_MISC: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Timer,
+    NgxPhase::Balancer,
+    NgxPhase::SslCertificate,
+    NgxPhase::SslSessionFetch,
+    NgxPhase::SslSessionStore,
+];
+
+/// Time APIs: init_worker yes, init no; plus ssl_client_hello and exit_worker.
+const PHASE_TIME: &[NgxPhase] = &[
+    NgxPhase::InitWorker,
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Timer,
+    NgxPhase::Balancer,
+    NgxPhase::SslCertificate,
+    NgxPhase::SslSessionFetch,
+    NgxPhase::SslSessionStore,
+    NgxPhase::ExitWorker,
+    NgxPhase::SslClientHello,
 ];
 
 const TIMER_CAPABILITIES: &[HostCapability] = &[HostCapability::Timer];
@@ -159,48 +252,76 @@ const MANIFEST: &[HostManifestEntry] = &[
         capabilities: TIMER_CAPABILITIES,
         openresty_name: "ngx.sleep",
     },
-    codec_entry(NGX_ESCAPE_URI_NAME, "ngx.escape_uri"),
-    codec_entry(NGX_UNESCAPE_URI_NAME, "ngx.unescape_uri"),
-    codec_entry(NGX_ENCODE_ARGS_NAME, "ngx.encode_args"),
-    codec_entry(NGX_DECODE_ARGS_NAME, "ngx.decode_args"),
-    codec_entry(NGX_ENCODE_BASE64_NAME, "ngx.encode_base64"),
-    codec_entry(NGX_DECODE_BASE64_NAME, "ngx.decode_base64"),
-    codec_entry(NGX_DECODE_BASE64MIME_NAME, "ngx.decode_base64mime"),
-    codec_entry(NGX_CRC32_SHORT_NAME, "ngx.crc32_short"),
-    codec_entry(NGX_CRC32_LONG_NAME, "ngx.crc32_long"),
-    codec_entry(NGX_HMAC_SHA1_NAME, "ngx.hmac_sha1"),
-    codec_entry(NGX_MD5_NAME, "ngx.md5"),
-    codec_entry(NGX_MD5_BIN_NAME, "ngx.md5_bin"),
-    codec_entry(NGX_SHA1_BIN_NAME, "ngx.sha1_bin"),
-    codec_entry(NGX_QUOTE_SQL_STR_NAME, "ngx.quote_sql_str"),
-    time_entry(NGX_TODAY_NAME, "ngx.today"),
-    time_entry(NGX_TIME_NAME, "ngx.time"),
-    time_entry(NGX_NOW_NAME, "ngx.now"),
-    time_entry(NGX_UPDATE_TIME_NAME, "ngx.update_time"),
-    time_entry(NGX_LOCALTIME_NAME, "ngx.localtime"),
-    time_entry(NGX_UTCTIME_NAME, "ngx.utctime"),
-    time_entry(NGX_COOKIE_TIME_NAME, "ngx.cookie_time"),
-    time_entry(NGX_HTTP_TIME_NAME, "ngx.http_time"),
-    time_entry(NGX_PARSE_HTTP_TIME_NAME, "ngx.parse_http_time"),
+    codec_entry(NGX_ESCAPE_URI_NAME, "ngx.escape_uri", PHASE_ESCAPE_URI),
+    codec_entry(
+        NGX_UNESCAPE_URI_NAME,
+        "ngx.unescape_uri",
+        PHASE_UNESCAPE_URI,
+    ),
+    codec_entry(NGX_ENCODE_ARGS_NAME, "ngx.encode_args", PHASE_ENCODE_ARGS),
+    codec_entry(NGX_DECODE_ARGS_NAME, "ngx.decode_args", PHASE_DECODE_ARGS),
+    codec_entry(
+        NGX_ENCODE_BASE64_NAME,
+        "ngx.encode_base64",
+        PHASE_CODEC_MISC,
+    ),
+    codec_entry(
+        NGX_DECODE_BASE64_NAME,
+        "ngx.decode_base64",
+        PHASE_CODEC_MISC,
+    ),
+    codec_entry(
+        NGX_DECODE_BASE64MIME_NAME,
+        "ngx.decode_base64mime",
+        PHASE_CODEC_MISC,
+    ),
+    codec_entry(NGX_CRC32_SHORT_NAME, "ngx.crc32_short", PHASE_CODEC_MISC),
+    codec_entry(NGX_CRC32_LONG_NAME, "ngx.crc32_long", PHASE_CODEC_MISC),
+    codec_entry(NGX_HMAC_SHA1_NAME, "ngx.hmac_sha1", PHASE_CODEC_MISC),
+    codec_entry(NGX_MD5_NAME, "ngx.md5", PHASE_CODEC_MISC),
+    codec_entry(NGX_MD5_BIN_NAME, "ngx.md5_bin", PHASE_CODEC_MISC),
+    codec_entry(NGX_SHA1_BIN_NAME, "ngx.sha1_bin", PHASE_CODEC_MISC),
+    codec_entry(
+        NGX_QUOTE_SQL_STR_NAME,
+        "ngx.quote_sql_str",
+        PHASE_CODEC_MISC,
+    ),
+    time_entry(NGX_TODAY_NAME, "ngx.today", PHASE_TIME),
+    time_entry(NGX_TIME_NAME, "ngx.time", PHASE_TIME),
+    time_entry(NGX_NOW_NAME, "ngx.now", PHASE_TIME),
+    time_entry(NGX_UPDATE_TIME_NAME, "ngx.update_time", PHASE_TIME),
+    time_entry(NGX_LOCALTIME_NAME, "ngx.localtime", PHASE_TIME),
+    time_entry(NGX_UTCTIME_NAME, "ngx.utctime", PHASE_TIME),
+    time_entry(NGX_COOKIE_TIME_NAME, "ngx.cookie_time", PHASE_TIME),
+    time_entry(NGX_HTTP_TIME_NAME, "ngx.http_time", PHASE_TIME),
+    time_entry(NGX_PARSE_HTTP_TIME_NAME, "ngx.parse_http_time", PHASE_TIME),
 ];
 
-const fn codec_entry(name: &'static str, openresty_name: &'static str) -> HostManifestEntry {
+const fn codec_entry(
+    name: &'static str,
+    openresty_name: &'static str,
+    phases: &'static [NgxPhase],
+) -> HostManifestEntry {
     HostManifestEntry {
         name,
         family: HostFamily::Codec,
         sync: HostSyncKind::Sync,
-        phases: L1_PHASES,
+        phases,
         capabilities: CODEC_CAPABILITIES,
         openresty_name,
     }
 }
 
-const fn time_entry(name: &'static str, openresty_name: &'static str) -> HostManifestEntry {
+const fn time_entry(
+    name: &'static str,
+    openresty_name: &'static str,
+    phases: &'static [NgxPhase],
+) -> HostManifestEntry {
     HostManifestEntry {
         name,
         family: HostFamily::Time,
         sync: HostSyncKind::Sync,
-        phases: L1_PHASES,
+        phases,
         capabilities: TIME_CAPABILITIES,
         openresty_name,
     }

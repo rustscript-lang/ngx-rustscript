@@ -12,8 +12,10 @@ use ngx_rustscript::config::{
     ConfigError, compile_rss_source, reject_program_imports, validate_program_imports_for_phase,
 };
 use ngx_rustscript::host::{
-    HostCapability, HostFamily, HostSyncKind, NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NgxPhase,
-    bind_ngx_hosts, ngx_host_catalog, ngx_host_manifest, production_runtime_host_names,
+    HostCapability, HostFamily, HostSyncKind, NGX_DECODE_ARGS_NAME, NGX_DECODE_BASE64MIME_NAME,
+    NGX_ENCODE_ARGS_NAME, NGX_ESCAPE_URI_NAME, NGX_NOW_NAME, NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME,
+    NGX_TIME_NAME, NGX_UNESCAPE_URI_NAME, NGX_UPDATE_TIME_NAME, NgxPhase, bind_ngx_hosts,
+    host_allowed_in_phase, ngx_host_catalog, ngx_host_manifest, production_runtime_host_names,
 };
 use vm::{HostTypeSchema, Program, Vm};
 
@@ -166,12 +168,22 @@ fn bound_vm_has_every_catalogued_runtime_host_and_no_test_hosts() {
             "runtime VM must bind catalogued host {name}"
         );
     }
-    for banned in ["ngx::probe", "ngx::fail", "print", "runtime::sleep"] {
+    for banned in [
+        "ngx::probe",
+        "ngx::fail",
+        "ngx::ready",
+        "print",
+        "runtime::sleep",
+    ] {
         assert!(
             !vm.has_bound_function(banned),
             "production bind must not install {banned}"
         );
     }
+    assert!(
+        vm.has_bound_function(NGX_NOW_NAME),
+        "production bind must install ngx::now as the time host"
+    );
 }
 
 #[test]
@@ -179,6 +191,11 @@ fn catalog_does_not_include_test_hosts() {
     let catalog = ngx_host_catalog();
     assert!(catalog.function("ngx::probe").is_none());
     assert!(catalog.function("ngx::fail").is_none());
+    assert!(catalog.function("ngx::ready").is_none());
+    assert!(
+        catalog.function(NGX_NOW_NAME).is_some(),
+        "production catalog must keep ngx::now"
+    );
 }
 
 #[test]
@@ -280,4 +297,50 @@ fn access_phase_accepts_sleep_and_sleep_ms() {
     reject_program_imports(&program).expect("access phase allows timer hosts");
     validate_program_imports_for_phase(&program, NgxPhase::Access)
         .expect("access phase allows timer hosts");
+}
+
+#[test]
+fn codec_and_time_phase_metadata_matches_openresty() {
+    assert!(host_allowed_in_phase(
+        NGX_ESCAPE_URI_NAME,
+        NgxPhase::InitWorker
+    ));
+    assert!(host_allowed_in_phase(NGX_ESCAPE_URI_NAME, NgxPhase::Init));
+    assert!(host_allowed_in_phase(
+        NGX_UNESCAPE_URI_NAME,
+        NgxPhase::InitWorker
+    ));
+    assert!(!host_allowed_in_phase(
+        NGX_UNESCAPE_URI_NAME,
+        NgxPhase::SslSessionFetch
+    ));
+    assert!(!host_allowed_in_phase(
+        NGX_ENCODE_ARGS_NAME,
+        NgxPhase::InitWorker
+    ));
+    assert!(!host_allowed_in_phase(NGX_ENCODE_ARGS_NAME, NgxPhase::Init));
+    assert!(host_allowed_in_phase(NGX_ENCODE_ARGS_NAME, NgxPhase::Set));
+    assert!(!host_allowed_in_phase(
+        NGX_DECODE_ARGS_NAME,
+        NgxPhase::InitWorker
+    ));
+    assert!(host_allowed_in_phase(
+        NGX_DECODE_ARGS_NAME,
+        NgxPhase::SslSessionFetch
+    ));
+    assert!(!host_allowed_in_phase(
+        NGX_DECODE_BASE64MIME_NAME,
+        NgxPhase::InitWorker
+    ));
+    assert!(!host_allowed_in_phase(
+        NGX_DECODE_BASE64MIME_NAME,
+        NgxPhase::SslClientHello
+    ));
+    assert!(host_allowed_in_phase(NGX_TIME_NAME, NgxPhase::InitWorker));
+    assert!(host_allowed_in_phase(NGX_NOW_NAME, NgxPhase::InitWorker));
+    assert!(host_allowed_in_phase(
+        NGX_UPDATE_TIME_NAME,
+        NgxPhase::InitWorker
+    ));
+    assert!(host_allowed_in_phase(NGX_TIME_NAME, NgxPhase::Timer));
 }

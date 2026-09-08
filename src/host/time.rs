@@ -1,13 +1,26 @@
 // OpenResty-compatible time hosts.
 //
-// OpenResty reads nginx's cached clock (`ngx_time` / `ngx_timeofday`) and
-// `ngx.update_time` calls `ngx_time_update`. This host keeps a thread-local
-// cached clock snapshot with the same model: `time`/`now`/`today`/`localtime`
-// /`utctime` read the cache, and `update_time` performs a real OS clock read.
-// It is not a no-op.
+// Cached-clock adaptation vs OpenResty `ngx.now` / `ngx.time` / `ngx.update_time`:
+//
+// OpenResty reads nginx's cached clock (`ngx_time` / `ngx_timeofday`). nginx
+// refreshes that snapshot on the event loop (`ngx_time_update` from
+// `ngx_process_events_and_timers`). `ngx.update_time` forces a refresh.
+//
+// This host has no request pointer and Task 3 cannot wire access/runtime event
+// turns, so it uses a bounded thread-local cache:
+//
+// * Reads reuse the snapshot while the event generation is unchanged and the
+//   snapshot is younger than `MAX_CLOCK_STALE` (1s).
+// * `notify_cached_clock_event_boundary` advances the generation. Call this at
+//   a future request/event-loop turn so intra-request reads stay stable while
+//   cross-request reads cannot stay frozen indefinitely.
+// * Crossing `MAX_CLOCK_STALE` also refreshes, so a worker cannot keep a frozen
+//   clock across requests even if the boundary is not yet wired.
+// * `update_time` always samples the OS (or test override) and replaces the
+//   snapshot — a real observable side effect.
 
 use std::cell::Cell;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pd_host_function::pd_host_function;
 use vm::VmError;
@@ -15,46 +28,82 @@ use vm::VmError;
 use super::{CallOutcome, IntoHostCallOutcome};
 use super::super::VmResult;
 
+const MAX_CLOCK_STALE: Duration = Duration::from_secs(1);
+
 #[derive(Clone, Copy, Debug)]
 struct CachedClock {
     sec: i64,
     msec: u32,
+    sampled_at: Instant,
 }
 
 thread_local! {
     static CLOCK: Cell<Option<CachedClock>> = const { Cell::new(None) };
+    static EVENT_GEN: Cell<u64> = const { Cell::new(0) };
+    static CACHED_GEN: Cell<u64> = const { Cell::new(0) };
+    static OS_OVERRIDE: Cell<Option<(i64, u32)>> = const { Cell::new(None) };
 }
 
 fn ret<T: IntoHostCallOutcome>(value: T) -> VmResult<CallOutcome> {
     Ok(value.into_host_call_outcome())
 }
 
-fn snapshot_os() -> CachedClock {
+fn snapshot_os() -> (i64, u32) {
+    if let Some(over) = OS_OVERRIDE.with(|cell| cell.get()) {
+        return over;
+    }
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
+    (duration.as_secs() as i64, duration.subsec_millis())
+}
+
+fn make_clock() -> CachedClock {
+    let (sec, msec) = snapshot_os();
     CachedClock {
-        sec: duration.as_secs() as i64,
-        msec: duration.subsec_millis(),
+        sec,
+        msec,
+        sampled_at: Instant::now(),
     }
 }
 
 fn read_clock() -> CachedClock {
+    let event_gen = EVENT_GEN.with(|cell| cell.get());
     CLOCK.with(|cell| {
         if let Some(cached) = cell.get() {
-            cached
-        } else {
-            let now = snapshot_os();
-            cell.set(Some(now));
-            now
+            if CACHED_GEN.with(|g| g.get()) == event_gen
+                && cached.sampled_at.elapsed() < MAX_CLOCK_STALE
+            {
+                return cached;
+            }
         }
+        let now = make_clock();
+        cell.set(Some(now));
+        CACHED_GEN.with(|g| g.set(event_gen));
+        now
     })
 }
 
 fn refresh_clock() -> CachedClock {
-    let now = snapshot_os();
+    let now = make_clock();
     CLOCK.with(|cell| cell.set(Some(now)));
+    CACHED_GEN.with(|g| g.set(EVENT_GEN.with(|cell| cell.get())));
     now
+}
+
+/// Test/support: next OS snapshot uses this unix time when set.
+pub fn override_os_clock(sec: i64, msec: u32) {
+    OS_OVERRIDE.with(|cell| cell.set(Some((sec, msec))));
+}
+
+/// Test/support: restore real OS clock sampling.
+pub fn clear_os_clock_override() {
+    OS_OVERRIDE.with(|cell| cell.set(None));
+}
+
+/// Event/request-like boundary. OpenResty refreshes nginx's cached clock here.
+pub fn notify_cached_clock_event_boundary() {
+    EVENT_GEN.with(|cell| cell.set(cell.get().wrapping_add(1)));
 }
 
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -194,7 +243,8 @@ fn ymd_hms_to_unix(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u3
     let doy = (153 * m as u32 + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = i64::from(era) * 146097 + i64::from(doe) - 719468;
-    Some(days * 86_400 + i64::from(hour) * 3600 + i64::from(min) * 60 + i64::from(sec))
+    let unix = days * 86_400 + i64::from(hour) * 3600 + i64::from(min) * 60 + i64::from(sec);
+    (unix >= 0).then_some(unix)
 }
 
 /// Parses RFC 822 / RFC 850 / asctime HTTP dates used by `ngx.parse_http_time`.

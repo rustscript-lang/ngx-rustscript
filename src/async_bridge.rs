@@ -151,7 +151,7 @@ mod tests {
             vm::HostTypeSchema::Int,
         ));
         builder.function(vm::HostFunctionSchema::with_return(
-            "ngx::now",
+            "ngx::ready",
             vec![],
             vm::HostTypeSchema::Int,
         ));
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn immediate_ready_async_host_resumes_without_wait() {
         let rt = runtime();
-        let program = compile_with("use ngx;\nngx::now();\n", test_catalog());
+        let program = compile_with("use ngx;\nngx::ready();\n", test_catalog());
         let mut vm = bind_vm(program, rt.handle().clone(), true);
         let status = vm.run().expect("run");
         let VmStatus::Waiting(_) = status else {

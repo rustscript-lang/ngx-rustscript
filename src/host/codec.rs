@@ -76,6 +76,13 @@ fn utf8_string(name: &str, bytes: Vec<u8>) -> VmResult<String> {
     })
 }
 
+fn bytes_as_string(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => err.into_bytes().into_iter().map(char::from).collect(),
+    }
+}
+
 /// `ngx.escape_uri` type bitmaps from lua-nginx-module `ngx_http_lua_escape_uri`.
 const ESCAPE_URI: [u32; 8] = [
     0xffff_ffff, 0x8000_0029, 0x0000_0000, 0x8000_0000, 0xffff_ffff, 0xffff_ffff,
@@ -201,17 +208,19 @@ pub fn escape_uri(uri: &str, escape_type: &Value) -> VmResult<CallOutcome> {
 #[pd_host_function(name = "ngx::unescape_uri")]
 pub fn unescape_uri(uri: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::unescape_uri", uri.len())?;
-    ret(utf8_string(
-        "ngx::unescape_uri",
-        unescape_bytes(uri.as_bytes()),
-    )?)
+    ret(bytes_as_string(unescape_bytes(uri.as_bytes())))
 }
 
-fn format_arg_value(name: &str, value: &Value) -> VmResult<Option<String>> {
+enum EncodedArg {
+    Flag,
+    Value(String),
+}
+
+fn format_arg_value(name: &str, value: &Value) -> VmResult<Option<EncodedArg>> {
     match value {
         Value::Null | Value::Bool(false) => Ok(None),
-        Value::Bool(true) => Ok(Some(String::new())),
-        Value::Int(number) => Ok(Some(number.to_string())),
+        Value::Bool(true) => Ok(Some(EncodedArg::Flag)),
+        Value::Int(number) => Ok(Some(EncodedArg::Value(number.to_string()))),
         Value::Float(number) => {
             if number.is_nan() || number.is_infinite() {
                 return Err(VmError::HostError(format!(
@@ -219,23 +228,43 @@ fn format_arg_value(name: &str, value: &Value) -> VmResult<Option<String>> {
                 )));
             }
             if number.fract() == 0.0 && number.abs() < 1e15 {
-                Ok(Some((*number as i64).to_string()))
+                Ok(Some(EncodedArg::Value((*number as i64).to_string())))
             } else {
-                Ok(Some(number.to_string()))
+                Ok(Some(EncodedArg::Value(number.to_string())))
             }
         }
         Value::String(text) => {
             limit_input(name, text.len())?;
-            Ok(Some(text.as_str().to_string()))
+            Ok(Some(EncodedArg::Value(text.as_str().to_string())))
         }
         Value::Bytes(bytes) => {
             limit_input(name, bytes.len())?;
-            Ok(Some(utf8_string(name, bytes.as_ref().clone())?))
+            Ok(Some(EncodedArg::Value(utf8_string(
+                name,
+                bytes.as_ref().clone(),
+            )?)))
         }
         Value::Array(_) | Value::Map(_) | Value::Callable(_) => Err(VmError::HostError(
             format!("{name} cannot encode nested tables as a single value"),
         )),
     }
+}
+
+fn push_encoded_pair(
+    pairs: &mut Vec<(String, Option<String>)>,
+    key: &str,
+    encoded: EncodedArg,
+) -> VmResult<()> {
+    if pairs.len() >= MAX_ENCODE_PAIRS {
+        return Err(VmError::HostError(format!(
+            "ngx::encode_args exceeds {MAX_ENCODE_PAIRS} pairs"
+        )));
+    }
+    match encoded {
+        EncodedArg::Flag => pairs.push((key.to_string(), None)),
+        EncodedArg::Value(value) => pairs.push((key.to_string(), Some(value))),
+    }
+    Ok(())
 }
 
 /// Encodes a map as an application/x-www-form-urlencoded string.
@@ -246,6 +275,10 @@ fn format_arg_value(name: &str, value: &Value) -> VmResult<Option<String>> {
 /// multi-value keys.
 #[pd_host_function(name = "ngx::encode_args")]
 pub fn encode_args(args: &VmMap) -> VmResult<CallOutcome> {
+    ret(encode_args_map(args)?)
+}
+
+fn encode_args_map(args: &VmMap) -> VmResult<String> {
     let mut pairs: Vec<(String, Option<String>)> = Vec::new();
     for (key, value) in args.iter() {
         let Value::String(key) = key else {
@@ -261,23 +294,15 @@ pub fn encode_args(args: &VmMap) -> VmResult<CallOutcome> {
                 }
                 for item in values.iter() {
                     if let Some(encoded) = format_arg_value("ngx::encode_args", item)? {
-                        pairs.push((key.to_string(), Some(encoded)));
+                        push_encoded_pair(&mut pairs, key, encoded)?;
                     }
                 }
             }
-            other => match format_arg_value("ngx::encode_args", other)? {
-                None => {}
-                Some(encoded) if other == &Value::Bool(true) => {
-                    pairs.push((key.to_string(), None));
-                    let _ = encoded;
+            other => {
+                if let Some(encoded) = format_arg_value("ngx::encode_args", other)? {
+                    push_encoded_pair(&mut pairs, key, encoded)?;
                 }
-                Some(encoded) => pairs.push((key.to_string(), Some(encoded))),
-            },
-        }
-        if pairs.len() > MAX_ENCODE_PAIRS {
-            return Err(VmError::HostError(format!(
-                "ngx::encode_args exceeds {MAX_ENCODE_PAIRS} pairs"
-            )));
+            }
         }
     }
 
@@ -294,23 +319,23 @@ pub fn encode_args(args: &VmMap) -> VmResult<CallOutcome> {
         }
         limit_output("ngx::encode_args", out.len())?;
     }
-    ret(out)
+    Ok(out)
 }
 
-fn insert_decoded_arg(args: &mut VmMap, key: String, value: String) {
+fn insert_decoded_arg(args: &mut VmMap, key: String, value: Value) {
     let key_value = Value::string(key);
     match args.get(&key_value) {
         None => {
-            args.insert(key_value, Value::string(value));
+            args.insert(key_value, value);
         }
         Some(Value::Array(existing)) => {
             let mut items = existing.as_ref().clone();
-            items.push(Value::string(value));
+            items.push(value);
             args.insert(key_value, Value::array(items));
         }
         Some(previous) => {
             let previous = previous.clone();
-            args.insert(key_value, Value::array(vec![previous, Value::string(value)]));
+            args.insert(key_value, Value::array(vec![previous, value]));
         }
     }
 }
@@ -351,15 +376,17 @@ pub fn decode_args(query: &str, max_args: &Value) -> VmResult<CallOutcome> {
                 truncated = true;
                 break;
             }
-            let (raw_key, raw_value) = match part.split_once('=') {
-                Some((key, value)) => (key, value),
-                None => (part, ""),
+            let (raw_key, value) = match part.split_once('=') {
+                Some((key, raw_value)) => (
+                    key,
+                    Value::string(bytes_as_string(unescape_bytes(raw_value.as_bytes()))),
+                ),
+                None => (part, Value::Bool(true)),
             };
-            let key = utf8_string("ngx::decode_args", unescape_bytes(raw_key.as_bytes()))?;
+            let key = bytes_as_string(unescape_bytes(raw_key.as_bytes()));
             if key.is_empty() {
                 continue;
             }
-            let value = utf8_string("ngx::decode_args", unescape_bytes(raw_value.as_bytes()))?;
             insert_decoded_arg(&mut args, key, value);
             seen += 1;
         }
@@ -392,6 +419,26 @@ fn decode_base64_bytes(text: &str) -> Option<Vec<u8>> {
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, padded.as_bytes()).ok()
 }
 
+fn is_base64_alphabet(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/'
+}
+
+/// OpenResty `ngx.decode_base64mime`: skip non-alphabet bytes and stop at the
+/// first `=`. `data_len % 4 == 1` is invalid (`null`), matching
+/// `ngx_http_lua_decode_base64mime`.
+fn decode_base64_mime(text: &str) -> Option<Vec<u8>> {
+    let mut alphabet = Vec::with_capacity(text.len());
+    for &byte in text.as_bytes() {
+        if byte == b'=' {
+            break;
+        }
+        if is_base64_alphabet(byte) {
+            alphabet.push(byte);
+        }
+    }
+    decode_base64_bytes(std::str::from_utf8(&alphabet).ok()?)
+}
+
 /// Encodes string or bytes as standard Base64. `no_padding` is `null`/`false`
 /// or `true` to drop `=` padding.
 #[pd_host_function(name = "ngx::encode_base64")]
@@ -410,19 +457,12 @@ pub fn decode_base64(text: &str) -> VmResult<CallOutcome> {
     ret(decode_base64_bytes(text))
 }
 
-/// MIME Base64 decode: non-alphabet bytes (including whitespace) are skipped.
-/// Ill-formed input is `null`.
+/// MIME Base64 decode: non-alphabet bytes are skipped and decoding stops at
+/// the first `=`, matching OpenResty `ngx.decode_base64mime`.
 #[pd_host_function(name = "ngx::decode_base64mime")]
 pub fn decode_base64mime(text: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::decode_base64mime", text.len())?;
-    let filtered: String = text
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '+' || *ch == '/' || *ch == '=')
-        .collect();
-    if filtered.len() % 4 == 1 {
-        return ret(None::<Vec<u8>>);
-    }
-    ret(decode_base64_bytes(&filtered))
+    ret(decode_base64_mime(text))
 }
 
 fn crc32_ieee(data: &[u8]) -> u32 {
@@ -531,4 +571,32 @@ pub fn quote_sql_str(value: &str) -> VmResult<CallOutcome> {
     }
     out.push('\'');
     ret(out)
+}
+
+#[cfg(test)]
+mod encode_pair_cap {
+    use super::*;
+
+    fn array_map(len: usize) -> VmMap {
+        let mut map = VmMap::new();
+        let values: Vec<Value> = (0..len).map(|i| Value::Int(i as i64)).collect();
+        map.insert(Value::string("a"), Value::array(values));
+        map
+    }
+
+    #[test]
+    fn array_at_cap_is_accepted() {
+        encode_args_map(&array_map(MAX_ENCODE_PAIRS)).expect("1024 pairs must be accepted");
+    }
+
+    #[test]
+    fn oversized_array_is_rejected_before_the_1025th_push() {
+        let err = encode_args_map(&array_map(MAX_ENCODE_PAIRS + 1))
+            .expect_err("1025 array items must hit the pair cap");
+        let text = err.to_string().to_ascii_lowercase();
+        assert!(
+            text.contains("1024") || text.contains("pair"),
+            "oversized array must not bypass the encode pair cap, got {text}"
+        );
+    }
 }
