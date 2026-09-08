@@ -70,3 +70,28 @@ void *ngx_palloc(void *pool, size_t size)
 
 /* Zeroed inert object. Tests must not treat this as a live NGINX module. */
 __attribute__((aligned(16))) unsigned char ngx_http_core_module[4096];
+
+/*
+ * Task 4 NGINX event/connection symbols. Production cdylib leaves these
+ * undefined so nginx provides them. Stubs never succeed.
+ */
+void *ngx_get_connection(int s, void *log)
+{
+    (void)s;
+    (void)log;
+    return NULL;
+}
+
+void ngx_free_connection(void *c)
+{
+    (void)c;
+}
+
+void ngx_close_connection(void *c)
+{
+    (void)c;
+}
+
+__attribute__((aligned(8))) unsigned char ngx_event_actions[80];
+uintptr_t ngx_event_flags;
+uintptr_t ngx_process;

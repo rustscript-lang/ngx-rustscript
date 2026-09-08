@@ -6,6 +6,8 @@ use ngx::http::{self, HttpModule, HttpModuleLocationConf};
 
 pub mod access;
 pub mod config;
+pub mod notify;
+pub mod runtime;
 pub mod sleep_binding;
 pub(crate) mod vm_pool;
 
@@ -48,24 +50,6 @@ static NGX_HTTP_RUSTSCRIPT_MODULE_CTX: ngx_http_module_t = ngx_http_module_t {
 #[cfg(feature = "export-modules")]
 ngx::ngx_modules!(ngx_http_rustscript_module);
 
-/// Module-specific identity OBJECT and source-freshness fingerprint.
-///
-/// ELF type `OBJECT`, bind `GLOBAL`, exact size 32, in dedicated section
-/// `.ngx_rustscript_module_identity`. Tests copy the candidate `.so` to a
-/// private snapshot, then require GNU `readelf -W --dyn-syms` type/bind/size
-/// and `objcopy --dump-section` of that unique section (exactly 32 bytes)
-/// before comparing the dump to a recomputed fingerprint. Dynsym `Ndx` must
-/// name that unique section and the symbol address range must fit inside it.
-/// This is an identity/freshness fingerprint, not a cryptographic MAC.
-#[used]
-#[allow(non_upper_case_globals)]
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".ngx_rustscript_module_identity")]
-pub static ngx_rustscript_module_identity: [u8; 32] = *include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/ngx_rustscript_source_fingerprint.bin"
-));
-
 #[used]
 #[allow(non_upper_case_globals)]
 #[cfg_attr(not(feature = "export-modules"), unsafe(no_mangle))]
@@ -73,5 +57,7 @@ pub static mut ngx_http_rustscript_module: ngx_module_t = ngx_module_t {
     ctx: &raw const NGX_HTTP_RUSTSCRIPT_MODULE_CTX as _,
     commands: unsafe { &raw mut config::COMMANDS[0] },
     type_: NGX_HTTP_MODULE as _,
+    init_process: Some(runtime::init_process),
+    exit_process: Some(runtime::exit_process),
     ..ngx_module_t::default()
 };

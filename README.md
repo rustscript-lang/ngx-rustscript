@@ -3,8 +3,10 @@
 NGINX dynamic HTTP module that hosts RustScript (`pd-vm`) at the access
 phase. Location directive `access_by_rss_file <path>` compiles the script
 once at configuration time and runs it synchronously to `Halted` on each
-request. Host sleep, Tokio, eventfd, and request suspension are not
-implemented yet.
+request. `ngx::sleep` is a locked VM host contract with a one-time
+`(SleepToken, ms)` claim API. A worker-local Tokio runtime and Linux
+eventfd bridge exist after `init_process`; they are not bound into
+production access yet.
 
 ## Pinned revisions
 
@@ -31,8 +33,7 @@ Official `nginx-sys` inputs (do not invent extra variables):
 
 Only `./configure` is required for bindgen. The fixture below also runs `make`
 so `nginx -t` can load the module. An explicit `--builddir=` path is accepted
-and validated as a path-shaped configure argument; the machine path is not
-hashed into the module identity fingerprint.
+and validated as a path-shaped configure argument.
 
 The selected required build path is official `nginx-sys` bindgen against this
 pinned, configured NGINX 1.30.4 tree. Pre-generated or vendored bindings are
@@ -45,18 +46,9 @@ Required build tools on Linux:
 - C compiler, make, OpenSSL, PCRE2, zlib
 - clang and libclang (official `nginx-sys` bindgen)
 - Rust 1.85+
-- GNU binutils `nm`, `readelf`, and `objcopy` on a compatible Linux host.
-  Tests copy the candidate `.so` once into a private snapshot, then inspect
-  that snapshot only. `nm -D --defined-only --format=posix` requires the
-  generic ngx-rust exports (`ngx_modules`, `ngx_module_names`,
-  `ngx_module_order`). `readelf -W --dyn-syms` requires
-  `ngx_rustscript_module_identity` to be bind `GLOBAL`, ELF type `OBJECT`,
-  size 32. `readelf -W -S` plus `objcopy --dump-section` of the dedicated
-  section `.ngx_rustscript_module_identity` must yield exactly 32 bytes that
-  match a fingerprint recomputed from current sources. ELF class and
-  endianness follow whatever GNU binutils accepts on the host (not ELF64
-  little-endian only). Tests do not `dlopen` the artifact, parse ELF
-  headers, or parse unbounded C strings for identity.
+- GNU `nm` on Linux for a minimal check that the production cdylib does not
+  define test-only NGINX C stubs. Acceptance is `nginx -t`, real module load,
+  HTTP, and normal symbol/link behavior.
 
 Clear inherited `CFLAGS` / `BINDGEN_EXTRA_CLANG_ARGS` before `./configure` and
 `cargo build`. A leaked include path from another NGINX tree will change
@@ -99,52 +91,25 @@ export NGX_RUSTSCRIPT_MODULE="$(readlink -f "$CARGO_TARGET_DIR/debug/libngx_rust
 `export-modules` feature so the cdylib dynamically exports `ngx_modules`,
 `ngx_module_names`, and `ngx_module_order` for `load_module`. The HTTP
 module object is named `ngx_http_rustscript_module` inside that table; it
-is not a dynamic symbol. `build.rs` also embeds a 32-byte identity/freshness
-fingerprint as the exported `OBJECT` `ngx_rustscript_module_identity` in ELF
-section `.ngx_rustscript_module_identity`. The digest is a deterministic
-std-only 4-lane FNV-1a-64 over the crate's local production inputs
-(`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/lib.rs`, `src/config.rs`,
-`src/access.rs`, `src/vm_pool.rs`, `src/sleep_binding.rs`, `config`,
-`config.make`, `auto/rust`) plus pinned NGINX
-configured ABI inputs
-(`src/core/nginx.h`, generated `ngx_auto_config.h` / `ngx_auto_headers.h`,
-and the nginx-sys bindgen-driving `Makefile` `ALL_INCS`/`CFLAGS` extract).
-Machine/path-only data in `ngx_auto_config.h` (especially `NGX_CONFIGURE`
-`--prefix` / `--builddir` / `--add-dynamic-module` values and `NGX_PREFIX`)
-is replaced with stable placeholders before hashing. It is not a
-cryptographic MAC. `build.rs` requires `NGINX_SOURCE_DIR` and
-`NGINX_BUILD_DIR` and emits `cargo::rerun-if-env-changed` plus
-`cargo::rerun-if-changed` for each hashed file. Identity is bound to those
-configured source/build ABI inputs only; `build.rs` does not require
-`$NGINX_BUILD_DIR/nginx`.
+is not a dynamic symbol.
 
 Standalone `cargo test` validates the canonical `$NGINX_BUILD_DIR/nginx`
 binary, `nginx/1.30.4`, `--with-compat`, and `--with-http_ssl_module` in the
 module-load harness before `nginx -t`. Quoted configure paths, `--prefix`,
 `--builddir`, `--add-dynamic-module`, and other valid NGINX flags are
-accepted. An official `--builddir=` path is allowed; the machine path is not
-part of the identity fingerprint.
+accepted.
 
 Tests resolve `${CARGO_TARGET_DIR:-<crate>/target}/debug/libngx_rustscript.so`
-(or `NGX_RUSTSCRIPT_MODULE` when set), copy that candidate once to a unique
-owner-only snapshot (RAII-cleaned), freeze it read-only after validation,
-and run `nm` / `readelf` / `objcopy` plus the final `nginx -t` against that
-snapshot. A missing or wrong shared library is rejected. Identity requires
-the dedicated `PROGBITS` section, a `GLOBAL OBJECT` of size 32 whose dynsym
-`Ndx` is that unique section index, and a symbol address range inside the
-section. The dumped 32 bytes must match a fingerprint the test recomputes
-from the same inputs. Fingerprint is authoritative. A different ngx-rust
-module that only exports the generic `ngx_modules` / `ngx_module_names` /
-`ngx_module_order` symbols is rejected, as are an identity symbol with the
-wrong ELF type, bind, size, or section (`ABS` / `.data`), a missing/NOBITS
-identity section, and a correctly shaped object with the wrong fingerprint.
+(or `NGX_RUSTSCRIPT_MODULE` when set) and pass that absolute path to
+`load_module`. A missing or non-regular shared library is rejected. `nm -D
+--defined-only` rejects a production cdylib that defines test-only NGINX C
+stubs. `nginx -t`, real module load, and HTTP are the acceptance evidence.
 
 Tests also require the selected nginx binary to be canonical
 `$NGINX_BUILD_DIR/nginx` reporting `nginx/1.30.4` with `--with-compat` and
-`--with-http_ssl_module`. An official `--builddir=` path is accepted; the
-machine path is not part of the identity fingerprint. Fixture `nginx.conf.in`
-interpolates quoted paths; unsafe bytes (NUL, newline, non-UTF-8) are
-rejected fail-closed, and `nginx -t` receives `-p` / `-c` as `OsStr`.
+`--with-http_ssl_module`. Fixture `nginx.conf.in` interpolates quoted paths;
+unsafe bytes (NUL, newline, non-UTF-8) are rejected fail-closed, and
+`nginx -t` receives `-p` / `-c` as `OsStr`.
 
 ### Optional: NGINX `--add-dynamic-module`
 
@@ -152,13 +117,11 @@ rejected fail-closed, and `nginx -t` receives `-p` / `-c` as `OsStr`.
 `examples/{config,config.make,auto/rust}` at the same git revision. That path
 builds a **staticlib** with `--no-default-features` (no `ngx_modules` table;
 NGINX generates it). Use it only when configuring NGINX with
-`--add-dynamic-module=/path/to/ngx-rustscript`. `make -j` can compile the
-staticlib in parallel with `objs/nginx` because `build.rs` fingerprints
-configured ABI inputs and does not wait for the linked binary.
+`--add-dynamic-module=/path/to/ngx-rustscript`.
 
-Full configure + parallel make + emitted identity + `nginx -t` is
-`tests/verify_add_dynamic.sh` (a standalone script so nested `cargo rustc`
-cannot deadlock a parent `cargo test`). After `cargo build --lib`, run:
+Full configure + parallel make + `nginx -t` is `tests/verify_add_dynamic.sh`
+(a standalone script so nested `cargo rustc` cannot deadlock a parent
+`cargo test`). After `cargo build --lib`, run:
 
 ```sh
 export CARGO_TARGET_DIR
@@ -313,6 +276,44 @@ Contract:
 - Config still rejects every import, including `ngx::sleep`. Access-phase
   NGINX/Tokio integration remains pending. A `Yielded` VM is still
   non-reusable and dropped by the worker-local pool.
+
+## Worker runtime and eventfd bridge (Task 4)
+
+Created only in NGINX worker `init_process` after fork, and only when
+`ngx_process` is `NGX_PROCESS_WORKER` or `NGX_PROCESS_SINGLE`. Helper
+processes skip initialization. `nginx -t`, master, and config never create
+Tokio threads or the eventfd. `exit_process` shuts the runtime down and is
+idempotent.
+
+- Tokio: `rt` + `rt-multi-thread` + `time` only (no HTTP/network client).
+  One worker thread named `ngx-rustscript-sleep`.
+- Submit API: `WorkerRuntime::submit_sleep(SleepToken, ms)` plus
+  `submit_claimed` for Task 3 one-time `(token, ms)` claims. Capacity is
+  reserved before a Task 3 claim is consumed. The spawned task owns only
+  `SleepToken`, `u64` milliseconds, a `CompletionSender`, and a
+  `CompletionPermit`. It never holds NGINX request/pool/VM pointers and
+  never calls `ngx_post_event`.
+- Completions enqueue under a mutex (happens-before), then write
+  `eventfd(2)` created with `EFD_NONBLOCK|EFD_CLOEXEC`. Capacity is
+  `DEFAULT_MAX_IN_FLIGHT` (1024). Submit is rejected when full; each
+  accepted op has reserved completion space owned RAII through
+  task → pending → ready. Abort, shutdown, and failure release the slot.
+  Queue poison returns an error instead of panicking.
+- Worker main thread registers the fd with `ngx_get_connection` and the
+  same `add_conn`/`add` split as `ngx_add_channel_event`. Generated
+  bindings export `NGX_USE_EPOLL_EVENT` but not `NGX_READ_EVENT`; the
+  pinned Linux epoll path uses `add` with `EPOLLIN`. The
+  callback drains eventfd (EINTR retry, EAGAIN = already readable,
+  short/EOF/hard errors surfaced) and moves completions into a
+  worker-local ready queue for Task 5 (`pop_ready` / `drain_ready`),
+  including when a read fault is also present.
+- FD ownership: write and close share one mutex, so a cloned task sender
+  cannot write after the fd is invalidated. Reject new tasks, abort
+  tracked sleeps, shut down Tokio, unregister (`ngx_close_connection`)
+  and close the fd only after writers cannot use it.
+- Not in this milestone: production `access_by_rss_file` still rejects
+  `ngx::sleep`, does not bind sleep, retain requests, resume the VM,
+  advance phases, or look up a request registry.
 
 ## Related projects
 

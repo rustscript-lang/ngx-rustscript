@@ -10,7 +10,9 @@ use std::process::Command;
 
 use super::temp::{env_path, isolated_prefix};
 
-use super::artifact::fingerprint::split_shell_words;
+#[path = "../../support/shell_words.rs"]
+mod shell_words;
+use shell_words::split_shell_words;
 
 pub const PINNED_NGINX_VERSION_BANNER: &str = "nginx/1.30.4";
 pub const REQUIRED_NGINX_CONFIGURE_ARGS: &[&str] = &["--with-compat", "--with-http_ssl_module"];

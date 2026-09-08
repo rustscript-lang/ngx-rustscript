@@ -1,8 +1,3 @@
-#[path = "support/fingerprint.rs"]
-mod fingerprint;
-
-use std::path::PathBuf;
-
 /// Forward `nginx-sys` build metadata into this crate.
 ///
 /// `nginx-sys` must be a direct dependency so Cargo exports `DEP_NGINX_*`.
@@ -55,38 +50,4 @@ fn main() {
         println!("cargo::rustc-link-arg=-undefined");
         println!("cargo::rustc-link-arg=dynamic_lookup");
     }
-
-    write_source_fingerprint();
-}
-
-fn require_env_dir(name: &str) -> PathBuf {
-    let raw = std::env::var_os(name).unwrap_or_else(|| panic!("{name} must be set"));
-    if raw.is_empty() {
-        panic!("{name} must be set");
-    }
-    let path = PathBuf::from(raw);
-    if !path.is_dir() {
-        panic!("{name} is not a directory: {}", path.display());
-    }
-    path
-}
-
-fn write_source_fingerprint() {
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    for rel in fingerprint::SOURCE_FINGERPRINT_INPUTS {
-        println!("cargo::rerun-if-changed={rel}");
-    }
-    let nginx_source_dir = require_env_dir("NGINX_SOURCE_DIR");
-    let nginx_build_dir = require_env_dir("NGINX_BUILD_DIR");
-    for (_, path) in fingerprint::nginx_fingerprint_paths(&nginx_source_dir, &nginx_build_dir) {
-        println!("cargo::rerun-if-changed={}", path.display());
-    }
-
-    let owned =
-        fingerprint::collect_fingerprint_owned(&manifest_dir, &nginx_source_dir, &nginx_build_dir)
-            .unwrap_or_else(|err| panic!("{err}"));
-    let digest = fingerprint::fingerprint_from_owned(&owned);
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap())
-        .join("ngx_rustscript_source_fingerprint.bin");
-    std::fs::write(&out, digest).unwrap_or_else(|err| panic!("write {}: {err}", out.display()));
 }

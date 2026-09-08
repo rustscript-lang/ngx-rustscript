@@ -9,9 +9,6 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 pub const TEMP_DIR_MODE: u32 = 0o700;
-pub const SNAPSHOT_FILE_MODE: u32 = 0o700;
-pub const SNAPSHOT_READONLY_FILE_MODE: u32 = 0o500;
-pub const DUMP_FILE_MODE: u32 = 0o600;
 
 #[derive(Debug)]
 pub struct OwnedTempDir {
@@ -52,11 +49,7 @@ fn restore_owner_write_tree_inner(path: &Path, visited: &mut HashSet<(u64, u64)>
     if !visited.insert(key) {
         return;
     }
-    let mode = if meta.is_dir() {
-        TEMP_DIR_MODE
-    } else {
-        SNAPSHOT_FILE_MODE
-    };
+    let mode = if meta.is_dir() { TEMP_DIR_MODE } else { 0o700 };
     let _ = chmod_owner_only(path, mode);
     if !meta.is_dir() {
         return;
@@ -178,21 +171,6 @@ pub fn unique_temp_dir(label: &str) -> OwnedTempDir {
     panic!("could not allocate a unique owner-only temp dir for {label}");
 }
 
-pub fn chmod_path(path: &Path, mode: u32) -> Result<(), String> {
-    chmod_owner_only(path, mode)
-}
-
-pub fn freeze_snapshot(snapshot: &Path) -> Result<(), String> {
-    let dir = snapshot
-        .parent()
-        .ok_or_else(|| format!("snapshot {} has no parent", snapshot.display()))?;
-    let dump = dir.join("ngx_rustscript_module_identity.dump");
-    let _ = fs::remove_file(&dump);
-    chmod_owner_only(snapshot, SNAPSHOT_READONLY_FILE_MODE)?;
-    chmod_owner_only(dir, TEMP_DIR_MODE)?;
-    Ok(())
-}
-
 pub fn isolated_prefix(label: &str) -> OwnedTempDir {
     let prefix = unique_temp_dir(label);
     for child in ["logs", "conf", "html"] {
@@ -249,59 +227,6 @@ fn unique_temp_dirs_do_not_collide() {
     assert_ne!(a.path(), b.path());
     assert!(a.path().is_dir());
     assert!(b.path().is_dir());
-}
-
-fn write_snapshot_file(dir: &Path) -> PathBuf {
-    let snapshot = dir.join("libngx_rustscript.so");
-    fs::write(&snapshot, b"placeholder-snapshot").unwrap();
-    chmod_owner_only(&snapshot, SNAPSHOT_FILE_MODE).unwrap();
-    snapshot
-}
-
-#[test]
-fn frozen_snapshot_directory_is_removed_on_drop() {
-    let path;
-    {
-        let dir = unique_temp_dir("frozen-drop");
-        let snapshot = write_snapshot_file(dir.path());
-        freeze_snapshot(&snapshot).expect("freeze snapshot");
-        let file_mode = fs::metadata(&snapshot).unwrap().permissions().mode() & 0o777;
-        let dir_mode = fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
-        assert_eq!(file_mode, SNAPSHOT_READONLY_FILE_MODE);
-        assert_eq!(
-            dir_mode, TEMP_DIR_MODE,
-            "frozen snapshot parent must stay owner-writable so Drop can remove it"
-        );
-        path = dir.path().to_path_buf();
-        assert!(path.is_dir());
-    }
-    assert!(
-        !path.exists(),
-        "frozen snapshot directory must be removed on Drop: {}",
-        path.display()
-    );
-}
-
-#[test]
-fn frozen_snapshot_directory_is_removed_on_panic_unwind() {
-    let holder = std::sync::Mutex::new(None::<PathBuf>);
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let dir = unique_temp_dir("frozen-panic");
-        let snapshot = write_snapshot_file(dir.path());
-        freeze_snapshot(&snapshot).expect("freeze snapshot");
-        *holder.lock().unwrap() = Some(dir.path().to_path_buf());
-        panic!("force unwind for frozen RAII");
-    }));
-    std::panic::set_hook(prev);
-    assert!(panicked.is_err());
-    let path = holder.lock().unwrap().clone().expect("captured path");
-    assert!(
-        !path.exists(),
-        "frozen snapshot directory must be removed on panic unwind: {}",
-        path.display()
-    );
 }
 
 #[test]

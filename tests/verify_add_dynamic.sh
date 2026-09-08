@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full NGINX --add-dynamic-module configure + parallel make + identity + nginx -t.
+# Full NGINX --add-dynamic-module configure + parallel make + nginx -t.
 #
 # Cargo tests cannot run this in-process: NGINX make invokes cargo rustc and would
 # deadlock on the same package lock. Invoke this script from verification after
@@ -7,10 +7,9 @@
 set -euo pipefail
 
 CRATE_ROOT="${CRATE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-TMP_ROOT="${NGX_RUSTSCRIPT_TASK_TMP:-/mnt/TEMP/workspace/ngx-rustscript/tmp/ngx-rustscript-task1-api-build-4286cfb4}"
+TMP_ROOT="${NGX_RUSTSCRIPT_TASK_TMP:-/mnt/TEMP/workspace/ngx-rustscript/tmp/ngx-rustscript-task4-simplify-00088e29}"
 NGINX_SOURCE_DIR="${NGINX_SOURCE_DIR:-$TMP_ROOT/nginx-1.30.4}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CRATE_ROOT/target}"
-STANDALONE_SO="${STANDALONE_SO:-$CARGO_TARGET_DIR/debug/libngx_rustscript.so}"
 
 if [[ ! -x "$NGINX_SOURCE_DIR/configure" ]]; then
   echo "NGINX_SOURCE_DIR is not a configured 1.30.4 tree: $NGINX_SOURCE_DIR" >&2
@@ -70,28 +69,15 @@ if [[ "$REPORT" != *--with-compat* || "$REPORT" != *--with-http_ssl_module* ]]; 
   exit 1
 fi
 
-readelf -W --dyn-syms "$MODULE_SO" > "$CONF_PREFIX/dynsym.txt"
-grep -q 'OBJECT *GLOBAL.*ngx_rustscript_module_identity' "$CONF_PREFIX/dynsym.txt"
-readelf -W -S "$MODULE_SO" > "$CONF_PREFIX/sections.txt"
-grep -q '\.ngx_rustscript_module_identity' "$CONF_PREFIX/sections.txt"
-
-DUMP_ADD="$CONF_PREFIX/identity-add.bin"
-objcopy --dump-section=.ngx_rustscript_module_identity="$DUMP_ADD" "$MODULE_SO"
-if [[ "$(wc -c < "$DUMP_ADD")" -ne 32 ]]; then
-  echo "add-dynamic identity section is not 32 bytes" >&2
-  exit 1
-fi
-
-if [[ -f "$STANDALONE_SO" ]]; then
-  DUMP_STANDALONE="$CONF_PREFIX/identity-standalone.bin"
-  objcopy --dump-section=.ngx_rustscript_module_identity="$DUMP_STANDALONE" "$STANDALONE_SO"
-  if ! cmp -s "$DUMP_ADD" "$DUMP_STANDALONE"; then
-    echo "add-dynamic identity does not match standalone cdylib fingerprint" >&2
-    xxd "$DUMP_ADD" >&2 || true
-    xxd "$DUMP_STANDALONE" >&2 || true
+NM_OUT="$(nm -D --defined-only --format=posix "$MODULE_SO" || true)"
+for stub in ngx_conf_full_name ngx_conf_log_error ngx_array_push ngx_log_error_core \
+  ngx_pool_cleanup_add ngx_palloc ngx_http_core_module ngx_get_connection \
+  ngx_free_connection ngx_close_connection ngx_event_actions ngx_event_flags ngx_process; do
+  if printf '%s\n' "$NM_OUT" | awk '{print $1}' | grep -qx "$stub"; then
+    echo "add-dynamic module must not define test NGINX stub $stub" >&2
     exit 1
   fi
-fi
+done
 
 MODULE_ESCAPED="${MODULE_SO//\\/\\\\}"
 MODULE_ESCAPED="${MODULE_ESCAPED//\"/\\\"}"
