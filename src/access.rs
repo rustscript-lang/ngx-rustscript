@@ -9,9 +9,13 @@
 //! `NGX_OK` or 500. Host-bound VMs are never returned to the Task 2 pool.
 
 use std::cell::RefCell;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use nginx_sys::ngx_http_request_t;
+use nginx_sys::{
+    ngx_handle_read_event, ngx_http_block_reading, ngx_http_request_t, ngx_http_test_reading,
+    ngx_post_event, ngx_posted_events,
+};
 use ngx::core::Status;
 use ngx::ffi::NGX_LOG_ERR;
 use ngx::http::{HTTPStatus, HttpModule, HttpModuleLocationConf, HttpRequestHandler, Request};
@@ -77,11 +81,42 @@ impl Drop for HandlerGuard {
 
 impl Drop for AccessCtx {
     fn drop(&mut self) {
-        let exec = self.exec.get_mut();
-        if let Some(token) = exec.current_token() {
-            unregister_exact(token, exec.request_id(), None);
-        }
+        // `Pool::allocate` registers this Drop as `ngx_pool_cleanup_add`.
+        // NGINX 1.30.4 runs it from `ngx_destroy_pool` inside
+        // `ngx_http_free_request`, after `r->cleanup` handlers and after
+        // `r->pool = NULL`. Commit Cancelled before unregister/abort/drop.
+        cleanup_access_ctx(self.exec.get_mut());
     }
+}
+
+fn cleanup_access_ctx(exec: &mut AccessExec) {
+    let request_id = exec.request_id();
+    let token = exec.cleanup();
+    if let Some(token) = token {
+        unregister_exact(token, request_id, None);
+        invalidate_deferred(token);
+        let _ = crate::runtime::with_worker(|worker| worker.abort_sleep(token));
+    }
+}
+
+fn invalidate_deferred(token: SleepToken) {
+    WORKER_ACCESS.with(|state| {
+        state
+            .borrow_mut()
+            .deferred
+            .retain(|queued| *queued != token);
+    });
+}
+
+/// Worker exit: drop token maps without dereferencing request pointers.
+pub(crate) fn clear_worker_access() {
+    WORKER_ACCESS.with(|state| {
+        let mut state = state.borrow_mut();
+        state.ids.clear();
+        state.live.clear();
+        state.deferred.clear();
+        state.in_handler = false;
+    });
 }
 
 struct WorkerSleepSubmit;
@@ -221,6 +256,15 @@ fn finish_from_raw(raw: *mut ngx_http_request_t) -> Status {
                 );
                 return HTTPStatus::INTERNAL_SERVER_ERROR.into();
             }
+            if !arm_read_close(raw) {
+                unregister_exact(token, request_id, Some(raw));
+                ngx_log_error!(
+                    NGX_LOG_ERR,
+                    request.log(),
+                    "access_by_rss_file: failed to arm client-close read handler"
+                );
+                return HTTPStatus::INTERNAL_SERVER_ERROR.into();
+            }
         }
     } else if status == AccessStatus::Error500 {
         ngx_log_error!(
@@ -273,24 +317,27 @@ fn dispatch_ready_token(token: SleepToken) {
         if state.in_handler {
             return ReadyLookup::InHandler;
         }
-        match state.live.get(token).copied() {
-            Some(raw) => ReadyLookup::Live(raw),
-            None => ReadyLookup::Unknown,
+        match (
+            state.ids.get(token).copied(),
+            state.live.get(token).copied(),
+        ) {
+            (Some(request_id), Some(raw)) => ReadyLookup::Live { raw, request_id },
+            _ => ReadyLookup::Unknown,
         }
     });
-    let raw = match lookup {
+    let (raw, request_id) = match lookup {
         ReadyLookup::InHandler => {
             WORKER_ACCESS.with(|state| state.borrow_mut().deferred.push(token));
             return;
         }
         ReadyLookup::Unknown => return,
-        ReadyLookup::Live(raw) => raw,
+        ReadyLookup::Live { raw, request_id } => (raw, request_id),
     };
-    let effect = apply_on_request(raw, token);
+    let effect = apply_on_request(raw, token, request_id);
     match effect {
         ReadyEffect::Halted | ReadyEffect::Failed => {
-            let request_id = request_id_on_request(raw);
             unregister_exact(token, request_id, Some(raw));
+            restore_block_reading(raw);
             // SAFETY: the request stayed alive because the access handler
             // returned NGX_AGAIN without finalizing. Resume is on the worker
             // main thread after that handler returned.
@@ -314,16 +361,26 @@ fn dispatch_ready_token(token: SleepToken) {
 enum ReadyLookup {
     InHandler,
     Unknown,
-    Live(*mut ngx_http_request_t),
+    Live {
+        raw: *mut ngx_http_request_t,
+        request_id: u64,
+    },
 }
 
-fn apply_on_request(raw: *mut ngx_http_request_t, token: SleepToken) -> ReadyEffect {
-    // SAFETY: `raw` came from the worker-local live map for a request that
-    // returned NGX_AGAIN and has not been cleaned up.
+fn apply_on_request(
+    raw: *mut ngx_http_request_t,
+    token: SleepToken,
+    request_id: u64,
+) -> ReadyEffect {
+    // SAFETY: both worker-local maps contained this exact token, so `raw`
+    // is the live request that armed it. Stale/unknown tokens never reach here.
     let request = unsafe { Request::from_ngx_http_request(raw) };
     let Some(ctx) = request.get_module_ctx::<AccessCtx>(Module::module()) else {
         return ReadyEffect::Ignored;
     };
+    if ctx.exec.borrow().request_id() != request_id || ctx.exec.borrow().is_cancelled() {
+        return ReadyEffect::Ignored;
+    }
     WORKER_ACCESS.with(|state| {
         let mut state = state.borrow_mut();
         ctx.exec
@@ -339,11 +396,51 @@ fn current_token_on_request(raw: *mut ngx_http_request_t) -> Option<SleepToken> 
     ctx.exec.borrow().current_token()
 }
 
-fn request_id_on_request(raw: *mut ngx_http_request_t) -> u64 {
-    // SAFETY: same liveness as [`apply_on_request`].
-    let request = unsafe { Request::from_ngx_http_request(raw) };
-    request
-        .get_module_ctx::<AccessCtx>(Module::module())
-        .map(|ctx| ctx.exec.borrow().request_id())
-        .unwrap_or(0)
+/// Install the module read-close handler and re-arm like auth delay / limit_req.
+///
+/// `ngx_http_test_reading` is link-visible (`ngx_http.h`, nginx-sys `cda9d837`).
+/// The wrapper only adds `catch_unwind` so a panic cannot cross the NGINX FFI.
+fn arm_read_close(raw: *mut ngx_http_request_t) -> bool {
+    if raw.is_null() {
+        return false;
+    }
+    // SAFETY: `raw` is the live request that just returned NGX_AGAIN on this
+    // worker thread. Connection and read event are NGINX-owned for that request.
+    unsafe {
+        let connection = (*raw).connection;
+        if connection.is_null() {
+            return false;
+        }
+        let rev = (*connection).read;
+        if rev.is_null() {
+            return false;
+        }
+        (*raw).read_event_handler = Some(access_read_close_handler);
+        if (*rev).ready() != 0 {
+            ngx_post_event(rev, core::ptr::addr_of_mut!(ngx_posted_events));
+        } else if ngx_handle_read_event(rev, 0) != 0 {
+            return false;
+        }
+        true
+    }
+}
+
+fn restore_block_reading(raw: *mut ngx_http_request_t) {
+    if raw.is_null() {
+        return;
+    }
+    // SAFETY: called on the worker thread before phase continuation while `raw`
+    // is still the suspended access request.
+    unsafe {
+        (*raw).read_event_handler = Some(ngx_http_block_reading);
+    }
+}
+
+unsafe extern "C" fn access_read_close_handler(r: *mut ngx_http_request_t) {
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if r.is_null() {
+            return;
+        }
+        unsafe { ngx_http_test_reading(r) };
+    }));
 }

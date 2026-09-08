@@ -168,9 +168,26 @@ impl WorkerRuntime {
         self.notify.is_accepting()
     }
 
-    #[cfg(test)]
-    pub(crate) fn in_flight(&self) -> Result<usize, NotifyError> {
+    pub fn in_flight(&self) -> Result<usize, NotifyError> {
         self.notify.in_flight()
+    }
+
+    /// Abort the matching sleep task and release its completion permit
+    /// whether the task is sleeping, queued, or already ready. Idempotent.
+    pub fn abort_sleep(&self, token: SleepToken) -> bool {
+        let aborted = match self.tasks.lock() {
+            Ok(mut tasks) => {
+                if let Some(handle) = tasks.remove(&token) {
+                    handle.abort();
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        };
+        let reclaimed = self.notify.reclaim_token(token).unwrap_or(false);
+        aborted || reclaimed
     }
 
     /// Create a request-local non-`Clone` [`SleepSession`] from the worker-wide
@@ -307,6 +324,7 @@ impl WorkerRuntime {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_timeout(Duration::from_secs(5));
         }
+        let _ = self.notify.reclaim_all();
         self.notify.shutdown_fd();
     }
 
@@ -361,6 +379,7 @@ pub fn exit_worker() {
             worker.shutdown();
         }
     });
+    crate::access::clear_worker_access();
 }
 
 pub fn worker_is_active() -> bool {

@@ -100,3 +100,27 @@ void ngx_http_core_run_phases(void *r)
 {
     (void)r;
 }
+
+void ngx_http_test_reading(void *r)
+{
+    (void)r;
+}
+
+void ngx_http_block_reading(void *r)
+{
+    (void)r;
+}
+
+ngx_int_t ngx_handle_read_event(void *rev, uintptr_t flags)
+{
+    (void)rev;
+    (void)flags;
+    return (ngx_int_t)NGX_ERROR;
+}
+
+typedef struct {
+    void *prev;
+    void *next;
+} ngx_queue_t;
+
+ngx_queue_t ngx_posted_events;

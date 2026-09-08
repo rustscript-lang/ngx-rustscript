@@ -7,7 +7,7 @@
 //! `ngx_add_channel_event`) and harvests completions into a ready queue for
 //! Task 5.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -117,6 +117,7 @@ pub(crate) struct Pending {
     pub(crate) queue: VecDeque<SleepToken>,
     in_flight: usize,
     cap: usize,
+    cancelled: HashSet<SleepToken>,
 }
 
 #[derive(Clone, Copy)]
@@ -176,6 +177,9 @@ impl CompletionSender {
     ) -> Result<(), NotifyError> {
         {
             let mut pending = self.pending.lock().map_err(|_| NotifyError::Poisoned)?;
+            if pending.cancelled.remove(&token) {
+                return Ok(());
+            }
             pending.queue.push_back(token);
             permit.disarm();
         }
@@ -238,6 +242,7 @@ impl NotifyBridge {
             queue: VecDeque::new(),
             in_flight: 0,
             cap,
+            cancelled: HashSet::new(),
         }));
         let fd_inner = Arc::new(Mutex::new(FdInner::Open(fd)));
         let sender = CompletionSender {
@@ -463,6 +468,48 @@ impl NotifyBridge {
 
     pub fn is_accepting(&self) -> bool {
         self.accepting.load(Ordering::Acquire)
+    }
+
+    /// Remove `token` from pending/ready and mark it cancelled so a racing
+    /// Tokio `complete` drops its permit instead of re-enqueueing.
+    pub fn reclaim_token(&self, token: SleepToken) -> Result<bool, NotifyError> {
+        let mut pending = self.lock_pending()?;
+        pending.cancelled.insert(token);
+        let mut found = false;
+        pending.queue.retain(|queued| {
+            if *queued == token {
+                found = true;
+                false
+            } else {
+                true
+            }
+        });
+        let mut ready = self.lock_ready()?;
+        ready.retain(|queued| {
+            if *queued == token {
+                found = true;
+                false
+            } else {
+                true
+            }
+        });
+        if found {
+            pending.cancelled.remove(&token);
+            pending.in_flight = pending.in_flight.saturating_sub(1);
+        }
+        Ok(found)
+    }
+
+    /// Drop queued completions and zero in-flight. Worker exit uses this
+    /// after aborting tasks so leftover tokens never resume a request.
+    pub fn reclaim_all(&self) -> Result<(), NotifyError> {
+        let mut pending = self.lock_pending()?;
+        let mut ready = self.lock_ready()?;
+        pending.queue.clear();
+        ready.clear();
+        pending.cancelled.clear();
+        pending.in_flight = 0;
+        Ok(())
     }
 
     #[cfg(test)]

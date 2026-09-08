@@ -348,8 +348,42 @@ returns `NGX_AGAIN` on Yield and does not retain/release the count.
 - Registry capacity matches Task 4 `DEFAULT_MAX_IN_FLIGHT` (1024). Full
   submit/registry rejects before retain/submit. Unknown, mismatched, and
   stale tokens fail closed.
-- Not in this milestone (Task 6): client disconnect cleanup, abort
-  handles, and full cancellation races.
+
+## Request cancellation and worker exit (Task 6)
+
+When a sleep access handler returns `NGX_AGAIN`, the module installs a
+read-event handler that detects client close. Pinned NGINX 1.30.4 exports
+`ngx_http_test_reading` (`ngx_http.h`; nginx-sys `cda9d837` binds it). The
+default `ngx_http_block_reading` handler ignores epoll RDHUP, so this module
+installs a worker-thread wrapper around `ngx_http_test_reading` (`catch_unwind`,
+no Tokio/VM work). That function checks pending EOF/error flags and
+`recv(MSG_PEEK)`; EAGAIN/readable data leave the request suspended. Confirmed
+close finalizes once with `NGX_HTTP_CLIENT_CLOSED_REQUEST` (access log 499).
+Request-pool cleanup then commits Cancelled, unregisters the token, aborts the
+sleep, and releases the completion permit. TCP close does not free the request
+by itself while the read handler is still `ngx_http_block_reading`.
+
+`Pool::allocate` already registered `AccessCtx` Drop as that pool cleanup
+(`ngx_pool_cleanup_add`). Cleanup commits Cancelled before unregister, abort,
+and session drop, and is a no-op after Halt or error. Normal completion
+restores `ngx_http_block_reading` before `ngx_http_core_run_phases`.
+
+- Only the matching `SleepToken` / request-id mapping is removed.
+  `WorkerRuntime::abort_sleep` aborts that Tokio task and reclaims its
+  completion permit whether the sleep is running, queued, or ready.
+  Dropping the request-local `SleepSession` invalidates its generation.
+- Eventfd resume stays on the worker main thread. Stale, duplicate, and
+  unknown tokens never dereference a request pointer: both the id and live
+  maps must contain the token, and the ctx request id must still match.
+  A deferred resume is invalidated so a later notification is a no-op.
+  Phase continuation / `ngx_http_core_run_phases` still happens at most
+  once. Tokio never calls NGINX APIs.
+- Worker `exit_process`: reject new work, abort tracked sleeps, shut down
+  Tokio, reclaim queued completions, unregister/close eventfd once, then
+  clear the worker registries without touching request pointers. Exit is
+  idempotent. Long sleeps do not delay graceful worker exit.
+
+Not in this milestone (Task 7): a full load/concurrency matrix.
 
 ## Related projects
 

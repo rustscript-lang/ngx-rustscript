@@ -170,6 +170,12 @@ impl<T> TokenRegistry<T> {
             _ => None,
         }
     }
+
+    /// Drop every mapping without inspecting values. Worker exit uses this
+    /// so leftover request pointers are never dereferenced.
+    pub fn clear(&mut self) {
+        self.map.clear();
+    }
 }
 
 impl<T> Default for TokenRegistry<T> {
@@ -185,6 +191,7 @@ enum ExecState {
     Failed,
     Yielded,
     Suspended,
+    Cancelled,
 }
 
 /// First VM run outcome used by the early-completion test.
@@ -246,8 +253,36 @@ impl AccessExec {
         match self.state {
             ExecState::Halted => Some(VmStatus::Halted),
             ExecState::Yielded | ExecState::Suspended => Some(VmStatus::Yielded),
-            ExecState::Failed | ExecState::New => None,
+            ExecState::Failed | ExecState::New | ExecState::Cancelled => None,
         }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self.state, ExecState::Cancelled)
+    }
+
+    /// Halted, Failed, or Cancelled: do not finalize again on client close.
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self.state,
+            ExecState::Halted | ExecState::Failed | ExecState::Cancelled
+        )
+    }
+
+    /// Request-pool cleanup entry. Commits Cancelled (or stays Halted/Failed)
+    /// before the caller unregisters, aborts, or drops. Idempotent.
+    pub fn cleanup(&mut self) -> Option<SleepToken> {
+        let token = self.current.take().map(|(token, _)| token);
+        self.deferred = None;
+        self.suspend_committed = false;
+        self.vm = None;
+        match self.state {
+            ExecState::Halted | ExecState::Failed | ExecState::Cancelled => {}
+            ExecState::New | ExecState::Yielded | ExecState::Suspended => {
+                self.state = ExecState::Cancelled;
+            }
+        }
+        token
     }
 
     /// Run the VM until Halted, Yielded, or error. Does not submit or commit.
@@ -306,7 +341,7 @@ impl AccessExec {
         match self.state {
             ExecState::Halted => AccessStatus::Ok,
             ExecState::Failed => AccessStatus::Error500,
-            ExecState::Suspended | ExecState::Yielded => AccessStatus::Again,
+            ExecState::Suspended | ExecState::Yielded | ExecState::Cancelled => AccessStatus::Again,
             ExecState::New => match self.run_until_yield_or_halt() {
                 Ok(outcome) if outcome.token.is_some() => {
                     if self.arm_suspend(registry, submit).is_err() {
@@ -348,6 +383,12 @@ impl AccessExec {
         registry: &mut TokenRegistry<u64>,
         submit: &mut impl SleepSubmit,
     ) -> ReadyEffect {
+        if matches!(
+            self.state,
+            ExecState::Cancelled | ExecState::Halted | ExecState::Failed
+        ) {
+            return ReadyEffect::Ignored;
+        }
         match registry.get(token) {
             Some(&id) if id == self.request_id => {}
             Some(_) => return ReadyEffect::Ignored,
@@ -459,7 +500,6 @@ enum AccessArmError {
 
 impl Drop for AccessExec {
     fn drop(&mut self) {
-        self.current = None;
-        self.vm = None;
+        let _ = self.cleanup();
     }
 }
