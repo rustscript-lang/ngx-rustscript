@@ -104,7 +104,8 @@ fingerprint as the exported `OBJECT` `ngx_rustscript_module_identity` in ELF
 section `.ngx_rustscript_module_identity`. The digest is a deterministic
 std-only 4-lane FNV-1a-64 over the crate's local production inputs
 (`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/lib.rs`, `src/config.rs`,
-`src/access.rs`, `src/vm_pool.rs`, `config`, `config.make`, `auto/rust`) plus pinned NGINX
+`src/access.rs`, `src/vm_pool.rs`, `src/sleep_binding.rs`, `config`,
+`config.make`, `auto/rust`) plus pinned NGINX
 configured ABI inputs
 (`src/core/nginx.h`, generated `ngx_auto_config.h` / `ngx_auto_headers.h`,
 and the nginx-sys bindgen-driving `Makefile` `ALL_INCS`/`CFLAGS` extract).
@@ -235,6 +236,11 @@ impl Vm {
     pub fn poll_reset_for_reuse(&mut self, cx: &mut Context<'_>) -> Poll<VmResult<()>>;
     pub fn is_reusable(&self) -> bool;
     pub fn scope_reset_pending(&self) -> bool;
+    pub fn bind_args_function(
+        &mut self,
+        name: impl Into<String>,
+        function: Box<dyn HostArgsFunction>,
+    );
     pub fn bind_static_args_function(
         &mut self,
         name: impl Into<String>,
@@ -265,6 +271,48 @@ impl HostFunctionRegistry {
 Normal termination is `Ok(VmStatus::Halted)`. Host `Yield` maps to
 `VmStatus::Yielded`; `resume()` re-enters the same host call. Drop of `Vm`
 owns cancellation and resource closure.
+
+## `ngx::sleep` VM contract (locked)
+
+Verified with real `compile_source` / `compile_source_with_flavor_and_options`,
+real `Vm`, and `Vm::bind_args_function` at the pin above. Tests live in
+`tests/vm_sleep.rs` with fixtures `tests/fixtures/sleep.rss`,
+`tests/fixtures/two_sleeps.rss`, and `tests/fixtures/sleep_null.rss`.
+A cloneable `SleepCoordinator` is the completion and one-time
+`(token, ms)` claim handle. Each VM owns a non-`Clone` `SleepSession`
+host binding. Completions are explicit `complete(token)` — not Tokio,
+not eventfd, not NGINX timers.
+
+Contract:
+
+- Name `ngx::sleep`. One integer argument `ms` (milliseconds),
+  nonnegative, range-checked at the host. Return is deterministic `null`
+  (`HostTypeSchema::Null` / `Value::Null`).
+- First host entry parses and stores `ms`, registers one in-flight record
+  with a checked generation plus operation id, enqueues one claimable
+  `(token, ms)` submission, then returns `CallOutcome::Yield`. No
+  subsequent script action runs until completion. `claim_submission`
+  supplies that duration without reading the VM stack.
+- Accidental `vm.resume()` before completion yields again
+  (`VmStatus::Yielded`) on the same call IP with the same `[Value::Int(ms)]`
+  arguments and must never resubmit.
+- After `SleepCoordinator::complete(token)`, `vm.resume()` re-enters the
+  same host call, the session consumes that completion exactly once
+  (removing the in-flight record), returns `CallOutcome::Return` of
+  `null`, and the script reaches `VmStatus::Halted` with a later IP.
+  Consume is not part of the coordinator API.
+- Two sequential sleeps use distinct tokens and each submit exactly once.
+  Status sequence for two sleeps with controlled completion:
+  `Yielded`, `Yielded`, `Halted`. Two sessions that share one coordinator
+  stay isolated: completing or dropping one does not complete the other.
+- Dropping a session invalidates its generation, cancels its
+  submissions, and makes a late `complete` fail closed
+  (`GenerationInvalid`). Duplicate, unknown, not-completed, exhausted-id,
+  and poisoned-mutex errors are distinct. Coordinator state is bounded by
+  in-flight operations.
+- Config still rejects every import, including `ngx::sleep`. Access-phase
+  NGINX/Tokio integration remains pending. A `Yielded` VM is still
+  non-reusable and dropped by the worker-local pool.
 
 ## Related projects
 

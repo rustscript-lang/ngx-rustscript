@@ -859,6 +859,7 @@ fn fingerprint_input_names_match_independently_authored_order() {
         "src/config.rs",
         "src/access.rs",
         "src/vm_pool.rs",
+        "src/sleep_binding.rs",
         "config",
         "config.make",
         "auto/rust",

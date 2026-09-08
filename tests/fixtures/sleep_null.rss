@@ -1,0 +1,3 @@
+use ngx;
+let done = ngx::sleep(10);
+done;

@@ -18,6 +18,7 @@ pub const SOURCE_FINGERPRINT_INPUTS: &[&str] = &[
     "src/config.rs",
     "src/access.rs",
     "src/vm_pool.rs",
+    "src/sleep_binding.rs",
     "config",
     "config.make",
     "auto/rust",

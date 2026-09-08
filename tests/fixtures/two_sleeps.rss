@@ -1,0 +1,4 @@
+use ngx;
+ngx::sleep(1);
+ngx::sleep(2);
+ngx::mark(3);
