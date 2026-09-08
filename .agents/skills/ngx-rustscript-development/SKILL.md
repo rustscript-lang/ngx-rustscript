@@ -32,15 +32,22 @@ Keep the Tokio external-I/O constraints above: outbound TCP, UDP, DNS,
 HTTP client, and TLS hosts use Tokio I/O drivers only. Do not route them
 through NGINX socket, resolver, timer, or event FFI.
 
-A normal async host should contain only validation and awaited business work:
+A normal async host should contain only validation and awaited business work. Production `ngx::sleep` follows OpenResty seconds semantics and accepts integer or fractional numbers; reject negative, NaN, infinite, and overflowing values before awaiting. The legacy millisecond entry is explicitly named `ngx::sleep_ms`:
 
 ```rust
 #[pd_host_function(name = "ngx::sleep")]
-async fn ngx_sleep_impl(ms: i64) -> VmResult<()> {
+async fn sleep(seconds: NumberValue) -> VmResult<()> {
+    let duration = duration_from_seconds(seconds)?;
+    tokio::time::sleep(duration).await;
+    Ok(())
+}
+
+#[pd_host_function(name = "ngx::sleep_ms")]
+async fn sleep_ms(ms: i64) -> VmResult<()> {
     if ms < 0 {
-        return Err(VmError::HostError(
-            "ngx::sleep expects non-negative milliseconds".to_string(),
-        ));
+        return Err(VmError::HostError(format!(
+            "ngx::sleep_ms expects non-negative milliseconds, got {ms}"
+        )));
     }
     tokio::time::sleep(Duration::from_millis(ms as u64)).await;
     Ok(())
