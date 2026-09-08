@@ -19,7 +19,11 @@ crate-type = ["cdylib", "rlib"]
 doctest = false
 
 [dependencies]
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+hmac = { version = "0.12", default-features = false }
 libc = { version = "0.2", default-features = false, features = ["std"] }
+md-5 = { version = "0.10", default-features = false }
+sha1 = { version = "0.10", default-features = false }
 nginx-sys = { git = "https://github.com/nginx/ngx-rust", rev = "cda9d8372ccd2e139ef2b03e5806e019e7796187" }
 ngx = { git = "https://github.com/nginx/ngx-rust", rev = "cda9d8372ccd2e139ef2b03e5806e019e7796187", default-features = false, features = ["std"] }
 pd-host-function = { git = "https://github.com/rustscript-lang/rustscript", rev = "4b749862ff1632ef1266d75709da3676de37356c" }

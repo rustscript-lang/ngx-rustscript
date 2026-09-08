@@ -78,8 +78,6 @@ fn manifest_catalog_and_runtime_names_correspond() {
 fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
     for entry in ngx_host_manifest() {
         assert!(!entry.name.is_empty(), "manifest entry needs a host name");
-        assert_eq!(entry.family, HostFamily::Timer);
-        assert_eq!(entry.sync, HostSyncKind::Async);
         assert!(
             !entry.phases.is_empty(),
             "{} must declare allowed phases",
@@ -96,15 +94,38 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
             entry.name
         );
         assert!(
-            entry.capabilities.contains(&HostCapability::Timer),
-            "{} is a timer host",
-            entry.name
+            entry.openresty_name.starts_with("ngx."),
+            "{} must name an OpenResty ngx.* API, got {}",
+            entry.name,
+            entry.openresty_name
         );
-        assert_eq!(
-            entry.openresty_name, "ngx.sleep",
-            "{} corresponds to OpenResty ngx.sleep",
-            entry.name
-        );
+        match entry.family {
+            HostFamily::Timer => {
+                assert_eq!(entry.sync, HostSyncKind::Async);
+                assert!(
+                    entry.capabilities.contains(&HostCapability::Timer),
+                    "{} is a timer host",
+                    entry.name
+                );
+                assert_eq!(entry.openresty_name, "ngx.sleep");
+            }
+            HostFamily::Codec => {
+                assert_eq!(entry.sync, HostSyncKind::Sync);
+                assert!(
+                    entry.capabilities.contains(&HostCapability::Codec),
+                    "{} is a codec host",
+                    entry.name
+                );
+            }
+            HostFamily::Time => {
+                assert_eq!(entry.sync, HostSyncKind::Sync);
+                assert!(
+                    entry.capabilities.contains(&HostCapability::Time),
+                    "{} is a time host",
+                    entry.name
+                );
+            }
+        }
     }
 }
 
@@ -145,13 +166,7 @@ fn bound_vm_has_every_catalogued_runtime_host_and_no_test_hosts() {
             "runtime VM must bind catalogued host {name}"
         );
     }
-    for banned in [
-        "ngx::probe",
-        "ngx::now",
-        "ngx::fail",
-        "print",
-        "runtime::sleep",
-    ] {
+    for banned in ["ngx::probe", "ngx::fail", "print", "runtime::sleep"] {
         assert!(
             !vm.has_bound_function(banned),
             "production bind must not install {banned}"
@@ -163,7 +178,6 @@ fn bound_vm_has_every_catalogued_runtime_host_and_no_test_hosts() {
 fn catalog_does_not_include_test_hosts() {
     let catalog = ngx_host_catalog();
     assert!(catalog.function("ngx::probe").is_none());
-    assert!(catalog.function("ngx::now").is_none());
     assert!(catalog.function("ngx::fail").is_none());
 }
 

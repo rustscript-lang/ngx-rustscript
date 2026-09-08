@@ -11,8 +11,14 @@ pub mod catalog;
 pub(crate) mod context;
 
 pub use catalog::{
-    HostCapability, HostFamily, HostManifestEntry, HostSyncKind, NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME,
-    NgxPhase, host_allowed_in_phase, manifest_entry, ngx_host_catalog, ngx_host_manifest,
+    HostCapability, HostFamily, HostManifestEntry, HostSyncKind, NGX_COOKIE_TIME_NAME,
+    NGX_CRC32_LONG_NAME, NGX_CRC32_SHORT_NAME, NGX_DECODE_ARGS_NAME, NGX_DECODE_BASE64_NAME,
+    NGX_DECODE_BASE64MIME_NAME, NGX_ENCODE_ARGS_NAME, NGX_ENCODE_BASE64_NAME, NGX_ESCAPE_URI_NAME,
+    NGX_HMAC_SHA1_NAME, NGX_HTTP_TIME_NAME, NGX_LOCALTIME_NAME, NGX_MD5_BIN_NAME, NGX_MD5_NAME,
+    NGX_NOW_NAME, NGX_PARSE_HTTP_TIME_NAME, NGX_QUOTE_SQL_STR_NAME, NGX_SHA1_BIN_NAME,
+    NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_TIME_NAME, NGX_TODAY_NAME, NGX_UNESCAPE_URI_NAME,
+    NGX_UPDATE_TIME_NAME, NGX_UTCTIME_NAME, NgxPhase, host_allowed_in_phase, manifest_entry,
+    ngx_host_catalog, ngx_host_manifest,
 };
 pub use context::{
     AllowedOps, ScopeError, VmEntryObservation, capture_vm_entries, current_allowed_ops,
@@ -24,13 +30,77 @@ pub use context::{
 /// catalog correspondence can be tested without generating dispatch from
 /// catalog metadata.
 pub fn production_runtime_host_names() -> &'static [&'static str] {
-    &[NGX_SLEEP_NAME, NGX_SLEEP_MS_NAME]
+    &[
+        NGX_SLEEP_NAME,
+        NGX_SLEEP_MS_NAME,
+        NGX_ESCAPE_URI_NAME,
+        NGX_UNESCAPE_URI_NAME,
+        NGX_ENCODE_ARGS_NAME,
+        NGX_DECODE_ARGS_NAME,
+        NGX_ENCODE_BASE64_NAME,
+        NGX_DECODE_BASE64_NAME,
+        NGX_DECODE_BASE64MIME_NAME,
+        NGX_CRC32_SHORT_NAME,
+        NGX_CRC32_LONG_NAME,
+        NGX_HMAC_SHA1_NAME,
+        NGX_MD5_NAME,
+        NGX_MD5_BIN_NAME,
+        NGX_SHA1_BIN_NAME,
+        NGX_QUOTE_SQL_STR_NAME,
+        NGX_TODAY_NAME,
+        NGX_TIME_NAME,
+        NGX_NOW_NAME,
+        NGX_UPDATE_TIME_NAME,
+        NGX_LOCALTIME_NAME,
+        NGX_UTCTIME_NAME,
+        NGX_COOKIE_TIME_NAME,
+        NGX_HTTP_TIME_NAME,
+        NGX_PARSE_HTTP_TIME_NAME,
+    ]
 }
 
 /// Bind every production host using the macro-generated wrapper.
 pub fn bind_ngx_hosts(vm: &mut Vm) {
     vm.bind_static_function(NGX_SLEEP_NAME, layout::helpers::functions::sleep);
     vm.bind_static_function(NGX_SLEEP_MS_NAME, layout::helpers::functions::sleep_ms);
+    vm.bind_static_args_function(NGX_ESCAPE_URI_NAME, layout::helpers::codec::escape_uri);
+    vm.bind_static_args_function(NGX_UNESCAPE_URI_NAME, layout::helpers::codec::unescape_uri);
+    vm.bind_static_args_function(NGX_ENCODE_ARGS_NAME, layout::helpers::codec::encode_args);
+    vm.bind_static_args_function(NGX_DECODE_ARGS_NAME, layout::helpers::codec::decode_args);
+    vm.bind_static_args_function(
+        NGX_ENCODE_BASE64_NAME,
+        layout::helpers::codec::encode_base64,
+    );
+    vm.bind_static_args_function(
+        NGX_DECODE_BASE64_NAME,
+        layout::helpers::codec::decode_base64,
+    );
+    vm.bind_static_args_function(
+        NGX_DECODE_BASE64MIME_NAME,
+        layout::helpers::codec::decode_base64mime,
+    );
+    vm.bind_static_args_function(NGX_CRC32_SHORT_NAME, layout::helpers::codec::crc32_short);
+    vm.bind_static_args_function(NGX_CRC32_LONG_NAME, layout::helpers::codec::crc32_long);
+    vm.bind_static_args_function(NGX_HMAC_SHA1_NAME, layout::helpers::codec::hmac_sha1);
+    vm.bind_static_args_function(NGX_MD5_NAME, layout::helpers::codec::md5);
+    vm.bind_static_args_function(NGX_MD5_BIN_NAME, layout::helpers::codec::md5_bin);
+    vm.bind_static_args_function(NGX_SHA1_BIN_NAME, layout::helpers::codec::sha1_bin);
+    vm.bind_static_args_function(
+        NGX_QUOTE_SQL_STR_NAME,
+        layout::helpers::codec::quote_sql_str,
+    );
+    vm.bind_static_args_function(NGX_TODAY_NAME, layout::helpers::time::today);
+    vm.bind_static_args_function(NGX_TIME_NAME, layout::helpers::time::time);
+    vm.bind_static_args_function(NGX_NOW_NAME, layout::helpers::time::now);
+    vm.bind_static_args_function(NGX_UPDATE_TIME_NAME, layout::helpers::time::update_time);
+    vm.bind_static_args_function(NGX_LOCALTIME_NAME, layout::helpers::time::localtime);
+    vm.bind_static_args_function(NGX_UTCTIME_NAME, layout::helpers::time::utctime);
+    vm.bind_static_args_function(NGX_COOKIE_TIME_NAME, layout::helpers::time::cookie_time);
+    vm.bind_static_args_function(NGX_HTTP_TIME_NAME, layout::helpers::time::http_time);
+    vm.bind_static_args_function(
+        NGX_PARSE_HTTP_TIME_NAME,
+        layout::helpers::time::parse_http_time,
+    );
 }
 
 #[cfg(test)]
@@ -52,6 +122,13 @@ mod layout {
             CallOutcome, CaptureAsyncHostContext, FromVmValue, HostFutureOutput,
             IntoHostCallOutcome, VmError, borrow_arg,
         };
+
+        pub mod codec {
+            include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/codec.rs"));
+        }
+        pub mod time {
+            include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/time.rs"));
+        }
 
         pub mod functions {
             use std::time::Duration;
@@ -205,7 +282,6 @@ mod tests {
     fn catalog_does_not_include_test_hosts() {
         let catalog = ngx_host_catalog();
         assert!(catalog.function("ngx::probe").is_none());
-        assert!(catalog.function("ngx::now").is_none());
         assert!(catalog.function("ngx::fail").is_none());
     }
 }
