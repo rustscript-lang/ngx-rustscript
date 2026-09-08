@@ -2,12 +2,16 @@
 
 NGINX dynamic HTTP module that hosts RustScript (`pd-vm`) at the access
 phase. Location directive `access_by_rss_file <path>` compiles the script
-once at configuration time. Import-free scripts run synchronously to
-`Halted` on a worker-local VM pool. Scripts that import exactly `ngx::sleep`
-bind a request-local VM, return `NGX_AGAIN` while the worker runtime sleeps,
-and resume the same VM from the eventfd callback.
+once at configuration time.
 
-## Pinned revisions
+Import-free scripts run synchronously to `Halted` on a worker-local VM
+pool. Scripts that import exactly `ngx::sleep` bind a request-local VM,
+return `NGX_AGAIN` while the worker runtime sleeps, and resume the same VM
+from the eventfd callback. Client disconnect during a sleep finalizes the
+request as HTTP 499. Graceful master shutdown aborts in-flight sleeps
+instead of waiting them out.
+
+## Requirements
 
 | Component | Pin |
 | --- | --- |
@@ -15,6 +19,14 @@ and resume the same VM from the eventfd callback.
 | NGINX | 1.30.4 (`nginx_version` 1030004). Tarball SHA-256 `4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b` |
 | RustScript / `pd-vm` | [`https://github.com/rustscript-lang/rustscript`](https://github.com/rustscript-lang/rustscript) at `4b749862ff1632ef1266d75709da3676de37356c` (Cargo git dependency `package = "pd-vm"` on that immutable rev; no sibling path) |
 | Rust toolchain | 1.85.0 or later (ngx-rust MSRV). Verified with rustc 1.94.1 |
+
+Required build tools on Linux:
+
+- C compiler, make, OpenSSL, PCRE2, zlib
+- clang and libclang (official `nginx-sys` bindgen)
+- Rust 1.85+
+- GNU `nm` on Linux for a minimal check that the production cdylib does not
+  define test-only NGINX C stubs
 
 ## ABI matching
 
@@ -40,20 +52,11 @@ not used: they cannot match ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`
 and NGINX 1.30.4. Install clang and libclang so rust-bindgen can generate
 bindings at `cargo build`.
 
-Required build tools on Linux:
-
-- C compiler, make, OpenSSL, PCRE2, zlib
-- clang and libclang (official `nginx-sys` bindgen)
-- Rust 1.85+
-- GNU `nm` on Linux for a minimal check that the production cdylib does not
-  define test-only NGINX C stubs. Acceptance is `nginx -t`, real module load,
-  HTTP, and normal symbol/link behavior.
-
 Clear inherited `CFLAGS` / `BINDGEN_EXTRA_CLANG_ARGS` before `./configure` and
 `cargo build`. A leaked include path from another NGINX tree will change
 `ngx_auto_config.h` and break the link.
 
-## Build the NGINX fixture and module
+## Compilation / build / install
 
 ```sh
 # Run from the crate root. Capture absolute paths before changing directories.
@@ -128,7 +131,39 @@ export NGINX_SOURCE_DIR
 bash tests/verify_add_dynamic.sh
 ```
 
-## Prove load with `nginx -t`
+## NGINX configuration and usage
+
+Load the cdylib and attach a script to a location:
+
+```nginx
+load_module /absolute/path/to/libngx_rustscript.so;
+
+http {
+    server {
+        listen 127.0.0.1:8080;
+        location /t {
+            access_by_rss_file /absolute/path/to/script.rss;
+        }
+        location /plain/ {
+        }
+    }
+}
+```
+
+`access_by_rss_file` is location-only and takes exactly one argument.
+Relative paths resolve with NGINX `ngx_conf_full_name` against the conf
+prefix (the directory of the config file). Absolute paths are unchanged.
+The file is read once at `nginx -t` / reload, must be a regular UTF-8 file,
+and is compiled with `compile_source`.
+
+Config accepts exactly the `ngx::sleep` host import. `print`,
+`runtime::sleep`, and every other import are rejected at configuration
+time. Unknown modules fail compile or import check. Duplicate directives in
+the same location are rejected. Unset nested locations inherit the parent
+program; an explicit child directive overrides. Unconfigured locations keep
+the original access-phase decline.
+
+Prove load with an isolated prefix:
 
 ```sh
 export NGX_RUSTSCRIPT_NGINX="$NGINX_BUILD_DIR/nginx"
@@ -137,253 +172,136 @@ export CARGO_TARGET_DIR
 cargo build --lib
 export NGX_RUSTSCRIPT_MODULE="$(readlink -f "$CARGO_TARGET_DIR/debug/libngx_rustscript.so")"
 cargo test --test module_load -- --nocapture
-```
-
-The tests create an isolated prefix from `tests/fixtures/nginx.conf.in`:
-
-1. `load_module` of a missing path — `nginx -t` fails `dlopen()` of that exact module path in the fixture conf
-2. `load_module` of `libngx_rustscript.so` — `nginx -t` reports `test is successful`
-
-Manual check:
-
-```sh
 nginx -t -p /path/to/prefix -c conf/nginx.conf
 ```
 
-## `access_by_rss_file`
+## RustScript examples
 
-Location-only directive, exact one argument:
+Import-free access script (runs to `Halted`, then the content phase):
 
-```nginx
-location /t {
-    access_by_rss_file /path/to/script.rss;
-}
+```rss
+let x = 1 + 2;
 ```
 
-Relative paths resolve with NGINX `ngx_conf_full_name` against the conf
-prefix (the directory of the config file). Absolute paths are unchanged.
-The file is read once at `nginx -t` / reload, must be a regular UTF-8 file,
-and is compiled with `compile_source`. Every non-empty `Program.imports`
-entry is rejected at configuration time: `print`, `runtime::sleep`,
-`ngx::sleep`, and any other host import are not bound in this milestone.
-Unknown modules fail compile or import check. Duplicate directives in the
-same location are rejected. Unset nested locations inherit the parent
-program; an explicit child directive overrides. Unconfigured locations keep
-the original access-phase decline.
+One sleep, then the content phase:
+
+```rss
+use ngx;
+ngx::sleep(30);
+```
+
+Two sequential sleeps:
+
+```rss
+use ngx;
+ngx::sleep(10);
+ngx::sleep(10);
+```
+
+`ngx::sleep` takes one nonnegative integer argument `ms` (milliseconds) and
+returns `null`. The first host entry registers one in-flight sleep and
+yields; the script does not continue until that sleep completes. Two
+sequential sleeps use distinct tokens and each submit once.
 
 On each request the access handler leases a worker-thread-local VM via
-`Vm::new_shared(Arc<Program>)`, runs to `VmStatus::Halted`, and returns
-`NGX_OK` so the content stage proceeds. After `Halted` and after a
-recoverable runtime error the VM is reset with `Vm::reset_for_reuse` and
-parked only when `Vm::is_reusable` is true. Idle pool size is bounded.
-VM errors and unexpected `Yielded` / `Waiting` fail the request with 500.
+`Vm::new_shared(Arc<Program>)`. Import-free programs run to
+`VmStatus::Halted` and return `NGX_OK` so the content phase proceeds. After
+`Halted` and after a recoverable runtime error the VM is reset with
+`Vm::reset_for_reuse` and parked only when `Vm::is_reusable` is true. Idle
+pool size is bounded. VM errors and unexpected `Yielded` / `Waiting` on
+import-free programs fail the request with 500.
 
-## pd-vm signatures (locked)
+Scripts that imported `ngx::sleep` bind a request-local VM instead of the
+pool. Yield returns `NGX_AGAIN` without incrementing `r->main->count`. The
+eventfd callback resumes the same VM on the worker main thread and continues
+`ngx_http_core_run_phases` exactly once so the access handler can return
+`NGX_OK`. Host-bound / yielded VMs are never returned to the pool.
 
-Verified at RustScript `4b749862ff1632ef1266d75709da3676de37356c`. Package
-`pd-vm`, lib name `vm`. Later tasks should use these APIs rather than
-`Vm::new`. This pin has `Vm::new_shared(Arc<Program>)` rather than
-`try_new_shared`; `try_new` only wraps owned `Vm::new` after frame-limit
-validation.
+## Runtime and compatibility limits
 
-```rust
-pub fn compile_source(source: &str) -> Result<CompiledProgram, SourceError>;
+- Worker runtime is created only in NGINX worker `init_process` after fork,
+  and only when `ngx_process` is `NGX_PROCESS_WORKER` or
+  `NGX_PROCESS_SINGLE`. Helper processes skip initialization. `nginx -t`,
+  master, and config never create Tokio threads or the eventfd.
+  `exit_process` shuts the runtime down and is idempotent.
+- Tokio features: `rt` + `rt-multi-thread` + `time` only (no HTTP/network
+  client). One worker thread named `ngx-rustscript-sleep`.
+- Sleep capacity is `DEFAULT_MAX_IN_FLIGHT` (1024). Submit is rejected when
+  full. Tokio tasks own only sleep tokens and durations — no NGINX
+  request/pool/VM pointers cross into Tokio, and Tokio never calls
+  `ngx_post_event`.
+- Completions enqueue under a mutex, then write `eventfd(2)` created with
+  `EFD_NONBLOCK|EFD_CLOEXEC`. The worker main thread registers the fd with
+  `ngx_get_connection`. The pinned Linux epoll path uses `add` with
+  `EPOLLIN`.
+- Client close while a sleep is in flight is detected with a worker-thread
+  wrapper around `ngx_http_test_reading`. Confirmed close finalizes once
+  with `NGX_HTTP_CLIENT_CLOSED_REQUEST` (access log 499), then request-pool
+  cleanup unregisters the token and aborts the sleep.
+- Worker `exit_process` rejects new work, aborts tracked sleeps, shuts down
+  Tokio, unregisters/closes eventfd once, and clears worker registries
+  without touching request pointers. Long sleeps do not delay graceful
+  worker exit (SIGQUIT).
+- `pd-vm` pin `4b749862ff1632ef1266d75709da3676de37356c`, package `pd-vm`,
+  lib name `vm`. This pin has `Vm::new_shared(Arc<Program>)`; `try_new` only
+  wraps owned `Vm::new` after frame-limit validation. Normal termination is
+  `Ok(VmStatus::Halted)`. Drop of `Vm` owns cancellation and resource
+  closure.
 
-impl Vm {
-    pub fn try_new(program: Program) -> VmResult<Self>;
-    pub fn new_shared(program: Arc<Program>) -> Self;
-    pub fn run(&mut self) -> VmResult<VmStatus>;
-    pub fn resume(&mut self) -> VmResult<VmStatus>;
-    pub fn reset_for_reuse(&mut self) -> VmResult<()>;
-    pub fn poll_reset_for_reuse(&mut self, cx: &mut Context<'_>) -> Poll<VmResult<()>>;
-    pub fn is_reusable(&self) -> bool;
-    pub fn scope_reset_pending(&self) -> bool;
-    pub fn bind_args_function(
-        &mut self,
-        name: impl Into<String>,
-        function: Box<dyn HostArgsFunction>,
-    );
-    pub fn bind_static_args_function(
-        &mut self,
-        name: impl Into<String>,
-        function: StaticHostArgsFunction,
-    );
-}
+## Tests and acceptance
 
-pub type StaticHostArgsFunction = fn(&[Value]) -> VmResult<CallOutcome>;
-
-pub enum CallOutcome {
-    Return(CallReturn),
-    Halt,
-    Yield,
-    Pending(HostOpId),
-}
-
-pub enum VmStatus {
-    Halted,
-    Yielded,
-    Waiting(HostOpId),
-}
-
-impl HostFunctionRegistry {
-    pub fn bind_vm_cached(&self, vm: &mut Vm) -> VmResult<()>;
-}
+```sh
+export NGINX_SOURCE_DIR
+export NGINX_BUILD_DIR
+export CARGO_TARGET_DIR
+export NGX_RUSTSCRIPT_MODULE="$(readlink -f "$CARGO_TARGET_DIR/debug/libngx_rustscript.so")"
+cargo test
+python3 -m py_compile tests/nginx_integration.py tests/test_nginx_integration_unit.py
+python3 tests/test_nginx_integration_unit.py
+python3 tests/nginx_integration.py --nginx <absolute pinned nginx> --module <absolute actual cdylib>
+bash tests/verify_add_dynamic.sh
 ```
 
-Normal termination is `Ok(VmStatus::Halted)`. Host `Yield` maps to
-`VmStatus::Yielded`; `resume()` re-enters the same host call. Drop of `Vm`
-owns cancellation and resource closure.
+The standalone runner:
 
-## `ngx::sleep` VM contract (locked)
+```sh
+python3 tests/nginx_integration.py --nginx <absolute pinned nginx> --module <absolute actual cdylib>
+```
 
-Verified with real `compile_source` / `compile_source_with_flavor_and_options`,
-real `Vm`, and `Vm::bind_args_function` at the pin above. Tests live in
-`tests/vm_sleep.rs` with fixtures `tests/fixtures/sleep.rss`,
-`tests/fixtures/two_sleeps.rss`, and `tests/fixtures/sleep_null.rss`.
-A cloneable `SleepCoordinator` is the completion and one-time
-`(token, ms)` claim handle. Each VM owns a non-`Clone` `SleepSession`
-host binding. Completions are explicit `complete(token)` — not Tokio,
-not eventfd, not NGINX timers.
+It checks that the nginx binary and module paths are absolute, that nginx
+reports `nginx/1.30.4` with `--with-compat` and `--with-http_ssl_module`,
+and that `nginx -t` accepts a valid `ngx::sleep` config while missing,
+syntax, unsupported-import, and wrong-arity fixtures fail with those
+causes. Against a live isolated master (`master_process on`,
+`worker_processes 1`, foreground) it checks that a 2s sleep does not block
+`/plain/` (plain returns HTTP 200 first), that one-sleep and two-sleep
+routes return distinct 200 bodies, that 12 overlapping requests across two
+routes keep per-route bodies, that a client close of a 30s sleep logs
+access status 499 and leaves later routes working, and that SIGQUIT of that
+master exits successfully while a long sleep is in flight.
 
-Contract:
+Python stdlib only. The runner owns its prefix, config, pid, logs, and
+loopback port, and reaps only its own process. Isolated prefixes go under
+`tempfile.gettempdir()` (typically `$TMPDIR`). Set `NGX_RUSTSCRIPT_TASK_TMP`
+to a directory to place them elsewhere.
 
-- Name `ngx::sleep`. One integer argument `ms` (milliseconds),
-  nonnegative, range-checked at the host. Return is deterministic `null`
-  (`HostTypeSchema::Null` / `Value::Null`).
-- First host entry parses and stores `ms`, registers one in-flight record
-  with a checked generation plus operation id, enqueues one claimable
-  `(token, ms)` submission, then returns `CallOutcome::Yield`. No
-  subsequent script action runs until completion. `claim_submission`
-  supplies that duration without reading the VM stack.
-- Accidental `vm.resume()` before completion yields again
-  (`VmStatus::Yielded`) on the same call IP with the same `[Value::Int(ms)]`
-  arguments and must never resubmit.
-- After `SleepCoordinator::complete(token)`, `vm.resume()` re-enters the
-  same host call, the session consumes that completion exactly once
-  (removing the in-flight record), returns `CallOutcome::Return` of
-  `null`, and the script reaches `VmStatus::Halted` with a later IP.
-  Consume is not part of the coordinator API.
-- Two sequential sleeps use distinct tokens and each submit exactly once.
-  Status sequence for two sleeps with controlled completion:
-  `Yielded`, `Yielded`, `Halted`. Two sessions that share one coordinator
-  stay isolated: completing or dropping one does not complete the other.
-- Dropping a session invalidates its generation, cancels its
-  submissions, and makes a late `complete` fail closed
-  (`GenerationInvalid`). Duplicate, unknown, not-completed, exhausted-id,
-  and poisoned-mutex errors are distinct. Coordinator state is bounded by
-  in-flight operations.
-- Config accepts exactly `ngx::sleep` and compiles with that host catalog.
-  `print`, `runtime::sleep`, and every other import are still rejected.
-  Access suspend/resume is Task 5: `NGX_AGAIN` wait, worker-local token
-  registry, eventfd resume of the same VM, then one phase continuation.
+## Troubleshooting
 
-## Worker runtime and eventfd bridge (Task 4)
-
-Created only in NGINX worker `init_process` after fork, and only when
-`ngx_process` is `NGX_PROCESS_WORKER` or `NGX_PROCESS_SINGLE`. Helper
-processes skip initialization. `nginx -t`, master, and config never create
-Tokio threads or the eventfd. `exit_process` shuts the runtime down and is
-idempotent.
-
-- Tokio: `rt` + `rt-multi-thread` + `time` only (no HTTP/network client).
-  One worker thread named `ngx-rustscript-sleep`.
-- Submit API: `WorkerRuntime::submit_sleep(SleepToken, ms)` plus
-  `submit_claimed` for Task 3 one-time `(token, ms)` claims. Capacity is
-  reserved before a Task 3 claim is consumed. The spawned task owns only
-  `SleepToken`, `u64` milliseconds, a `CompletionSender`, and a
-  `CompletionPermit`. It never holds NGINX request/pool/VM pointers and
-  never calls `ngx_post_event`.
-- Completions enqueue under a mutex (happens-before), then write
-  `eventfd(2)` created with `EFD_NONBLOCK|EFD_CLOEXEC`. Capacity is
-  `DEFAULT_MAX_IN_FLIGHT` (1024). Submit is rejected when full; each
-  accepted op has reserved completion space owned RAII through
-  task → pending → ready. Abort, shutdown, and failure release the slot.
-  Queue poison returns an error instead of panicking.
-- Worker main thread registers the fd with `ngx_get_connection` and the
-  same `add_conn`/`add` split as `ngx_add_channel_event`. Generated
-  bindings export `NGX_USE_EPOLL_EVENT` but not `NGX_READ_EVENT`; the
-  pinned Linux epoll path uses `add` with `EPOLLIN`. The
-  callback drains eventfd (EINTR retry, EAGAIN = already readable,
-  short/EOF/hard errors surfaced) and moves completions into a
-  worker-local ready queue for Task 5 (`pop_ready` / `drain_ready`),
-  including when a read fault is also present.
-- FD ownership: write and close share one mutex, so a cloned task sender
-  cannot write after the fd is invalidated. Reject new tasks, abort
-  tracked sleeps, shut down Tokio, unregister (`ngx_close_connection`)
-  and close the fd only after writers cannot use it.
-- Not in Task 4: production access did not yet bind sleep or resume a request.
-  Task 5 consumes `drain_ready` on the eventfd callback.
-
-## Access suspend and resume (Task 5)
-
-Pinned NGINX 1.30.4 `ngx_http_core_access_phase` treats `NGX_AGAIN` (and
-`NGX_DONE`) as the wait codes: the checker returns `NGX_OK` and stops
-without advancing `phase_handler`. `NGX_AGAIN` does not increment
-`r->main->count`; the connection still owns the request. This module
-returns `NGX_AGAIN` on Yield and does not retain/release the count.
-
-- Config compiles with the Task 3 `ngx::sleep` catalog and accepts that
-  import only. Import-free programs still use the Task 2 VM pool.
-  Host-bound / yielded VMs are dropped; they never enter the pool.
-- On an access request that imported `ngx::sleep`, the worker-wide
-  `SleepCoordinator` (owned by `WorkerRuntime` for the worker lifetime)
-  creates one non-`Clone` `SleepSession`. Tokens are unique within the
-  worker. The handler runs until Halted, error, or Yielded.
-- Request state lives in NGINX module ctx (`pool.allocate` + cleanup).
-  A worker-local TLS registry maps `SleepToken` to the live request.
-  Tokio tasks still own only tokens and durations — no request/VM/pool
-  pointer crosses into Tokio. Registry, live-request, and abort-handle
-  maps reject duplicate insertion without replacing an existing entry.
-  Cleanup removes only the matching request/generation mapping.
-- Register the token on the worker main thread, then submit the claimed
-  `(token, ms)` to Task 4. Completions that arrive before the handler
-  commits to suspend are deferred and never resume the VM on the access
-  stack.
-- The eventfd callback drains ready tokens, looks up a live generation,
-  marks `SleepCoordinator::complete`, and resumes only after the original
-  handler has returned. Halted: clear registry/ctx, continue
-  `ngx_http_core_run_phases` exactly once so the access handler returns
-  `NGX_OK`. Yield again: claim/register/submit once and stay suspended.
-  Errors: one HTTP 500 path, no phase double-advance.
-- Registry capacity matches Task 4 `DEFAULT_MAX_IN_FLIGHT` (1024). Full
-  submit/registry rejects before retain/submit. Unknown, mismatched, and
-  stale tokens fail closed.
-
-## Request cancellation and worker exit (Task 6)
-
-When a sleep access handler returns `NGX_AGAIN`, the module installs a
-read-event handler that detects client close. Pinned NGINX 1.30.4 exports
-`ngx_http_test_reading` (`ngx_http.h`; nginx-sys `cda9d837` binds it). The
-default `ngx_http_block_reading` handler ignores epoll RDHUP, so this module
-installs a worker-thread wrapper around `ngx_http_test_reading` (`catch_unwind`,
-no Tokio/VM work). That function checks pending EOF/error flags and
-`recv(MSG_PEEK)`; EAGAIN/readable data leave the request suspended. Confirmed
-close finalizes once with `NGX_HTTP_CLIENT_CLOSED_REQUEST` (access log 499).
-Request-pool cleanup then commits Cancelled, unregisters the token, aborts the
-sleep, and releases the completion permit. TCP close does not free the request
-by itself while the read handler is still `ngx_http_block_reading`.
-
-`Pool::allocate` already registered `AccessCtx` Drop as that pool cleanup
-(`ngx_pool_cleanup_add`). Cleanup commits Cancelled before unregister, abort,
-and session drop, and is a no-op after Halt or error. Normal completion
-restores `ngx_http_block_reading` before `ngx_http_core_run_phases`.
-
-- Only the matching `SleepToken` / request-id mapping is removed.
-  `WorkerRuntime::abort_sleep` aborts that Tokio task and reclaims its
-  completion permit whether the sleep is running, queued, or ready.
-  Dropping the request-local `SleepSession` invalidates its generation.
-- Eventfd resume stays on the worker main thread. Stale, duplicate, and
-  unknown tokens never dereference a request pointer: both the id and live
-  maps must contain the token, and the ctx request id must still match.
-  A deferred resume is invalidated so a later notification is a no-op.
-  Phase continuation / `ngx_http_core_run_phases` still happens at most
-  once. Tokio never calls NGINX APIs.
-- Worker `exit_process`: reject new work, abort tracked sleeps, shut down
-  Tokio, reclaim queued completions, unregister/close eventfd once, then
-  clear the worker registries without touching request pointers. Exit is
-  idempotent. Long sleeps do not delay graceful worker exit.
-
-Not in this milestone (Task 7): a full load/concurrency matrix.
+- `dlopen() ... failed` — the module path is wrong, not a regular file, or
+  was built against a different NGINX ABI than the binary that loads it.
+- `nginx version is ..., expected nginx/1.30.4` — use the pinned 1.30.4
+  binary from `$NGINX_BUILD_DIR/nginx`, not a distro package.
+- bindgen / include errors — unset `CFLAGS`, `CPPFLAGS`, and
+  `BINDGEN_EXTRA_CLANG_ARGS`; install clang and libclang; point
+  `NGINX_SOURCE_DIR` / `NGINX_BUILD_DIR` at the configured 1.30.4 tree.
+- `script imports are not supported` / `failed to compile script` — only
+  `ngx::sleep` may be imported. `print` and `runtime::sleep` are rejected.
+- HTTP 500 from an access script — VM runtime error or unexpected yield on
+  an import-free program. Check the error log.
+- HTTP 499 on a sleep route — the client closed the connection before the
+  sleep completed.
+- `CARGO_TARGET_DIR` mismatch — `load_module` must receive the cdylib built
+  in the same target dir (`NGX_RUSTSCRIPT_MODULE`).
 
 ## Related projects
 
