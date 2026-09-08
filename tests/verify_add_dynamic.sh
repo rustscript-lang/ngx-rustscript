@@ -7,7 +7,7 @@
 set -euo pipefail
 
 CRATE_ROOT="${CRATE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-TMP_ROOT="${NGX_RUSTSCRIPT_TASK_TMP:-/mnt/TEMP/workspace/ngx-rustscript/tmp/ngx-rustscript-task4-simplify-00088e29}"
+TMP_ROOT="${NGX_RUSTSCRIPT_TASK_TMP:-${TMPDIR:-/tmp}/ngx-rustscript-add-dynamic}"
 NGINX_SOURCE_DIR="${NGINX_SOURCE_DIR:-$TMP_ROOT/nginx-1.30.4}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CRATE_ROOT/target}"
 
