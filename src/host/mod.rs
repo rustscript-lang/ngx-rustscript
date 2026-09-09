@@ -14,26 +14,27 @@ pub use catalog::{
     HostCapability, HostFamily, HostManifestEntry, HostSyncKind, NGX_COOKIE_TIME_NAME,
     NGX_CRC32_LONG_NAME, NGX_CRC32_SHORT_NAME, NGX_CTX_CLEAR_NAME, NGX_CTX_DELETE_NAME,
     NGX_CTX_GET_NAME, NGX_CTX_SET_NAME, NGX_DECODE_ARGS_NAME, NGX_DECODE_BASE64_NAME,
-    NGX_DECODE_BASE64MIME_NAME, NGX_ENCODE_ARGS_NAME, NGX_ENCODE_BASE64_NAME, NGX_ESCAPE_URI_NAME,
-    NGX_EXIT_NAME, NGX_HEADER_CLEAR_NAME, NGX_HEADER_GET_NAME, NGX_HEADER_SET_ALL_NAME,
-    NGX_HEADER_SET_NAME, NGX_HEADERS_SENT_NAME, NGX_HMAC_SHA1_NAME, NGX_HTTP_TIME_NAME,
-    NGX_IS_SUBREQUEST_NAME, NGX_LOCALTIME_NAME, NGX_MD5_BIN_NAME, NGX_MD5_NAME, NGX_NOW_NAME,
-    NGX_PARSE_HTTP_TIME_NAME, NGX_QUOTE_SQL_STR_NAME, NGX_REDIRECT_NAME, NGX_REQ_CLEAR_HEADER_NAME,
-    NGX_REQ_GET_HEADERS_NAME, NGX_REQ_GET_METHOD_NAME, NGX_REQ_GET_POST_ARGS_NAME,
-    NGX_REQ_GET_URI_ARGS_NAME, NGX_REQ_HTTP_VERSION_NAME, NGX_REQ_IS_INTERNAL_NAME,
-    NGX_REQ_RAW_HEADER_NAME, NGX_REQ_SET_HEADER_NAME, NGX_REQ_SET_METHOD_NAME,
-    NGX_REQ_SET_URI_ARGS_NAME, NGX_REQ_SET_URI_NAME, NGX_REQ_START_TIME_NAME, NGX_SHA1_BIN_NAME,
-    NGX_SHARED_ADD_NAME, NGX_SHARED_CAPACITY_NAME, NGX_SHARED_DELETE_NAME, NGX_SHARED_DICT_NAME,
-    NGX_SHARED_EXPIRE_NAME, NGX_SHARED_FLUSH_ALL_NAME, NGX_SHARED_FLUSH_EXPIRED_NAME,
-    NGX_SHARED_FREE_SPACE_NAME, NGX_SHARED_GET_KEYS_NAME, NGX_SHARED_GET_NAME,
-    NGX_SHARED_GET_STALE_NAME, NGX_SHARED_INCR_NAME, NGX_SHARED_LLEN_NAME, NGX_SHARED_LPOP_NAME,
-    NGX_SHARED_LPUSH_NAME, NGX_SHARED_REPLACE_NAME, NGX_SHARED_RPOP_NAME, NGX_SHARED_RPUSH_NAME,
-    NGX_SHARED_SAFE_ADD_NAME, NGX_SHARED_SAFE_SET_NAME, NGX_SHARED_SET_NAME, NGX_SHARED_TTL_NAME,
-    NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_SOCKET_CONNECT_NAME, NGX_SOCKET_TCP_CLIENTCERT_NAME,
-    NGX_SOCKET_TCP_CLOSE_NAME, NGX_SOCKET_TCP_CONNECT_NAME, NGX_SOCKET_TCP_GETREUSEDTIMES_NAME,
-    NGX_SOCKET_TCP_NAME, NGX_SOCKET_TCP_RECEIVE_NAME, NGX_SOCKET_TCP_RECEIVEANY_NAME,
-    NGX_SOCKET_TCP_RECEIVEUNTIL_NAME, NGX_SOCKET_TCP_RESOURCE_KEY, NGX_SOCKET_TCP_SEND_NAME,
-    NGX_SOCKET_TCP_SETCLIENTCERT_NAME, NGX_SOCKET_TCP_SETKEEPALIVE_NAME,
+    NGX_DECODE_BASE64MIME_NAME, NGX_ENCODE_ARGS_NAME, NGX_ENCODE_BASE64_NAME, NGX_EOF_NAME,
+    NGX_ESCAPE_URI_NAME, NGX_EXIT_NAME, NGX_FLUSH_NAME, NGX_HEADER_CLEAR_NAME, NGX_HEADER_GET_NAME,
+    NGX_HEADER_SET_ALL_NAME, NGX_HEADER_SET_NAME, NGX_HEADERS_SENT_NAME, NGX_HMAC_SHA1_NAME,
+    NGX_HTTP_TIME_NAME, NGX_IS_SUBREQUEST_NAME, NGX_LOCALTIME_NAME, NGX_MD5_BIN_NAME, NGX_MD5_NAME,
+    NGX_NOW_NAME, NGX_PARSE_HTTP_TIME_NAME, NGX_PRINT_NAME, NGX_QUOTE_SQL_STR_NAME,
+    NGX_REDIRECT_NAME, NGX_REQ_CLEAR_HEADER_NAME, NGX_REQ_GET_HEADERS_NAME,
+    NGX_REQ_GET_METHOD_NAME, NGX_REQ_GET_POST_ARGS_NAME, NGX_REQ_GET_URI_ARGS_NAME,
+    NGX_REQ_HTTP_VERSION_NAME, NGX_REQ_IS_INTERNAL_NAME, NGX_REQ_RAW_HEADER_NAME,
+    NGX_REQ_SET_HEADER_NAME, NGX_REQ_SET_METHOD_NAME, NGX_REQ_SET_URI_ARGS_NAME,
+    NGX_REQ_SET_URI_NAME, NGX_REQ_START_TIME_NAME, NGX_SAY_NAME, NGX_SEND_HEADERS_NAME,
+    NGX_SHA1_BIN_NAME, NGX_SHARED_ADD_NAME, NGX_SHARED_CAPACITY_NAME, NGX_SHARED_DELETE_NAME,
+    NGX_SHARED_DICT_NAME, NGX_SHARED_EXPIRE_NAME, NGX_SHARED_FLUSH_ALL_NAME,
+    NGX_SHARED_FLUSH_EXPIRED_NAME, NGX_SHARED_FREE_SPACE_NAME, NGX_SHARED_GET_KEYS_NAME,
+    NGX_SHARED_GET_NAME, NGX_SHARED_GET_STALE_NAME, NGX_SHARED_INCR_NAME, NGX_SHARED_LLEN_NAME,
+    NGX_SHARED_LPOP_NAME, NGX_SHARED_LPUSH_NAME, NGX_SHARED_REPLACE_NAME, NGX_SHARED_RPOP_NAME,
+    NGX_SHARED_RPUSH_NAME, NGX_SHARED_SAFE_ADD_NAME, NGX_SHARED_SAFE_SET_NAME, NGX_SHARED_SET_NAME,
+    NGX_SHARED_TTL_NAME, NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_SOCKET_CONNECT_NAME,
+    NGX_SOCKET_TCP_CLIENTCERT_NAME, NGX_SOCKET_TCP_CLOSE_NAME, NGX_SOCKET_TCP_CONNECT_NAME,
+    NGX_SOCKET_TCP_GETREUSEDTIMES_NAME, NGX_SOCKET_TCP_NAME, NGX_SOCKET_TCP_RECEIVE_NAME,
+    NGX_SOCKET_TCP_RECEIVEANY_NAME, NGX_SOCKET_TCP_RECEIVEUNTIL_NAME, NGX_SOCKET_TCP_RESOURCE_KEY,
+    NGX_SOCKET_TCP_SEND_NAME, NGX_SOCKET_TCP_SETCLIENTCERT_NAME, NGX_SOCKET_TCP_SETKEEPALIVE_NAME,
     NGX_SOCKET_TCP_SETTIMEOUT_NAME, NGX_SOCKET_TCP_SETTRUSTEDSTORE_NAME,
     NGX_SOCKET_TCP_SSLHANDSHAKE_NAME, NGX_SOCKET_TCP_TRUSTEDSTORE_NAME,
     NGX_SOCKET_TLS_CLIENTCERT_RESOURCE_KEY, NGX_SOCKET_TLS_TRUSTEDSTORE_RESOURCE_KEY,
@@ -76,6 +77,37 @@ pub fn clear_os_clock_override() {
 /// refresh, matching nginx `ngx_time_update` on the event loop.
 pub fn notify_cached_clock_event_boundary() {
     layout::helpers::time::notify_cached_clock_event_boundary();
+}
+
+pub(crate) use layout::helpers::output::OutputState;
+
+pub fn finish_response(raw: *mut nginx_sys::ngx_http_request_t) -> nginx_sys::ngx_int_t {
+    layout::helpers::output::finish_response(raw)
+}
+
+pub fn finish_response_on_error(raw: *mut nginx_sys::ngx_http_request_t) -> nginx_sys::ngx_int_t {
+    layout::helpers::output::finish_response_on_error(raw)
+}
+
+pub fn finish_response_on_finalize(
+    raw: *mut nginx_sys::ngx_http_request_t,
+) -> nginx_sys::ngx_int_t {
+    layout::helpers::output::finish_response_on_finalize(raw)
+}
+
+pub(crate) fn cleanup_output_slot(
+    raw: *mut nginx_sys::ngx_http_request_t,
+    slot: &mut Option<OutputState>,
+) {
+    layout::helpers::output::cleanup_output_slot(raw, slot)
+}
+pub fn cleanup_output(raw: *mut nginx_sys::ngx_http_request_t) {
+    layout::helpers::output::cleanup_output(raw)
+}
+
+/// Test hook: run the request-level flush write callback.
+pub fn fire_flush_write_handler(raw: *mut nginx_sys::ngx_http_request_t) {
+    layout::helpers::output::fire_flush_write_handler(raw)
 }
 
 /// VM-stop sentinel used by `ngx::exit` / `ngx::redirect`.
@@ -278,6 +310,11 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         NGX_SOCKET_TCP_SETCLIENTCERT_NAME,
         NGX_SOCKET_TCP_TRUSTEDSTORE_NAME,
         NGX_SOCKET_TCP_CLIENTCERT_NAME,
+        NGX_SEND_HEADERS_NAME,
+        NGX_PRINT_NAME,
+        NGX_SAY_NAME,
+        NGX_FLUSH_NAME,
+        NGX_EOF_NAME,
     ]
 }
 
@@ -763,6 +800,11 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
         NGX_SOCKET_TCP_CLIENTCERT_NAME,
         layout::helpers::socket::tcp_clientcert,
     );
+    vm.bind_static_args_function(NGX_SEND_HEADERS_NAME, layout::helpers::output::send_headers);
+    vm.bind_static_args_function(NGX_PRINT_NAME, layout::helpers::output::print);
+    vm.bind_static_args_function(NGX_SAY_NAME, layout::helpers::output::say);
+    vm.bind_static_function(NGX_FLUSH_NAME, layout::helpers::output::flush);
+    vm.bind_static_args_function(NGX_EOF_NAME, layout::helpers::output::eof);
 }
 
 #[cfg(test)]
@@ -826,6 +868,9 @@ mod layout {
         }
         pub mod socket {
             include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/socket.rs"));
+        }
+        pub mod output {
+            include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/output.rs"));
         }
 
         pub mod functions {

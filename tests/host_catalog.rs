@@ -48,6 +48,11 @@ fn runtime_host_names_are_unique() {
         !names.is_empty(),
         "production runtime must bind at least one ngx host"
     );
+    assert_eq!(
+        names.len(),
+        182,
+        "production runtime host count must stay 182"
+    );
 }
 
 #[test]
@@ -88,11 +93,28 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
             "{} must declare allowed phases",
             entry.name
         );
-        assert!(
-            entry.phases.contains(&NgxPhase::Access),
-            "{} must be allowed in the current access phase",
-            entry.name
+        let is_output = matches!(
+            entry.name,
+            "ngx::send_headers" | "ngx::print" | "ngx::say" | "ngx::flush" | "ngx::eof"
         );
+        if is_output {
+            assert!(
+                entry.phases.contains(&NgxPhase::Content),
+                "{} must be allowed in content",
+                entry.name
+            );
+            assert!(
+                !entry.phases.contains(&NgxPhase::Access),
+                "{} must be rejected in access at config time",
+                entry.name
+            );
+        } else {
+            assert!(
+                entry.phases.contains(&NgxPhase::Access),
+                "{} must be allowed in the current access phase",
+                entry.name
+            );
+        }
         assert!(
             !entry.capabilities.is_empty(),
             "{} must declare capabilities",
@@ -169,7 +191,11 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
                 assert_eq!(entry.openresty_name, "ngx.ctx");
             }
             HostFamily::Response => {
-                assert_eq!(entry.sync, HostSyncKind::Sync);
+                if entry.name == "ngx::flush" {
+                    assert_eq!(entry.sync, HostSyncKind::Async);
+                } else {
+                    assert_eq!(entry.sync, HostSyncKind::Sync);
+                }
                 assert_eq!(entry.capabilities, &[HostCapability::ResponseWrite]);
             }
             HostFamily::Control => {

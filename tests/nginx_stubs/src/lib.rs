@@ -49,6 +49,18 @@ unsafe extern "C" {
     fn ngx_rustscript_stub_send_header_calls() -> i32;
     fn ngx_rustscript_stub_send_special_calls() -> i32;
     fn ngx_rustscript_stub_send_special_last_flags() -> usize;
+    fn ngx_rustscript_stub_output_reset();
+    fn ngx_rustscript_stub_output_set_needs_flush_wait(v: u32);
+    fn ngx_rustscript_stub_output_set_rc(rc: isize);
+    fn ngx_rustscript_stub_set_flush_continue(rc: isize);
+    fn ngx_rustscript_stub_output_len() -> usize;
+    fn ngx_rustscript_stub_output_body() -> *const u8;
+    fn ngx_rustscript_stub_output_saw_last() -> u32;
+    fn ngx_rustscript_stub_output_saw_flush() -> u32;
+    fn ngx_rustscript_stub_output_saw_last_in_chain() -> u32;
+    fn ngx_rustscript_test_request_set_main(r: *mut c_void, main: *mut c_void);
+    fn ngx_rustscript_test_request_set_content_length_n(r: *mut c_void, n: i64);
+    fn ngx_rustscript_test_request_content_length_n(r: *mut c_void) -> i64;
     fn ngx_rustscript_stub_var_reset();
     fn ngx_rustscript_test_install_variable(
         r: *mut c_void,
@@ -66,7 +78,9 @@ unsafe extern "C" {
     fn ngx_rustscript_test_indexed_var_valid(index: usize) -> u32;
     fn ngx_rustscript_test_indexed_var_not_found(index: usize) -> u32;
     fn ngx_rustscript_test_request_set_err_status(r: *mut c_void, status: usize);
+    fn ngx_rustscript_test_request_err_status(r: *const c_void) -> usize;
     fn ngx_rustscript_test_request_set_http_version(r: *mut c_void, version: usize);
+    fn ngx_rustscript_test_request_set_header_only(r: *mut c_void, val: c_uint);
 }
 
 /// Ensure the static stub archive is pulled into the test link line.
@@ -262,6 +276,62 @@ pub fn stub_send_special_last_flags() -> usize {
     unsafe { ngx_rustscript_stub_send_special_last_flags() }
 }
 
+pub fn stub_output_reset() {
+    unsafe { ngx_rustscript_stub_output_reset() }
+}
+
+pub fn stub_output_set_needs_flush_wait(v: u32) {
+    unsafe { ngx_rustscript_stub_output_set_needs_flush_wait(v) }
+}
+
+pub fn stub_output_set_rc(rc: isize) {
+    unsafe { ngx_rustscript_stub_output_set_rc(rc) }
+}
+
+pub fn stub_set_flush_continue(rc: isize) {
+    unsafe { ngx_rustscript_stub_set_flush_continue(rc) }
+}
+
+pub fn stub_output_body() -> Vec<u8> {
+    unsafe {
+        let len = ngx_rustscript_stub_output_len();
+        let ptr = ngx_rustscript_stub_output_body();
+        if ptr.is_null() || len == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(ptr, len).to_vec()
+        }
+    }
+}
+
+pub fn stub_output_saw_last() -> bool {
+    unsafe { ngx_rustscript_stub_output_saw_last() != 0 }
+}
+
+pub fn stub_output_saw_flush() -> bool {
+    unsafe { ngx_rustscript_stub_output_saw_flush() != 0 }
+}
+
+pub fn stub_output_saw_last_in_chain() -> bool {
+    unsafe { ngx_rustscript_stub_output_saw_last_in_chain() != 0 }
+}
+
+pub fn test_request_set_main(r: *mut c_void, main: *mut c_void) {
+    unsafe { ngx_rustscript_test_request_set_main(r, main) }
+}
+
+pub fn test_request_set_content_length_n(r: *mut c_void, n: i64) {
+    unsafe { ngx_rustscript_test_request_set_content_length_n(r, n) }
+}
+
+pub fn test_request_content_length_n(r: *mut c_void) -> i64 {
+    unsafe { ngx_rustscript_test_request_content_length_n(r) }
+}
+
+pub fn test_request_set_header_only(r: *mut c_void, val: u32) {
+    unsafe { ngx_rustscript_test_request_set_header_only(r, val) }
+}
+
 pub fn stub_var_reset() {
     unsafe { ngx_rustscript_stub_var_reset() }
 }
@@ -324,6 +394,10 @@ pub fn test_indexed_var_not_found(index: usize) -> u32 {
 
 pub fn test_set_err_status(r: *mut c_void, status: usize) {
     unsafe { ngx_rustscript_test_request_set_err_status(r, status) }
+}
+
+pub fn test_err_status(r: *const c_void) -> usize {
+    unsafe { ngx_rustscript_test_request_err_status(r) }
 }
 
 pub fn test_set_http_version(r: *mut c_void, version: usize) {

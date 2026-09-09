@@ -1,0 +1,6 @@
+use ngx;
+ngx::status::set(201);
+ngx::header::set("X-Out", "yes");
+ngx::print("ab");
+ngx::say("cd");
+ngx::print(12);

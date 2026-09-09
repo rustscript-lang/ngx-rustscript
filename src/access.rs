@@ -13,8 +13,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use nginx_sys::{
-    ngx_handle_read_event, ngx_http_block_reading, ngx_http_request_t, ngx_http_test_reading,
-    ngx_int_t, ngx_post_event, ngx_posted_events,
+    ngx_handle_read_event, ngx_http_block_reading, ngx_http_request_t, ngx_int_t, ngx_post_event,
+    ngx_posted_events,
 };
 use ngx::core::Status;
 use ngx::ffi::NGX_LOG_ERR;
@@ -38,12 +38,15 @@ unsafe extern "C" {
         status: ngx_int_t,
     ) -> ngx_int_t;
     fn ngx_rustscript_c_request_main_count_inc(r: *mut ngx_http_request_t);
+    fn ngx_rustscript_c_test_reading_and_note_client_closed(r: *mut ngx_http_request_t);
 }
 
 struct RequestPhaseCtx {
+    raw: *mut ngx_http_request_t,
     ngx_ctx: RefCell<RequestLocalCtx>,
     access: RefCell<Option<AccessExec>>,
     content: RefCell<Option<AccessExec>>,
+    output: RefCell<Option<crate::host::OutputState>>,
 }
 
 impl RequestPhaseCtx {
@@ -89,6 +92,46 @@ impl RequestPhaseCtx {
         exec.attach_request_ctx_ptr(ptr);
         Some(f(exec))
     }
+}
+
+pub(crate) fn has_module_phase_ctx(raw: *mut ngx_http_request_t) -> bool {
+    if raw.is_null() {
+        return false;
+    }
+    unsafe {
+        if (*raw).ctx.is_null() {
+            return false;
+        }
+    }
+    let module = Module::module();
+    if module.ctx_index == nginx_sys::ngx_uint_t::MAX {
+        return false;
+    }
+    let request = unsafe { Request::from_ngx_http_request(raw) };
+    request.get_module_ctx::<RequestPhaseCtx>(module).is_some()
+}
+
+pub(crate) fn try_with_module_output<R>(
+    raw: *mut ngx_http_request_t,
+    f: impl FnOnce(&mut Option<crate::host::OutputState>) -> R,
+) -> Option<R> {
+    if raw.is_null() {
+        return None;
+    }
+    unsafe {
+        if (*raw).ctx.is_null() {
+            return None;
+        }
+    }
+    let module = Module::module();
+    if module.ctx_index == nginx_sys::ngx_uint_t::MAX {
+        return None;
+    }
+    // SAFETY: `raw` is a live request with a non-null ctx array and a valid
+    // module ctx_index. Output hosts run only while the request is live.
+    let request = unsafe { Request::from_ngx_http_request(raw) };
+    let ctx = request.get_module_ctx::<RequestPhaseCtx>(module)?;
+    Some(f(&mut ctx.output.borrow_mut()))
 }
 
 struct WorkerAccess {
@@ -141,7 +184,9 @@ impl Drop for RequestPhaseCtx {
         // `Pool::allocate` registers this Drop as `ngx_pool_cleanup_add`.
         // NGINX 1.30.4 runs it from `ngx_destroy_pool` inside
         // `ngx_http_free_request`, after `r->cleanup` handlers and after
-        // `r->pool = NULL`. Invalidate identity first, then drop the VM.
+        // `r->pool = NULL`. Cancel flush wait and restore the write handler
+        // while `r` is still the request being freed, then drop the VM.
+        crate::host::cleanup_output_slot(self.raw, self.output.get_mut());
         if let Some(exec) = self.access.get_mut() {
             cleanup_access_ctx(exec);
         }
@@ -170,10 +215,13 @@ fn invalidate_deferred(identity: RequestIdentity) {
     });
 }
 
-/// Worker exit: drop identity maps without dereferencing request pointers.
+/// Worker exit: cancel output waits, then drop identity maps.
 pub(crate) fn clear_worker_access() {
     WORKER_ACCESS.with(|state| {
         let mut state = state.borrow_mut();
+        for raw in state.live.iter_values().copied() {
+            crate::host::cleanup_output(raw);
+        }
         state.ids.clear();
         state.live.clear();
         state.deferred.clear();
@@ -288,11 +336,7 @@ fn complete_sync_ok(raw: *mut ngx_http_request_t, slot: PhaseSlot) -> Status {
 }
 
 fn send_empty_last(raw: *mut ngx_http_request_t) -> Status {
-    let rc = unsafe { ngx_rustscript_c_send_last_response(raw, 200) };
-    if rc == Status::NGX_ERROR.0 || rc > Status::NGX_OK.0 {
-        return Status(rc);
-    }
-    Status::NGX_OK
+    Status(crate::host::finish_response(raw))
 }
 
 fn run_request_owned_phase(
@@ -329,9 +373,11 @@ fn run_request_owned_phase(
             *ctx.slot(slot).borrow_mut() = Some(exec);
         } else {
             let phase_ctx = RequestPhaseCtx {
+                raw,
                 ngx_ctx: RefCell::new(RequestLocalCtx::new()),
                 access: RefCell::new(None),
                 content: RefCell::new(None),
+                output: RefCell::new(None),
             };
             let ctx_ptr = request.pool().allocate(phase_ctx);
             if ctx_ptr.is_null() {
@@ -446,7 +492,21 @@ fn complete_phase_status(
             unsafe { ngx_rustscript_c_request_main_count_inc(raw) };
             Status::NGX_DONE
         }
-        AccessStatus::Ok if slot == PhaseSlot::Content => send_empty_last(raw),
+        AccessStatus::Ok if slot == PhaseSlot::Content => {
+            let rc = send_empty_last(raw);
+            crate::host::cleanup_output(raw);
+            rc
+        }
+        AccessStatus::Error500 if slot == PhaseSlot::Content => {
+            let _ = crate::host::finish_response_on_error(raw);
+            crate::host::cleanup_output(raw);
+            HTTPStatus::INTERNAL_SERVER_ERROR.into()
+        }
+        AccessStatus::Finalize(code) if slot == PhaseSlot::Content => {
+            let _ = crate::host::finish_response_on_finalize(raw);
+            crate::host::cleanup_output(raw);
+            apply_finalize_send(raw, code)
+        }
         AccessStatus::Finalize(code) => apply_finalize_send(raw, code),
         other => other.as_nginx(),
     }
@@ -655,6 +715,6 @@ unsafe extern "C" fn access_read_close_handler(r: *mut ngx_http_request_t) {
         if r.is_null() {
             return;
         }
-        unsafe { ngx_http_test_reading(r) };
+        unsafe { ngx_rustscript_c_test_reading_and_note_client_closed(r) };
     }));
 }

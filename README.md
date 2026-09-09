@@ -278,6 +278,10 @@ returned to the pool.
 The current ngx host surface (signatures, phases, yield behavior,
 limits, and OpenResty adaptations) is listed in
 [docs/ngx-api-compatibility.md](docs/ngx-api-compatibility.md).
+Content-phase `ngx::send_headers` / `ngx::print` / `ngx::say` /
+`ngx::flush` / `ngx::eof` copy payload on the worker thread into
+request-pool buffers and send through `ngx_http_output_filter`. Access
+rejects those imports at config time.
 
 - Worker runtime is created only in NGINX worker `init_process` after fork,
   and only when `ngx_process` is `NGX_PROCESS_WORKER` or

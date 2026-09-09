@@ -246,11 +246,11 @@ fn production_host_count_adds_keepalive_and_tls_hosts() {
     let runtime: BTreeSet<&str> = production_runtime_host_names().iter().copied().collect();
     assert_eq!(
         production_runtime_host_names().len(),
-        177,
-        "170 integrated hosts plus 7 keepalive/TLS hosts"
+        182,
+        "177 integrated hosts plus 5 output hosts"
     );
-    assert_eq!(ngx_host_catalog().functions().len(), 177);
-    assert_eq!(ngx_rustscript::host::ngx_host_manifest().len(), 177);
+    assert_eq!(ngx_host_catalog().functions().len(), 182);
+    assert_eq!(ngx_rustscript::host::ngx_host_manifest().len(), 182);
     for name in [
         SETKEEPALIVE,
         GETREUSEDTIMES,

@@ -84,6 +84,33 @@ ngx_int_t ngx_http_send_special(ngx_http_request_t *r, ngx_uint_t flags)
     return NGX_OK;
 }
 
+ngx_int_t ngx_http_set_content_type(ngx_http_request_t *r)
+{
+    (void)r;
+    return NGX_OK;
+}
+
+ngx_int_t ngx_http_output_filter(ngx_http_request_t *r, ngx_chain_t *in)
+{
+    (void)r;
+    (void)in;
+    return NGX_OK;
+}
+
+ngx_queue_t ngx_posted_events;
+
+ngx_int_t ngx_handle_write_event(ngx_event_t *wev, size_t lowat)
+{
+    (void)wev;
+    (void)lowat;
+    return NGX_OK;
+}
+
+void ngx_http_core_run_phases(ngx_http_request_t *r)
+{
+    (void)r;
+}
+
 off_t ngx_atoof(u_char *line, size_t n)
 {
     off_t value = 0;

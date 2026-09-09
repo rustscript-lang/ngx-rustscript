@@ -406,6 +406,7 @@ def runtime_conf(module, prefix, port, udp_script=None, tcp_script=None, keepali
             location("/task7-redirect/", fixture("task7_redirect.rss")),
             location("/task7-sleep-exit/", fixture("task7_exit_sleep.rss")),
             content_location("/content/", fixture("content_phase.rss")),
+            content_location("/output/", fixture("output_print.rss")),
             """
         location /task7-mut/ {
             set $writable "";
@@ -862,6 +863,24 @@ def run_acceptance(nginx, module):
                 dump_owned(prefix, proc, error_text),
             )
         summary["content"] = "200 CONTENT_PHASE=content"
+
+        output_status, output_body, output_raw = http_get(port, "/output/", timeout=5.0)
+        if output_status != 201 or output_body != "abcd\n12":
+            raise CheckError(
+                "content output must auto-finalize print/say without eof",
+                dump_owned(prefix, proc, output_raw),
+            )
+        if "content-length: 7" not in output_raw.lower():
+            raise CheckError(
+                "HTTP/1.0 output must set Content-Length from the buffered body",
+                dump_owned(prefix, proc, output_raw),
+            )
+        if "x-out: yes" not in output_raw.lower():
+            raise CheckError(
+                "output must send custom headers set before the body",
+                dump_owned(prefix, proc, output_raw),
+            )
+        summary["output"] = "201 abcd+nl+12 cl=7"
 
         # Non-blocking: 2s sleep must not hold /plain/.
         sent = threading.Event()
@@ -1541,6 +1560,7 @@ def format_summary(summary):
         "nginx-integration ok",
         f"nginx-t: valid={summary['nginx-t-valid']} invalid={summary['nginx-t-invalid']}",
         f"content: {summary['content']}",
+        f"output: {summary['output']}",
         f"nonblock: {summary['nonblock']}",
         f"continue: {summary['continue']}",
         f"udp: {summary['udp']}",

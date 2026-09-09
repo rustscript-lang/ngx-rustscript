@@ -207,6 +207,7 @@ fn compile_and_run_c_probe(cc: &str) {
     for flag in cflags.split_whitespace() {
         cmd.arg(flag);
     }
+    cmd.arg("-DNGX_RUSTSCRIPT_ABI_PROBE");
     cmd.arg(&shim).arg(&probe);
     let compile = cmd
         .output()

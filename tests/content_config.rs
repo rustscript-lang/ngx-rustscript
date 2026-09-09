@@ -147,6 +147,8 @@ fn content_phase_accepts_sleep_and_request_read() {
     ));
     compile_rss_source_for_phase("use ngx;\nngx::req::get_method();\n", NgxPhase::Content)
         .expect("get_method in content");
+    compile_rss_source_for_phase("use ngx;\nngx::print(\"ok\");\n", NgxPhase::Content)
+        .expect("print in content");
 }
 
 #[test]

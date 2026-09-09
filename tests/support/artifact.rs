@@ -60,6 +60,9 @@ pub const FORBIDDEN_DEFINED_NGINX_STUBS: &[&str] = &[
     "ngx_http_set_exten",
     "ngx_http_send_header",
     "ngx_http_send_special",
+    "ngx_http_output_filter",
+    "ngx_http_set_content_type",
+    "ngx_handle_write_event",
 ];
 
 /// Production cdylib/add-dynamic module must define these C ABI shims.
@@ -81,6 +84,7 @@ pub const FORBIDDEN_DEFINED_REQUEST_TEST_SETTERS: &[&str] = &[
     "ngx_rustscript_test_request_set_header_sent",
     "ngx_rustscript_test_request_set_reading_body",
     "ngx_rustscript_test_request_set_discard_body",
+    "ngx_rustscript_test_request_set_header_only",
     "ngx_rustscript_stub_alloc_fail_after",
     "ngx_rustscript_stub_alloc_reset",
     "ngx_rustscript_test_headers_in_msie",

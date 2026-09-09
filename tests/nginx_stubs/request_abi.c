@@ -347,6 +347,122 @@ static int stub_send_header_calls;
 static int stub_send_special_calls;
 static ngx_uint_t stub_send_special_last_flags;
 
+enum { STUB_OUTPUT_CAP = 65536 };
+
+static ngx_int_t stub_output_rc;
+static int stub_output_calls;
+static unsigned char stub_output_body[STUB_OUTPUT_CAP];
+static size_t stub_output_len;
+static unsigned stub_output_last;
+static unsigned stub_output_flush;
+static unsigned stub_output_last_in_chain;
+static unsigned stub_output_sync;
+static unsigned stub_needs_flush_wait;
+static ngx_int_t stub_flush_continue_rc;
+
+void ngx_rustscript_stub_output_reset(void)
+{
+    stub_output_rc = NGX_OK;
+    stub_output_calls = 0;
+    stub_output_len = 0;
+    stub_output_last = 0;
+    stub_output_flush = 0;
+    stub_output_last_in_chain = 0;
+    stub_output_sync = 0;
+    stub_needs_flush_wait = 0;
+    stub_flush_continue_rc = NGX_OK;
+    memset(stub_output_body, 0, sizeof(stub_output_body));
+}
+
+void ngx_rustscript_stub_output_set_rc(ngx_int_t rc)
+{
+    stub_output_rc = rc;
+}
+
+void ngx_rustscript_stub_output_set_needs_flush_wait(unsigned v)
+{
+    stub_needs_flush_wait = v ? 1 : 0;
+}
+
+int ngx_rustscript_stub_output_calls(void)
+{
+    return stub_output_calls;
+}
+
+size_t ngx_rustscript_stub_output_len(void)
+{
+    return stub_output_len;
+}
+
+const unsigned char *ngx_rustscript_stub_output_body(void)
+{
+    return stub_output_body;
+}
+
+unsigned ngx_rustscript_stub_output_saw_last(void)
+{
+    return stub_output_last;
+}
+
+unsigned ngx_rustscript_stub_output_saw_flush(void)
+{
+    return stub_output_flush;
+}
+
+unsigned ngx_rustscript_stub_output_saw_last_in_chain(void)
+{
+    return stub_output_last_in_chain;
+}
+
+unsigned ngx_rustscript_stub_output_needs_flush_wait(void)
+{
+    return stub_needs_flush_wait;
+}
+
+unsigned ngx_rustscript_stub_skip_event_timers(void)
+{
+    return 1;
+}
+
+ngx_rbtree_t ngx_event_timer_rbtree;
+volatile ngx_msec_t ngx_current_msec;
+
+void ngx_rustscript_stub_set_flush_continue(ngx_int_t rc)
+{
+    stub_flush_continue_rc = rc;
+}
+
+ngx_int_t ngx_rustscript_stub_flush_continue_result(void)
+{
+    return stub_flush_continue_rc;
+}
+
+void ngx_rustscript_test_request_set_main(ngx_http_request_t *r, ngx_http_request_t *main)
+{
+    if (r != NULL) {
+        r->main = main;
+    }
+}
+
+void ngx_rustscript_test_request_set_content_length_n(ngx_http_request_t *r, off_t n)
+{
+    if (r != NULL) {
+        r->headers_out.content_length_n = n;
+    }
+}
+
+off_t ngx_rustscript_test_request_content_length_n(ngx_http_request_t *r)
+{
+    return r == NULL ? (off_t) -1 : r->headers_out.content_length_n;
+}
+
+void ngx_rustscript_test_request_set_header_only(ngx_http_request_t *r, unsigned v)
+{
+    if (r != NULL) {
+        r->header_only = v ? 1 : 0;
+    }
+}
+
 void ngx_rustscript_stub_send_reset(void)
 {
     stub_send_header_rc = NGX_OK;
@@ -354,6 +470,7 @@ void ngx_rustscript_stub_send_reset(void)
     stub_send_header_calls = 0;
     stub_send_special_calls = 0;
     stub_send_special_last_flags = 0;
+    ngx_rustscript_stub_output_reset();
 }
 
 void ngx_rustscript_stub_send_header_returns(ngx_int_t rc)
@@ -392,8 +509,75 @@ ngx_int_t ngx_http_send_special(ngx_http_request_t *r, ngx_uint_t flags)
 {
     stub_send_special_calls++;
     stub_send_special_last_flags = flags;
+    if (flags & NGX_HTTP_LAST) {
+        stub_output_last = 1;
+        stub_output_last_in_chain = 1;
+    }
+    if (flags & NGX_HTTP_FLUSH) {
+        stub_output_flush = 1;
+    }
     (void) r;
     return stub_send_special_rc;
+}
+
+static void stub_record_chain(ngx_chain_t *in)
+{
+    for (; in != NULL; in = in->next) {
+        ngx_buf_t *b = in->buf;
+        if (b == NULL) {
+            continue;
+        }
+        if (b->last_buf) {
+            stub_output_last = 1;
+        }
+        if (b->last_in_chain) {
+            stub_output_last_in_chain = 1;
+        }
+        if (b->flush) {
+            stub_output_flush = 1;
+        }
+        if (b->sync) {
+            stub_output_sync = 1;
+        }
+        if (b->pos != NULL && b->last != NULL && b->last > b->pos) {
+            size_t n = (size_t) (b->last - b->pos);
+            if (stub_output_len + n > STUB_OUTPUT_CAP) {
+                n = STUB_OUTPUT_CAP - stub_output_len;
+            }
+            if (n > 0) {
+                memcpy(stub_output_body + stub_output_len, b->pos, n);
+                stub_output_len += n;
+            }
+        }
+    }
+}
+
+ngx_int_t ngx_http_output_filter(ngx_http_request_t *r, ngx_chain_t *in)
+{
+    stub_output_calls++;
+    stub_record_chain(in);
+    (void) r;
+    return stub_output_rc;
+}
+
+ngx_int_t ngx_http_set_content_type(ngx_http_request_t *r)
+{
+    static u_char plain[] = "text/plain";
+    if (r == NULL) {
+        return NGX_ERROR;
+    }
+    if (r->headers_out.content_type.len == 0) {
+        r->headers_out.content_type.data = plain;
+        r->headers_out.content_type.len = sizeof(plain) - 1;
+    }
+    return NGX_OK;
+}
+
+ngx_int_t ngx_handle_write_event(ngx_event_t *wev, size_t lowat)
+{
+    (void) wev;
+    (void) lowat;
+    return NGX_OK;
 }
 
 off_t ngx_atoof(u_char *line, size_t n)

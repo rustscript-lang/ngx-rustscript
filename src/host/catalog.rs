@@ -122,6 +122,12 @@ pub const NGX_SHARED_FLUSH_ALL_NAME: &str = "ngx::shared::flush_all";
 pub const NGX_SHARED_FLUSH_EXPIRED_NAME: &str = "ngx::shared::flush_expired";
 pub const NGX_SHARED_GET_KEYS_NAME: &str = "ngx::shared::get_keys";
 
+pub const NGX_SEND_HEADERS_NAME: &str = "ngx::send_headers";
+pub const NGX_PRINT_NAME: &str = "ngx::print";
+pub const NGX_SAY_NAME: &str = "ngx::say";
+pub const NGX_FLUSH_NAME: &str = "ngx::flush";
+pub const NGX_EOF_NAME: &str = "ngx::eof";
+
 /// NGINX / OpenResty execution phases that can host a script.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NgxPhase {
@@ -493,6 +499,9 @@ const PHASE_RESPONSE_META: &[NgxPhase] = &[
     NgxPhase::Log,
     NgxPhase::Balancer,
 ];
+
+/// `ngx.send_headers` / `ngx.print` / `ngx.say` / `ngx.flush` / `ngx.eof`.
+const PHASE_OUTPUT: &[NgxPhase] = &[NgxPhase::Content];
 
 /// `ngx.exit`.
 const PHASE_EXIT: &[NgxPhase] = &[
@@ -1248,6 +1257,18 @@ const MANIFEST: &[HostManifestEntry] = &[
         HostSyncKind::Sync,
         "ngx.socket.tcp",
     ),
+    response_entry(NGX_SEND_HEADERS_NAME, "ngx.send_headers", PHASE_OUTPUT),
+    response_entry(NGX_PRINT_NAME, "ngx.print", PHASE_OUTPUT),
+    response_entry(NGX_SAY_NAME, "ngx.say", PHASE_OUTPUT),
+    HostManifestEntry {
+        name: NGX_FLUSH_NAME,
+        family: HostFamily::Response,
+        sync: HostSyncKind::Async,
+        phases: PHASE_OUTPUT,
+        capabilities: RESPONSE_WRITE_CAPABILITIES,
+        openresty_name: "ngx.flush",
+    },
+    response_entry(NGX_EOF_NAME, "ngx.eof", PHASE_OUTPUT),
 ];
 
 const fn codec_entry(
@@ -2040,6 +2061,23 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             ],
             HostTypeSchema::Resource(tls_clientcert_resource_key()),
         ),
+        NGX_SEND_HEADERS_NAME => nullary(NGX_SEND_HEADERS_NAME, HostTypeSchema::Null),
+        NGX_PRINT_NAME => HostFunctionSchema::with_return(
+            NGX_PRINT_NAME,
+            vec![HostParamSchema::value("data", HostTypeSchema::Unknown)],
+            HostTypeSchema::Null,
+        ),
+        NGX_SAY_NAME => HostFunctionSchema::with_return(
+            NGX_SAY_NAME,
+            vec![HostParamSchema::value("data", HostTypeSchema::Unknown)],
+            HostTypeSchema::Null,
+        ),
+        NGX_FLUSH_NAME => HostFunctionSchema::with_return(
+            NGX_FLUSH_NAME,
+            vec![HostParamSchema::value("wait", HostTypeSchema::Bool)],
+            HostTypeSchema::Null,
+        ),
+        NGX_EOF_NAME => nullary(NGX_EOF_NAME, HostTypeSchema::Null),
         other => metadata_schema(other)
             .unwrap_or_else(|| panic!("ngx host catalog has no schema for {other}")),
     }

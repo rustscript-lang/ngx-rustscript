@@ -5,7 +5,7 @@ This matrix is the authoritative current ngx host surface for
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **177** names in the same order.
+Those three lists contain the same **182** names in the same order.
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and documents only
@@ -13,8 +13,8 @@ the hosts in this matrix (including UDP and TCP cosocket).
 
 **Built and tested against official NGINX 1.30.4** (`nginx_version`
 1030004), ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`, and the
-pinned `pd-vm` revision in the crate README. The current executable
-directive is `access_by_rss_file` (HTTP access phase only).
+pinned `pd-vm` revision in the crate README. Executable directives are
+`access_by_rss_file` and `content_by_rss_file`.
 
 ## OpenResty documentation baseline
 
@@ -33,7 +33,7 @@ helpers as part of this module.
 | OpenResty API | lua-nginx-module v0.10.29 name |
 | RustScript callable | Production host import name and catalog signature |
 | Status | `supported` (same call shape and result kind) or `adapted` (intentional RustScript mapping) |
-| Phases | Catalog allowlist. Names are the `NgxPhase` display strings below. The current directive only *runs* scripts in `access`; config-time import checks for `access_by_rss_file` use `access`. |
+| Phases | Catalog allowlist. Names are the `NgxPhase` display strings below. Runnable directives are `access_by_rss_file` (`access`) and `content_by_rss_file` (`content`). Config-time import checks use the directive's phase. |
 | Yield | `sync` (returns immediately) or `Waiting` (`VmStatus::Waiting`, `NGX_AGAIN`) |
 | Limits | Hard caps enforced by the host |
 | Semantic differences | Intentional adaptations versus OpenResty Lua |
@@ -59,21 +59,25 @@ argument.
 | Request-read / var | 17 | sync |
 | Request-local ctx | 4 | sync |
 | Response metadata | 6 | sync |
+| Response output | 5 | print/say/send_headers/eof sync; flush async |
 | Control | 2 | sync |
 | Shared dict | 22 | sync |
 | Cosocket (UDP) | 7 | mixed |
 | Cosocket (TCP) | 16 | mixed |
 | Constants | 65 | sync |
 | of which HTTP status | 35 | sync |
-| **Production total** | **177** | |
+| **Production total** | **182** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
 the production manifest, catalog, or `bind_ngx_hosts`.
 
-Every production host is allowed in `access`. Unknown imports, phase-
+Every production host except the five content-phase output hosts
+(`ngx::send_headers`, `ngx::print`, `ngx::say`, `ngx::flush`, `ngx::eof`)
+is allowed in `access`. Output hosts are content-only and rejected at
+config time in access/init/set/rewrite. Unknown imports, phase-
 forbidden imports, arity errors, and type errors are distinct
-configuration failures. `print` is not a host; use `ngx::log`.
-`runtime::sleep` is rejected.
+configuration failures. Bare `print` is not a host; use `ngx::print`
+or `ngx::log`. `runtime::sleep` is rejected.
 
 ## Phase sets
 
@@ -420,6 +424,29 @@ or list pointers. They require a live request scope.
 | — | `ngx::header::set_all(headers: map) -> null` | adapted | `PHASE_RESPONSE_META` | same | Validate every pair first. Allocate the intended representation, then deactivate previous headers. Validation or allocation failure leaves the logical list unchanged (pool memory is not rolled back). | `tests/ngx_request_mutation.rs` |
 | — | `ngx::header::clear() -> null` | adapted | `PHASE_RESPONSE_META` | — | Hash-zero every output header and reset dedicated fields. | `tests/ngx_request_mutation.rs` |
 
+## Response output
+
+Content-phase body APIs. Capability is `ResponseWrite`. Access and
+config phases reject these imports at compile time; `ngx.status` /
+`ngx.header` remain allowed in access. Payload is copied on the worker
+thread into request-pool buffers and sent through
+`ngx_http_output_filter`. Hosts never write the NGINX socket and never
+call `ngx_http_finalize_request`. Per-call body cap is 1 MiB; total
+response cap is 8 MiB; chunk cap is 4096.
+
+| OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ngx.send_headers` | `ngx::send_headers() -> null` | adapted | content | — | Idempotent after `header_sent`. Default status 200 and `ngx_http_set_content_type`. | `tests/ngx_output.rs`, `tests/output_nginx.rs` |
+| `ngx.print` | `ngx::print(data: unknown) -> null` | adapted | content | 1 MiB/call | String/bytes/int/float/bool/null/array. Nested maps rejected. Auto-sends headers. HEAD/`header_only` skips body. | `tests/ngx_output.rs`, `tests/output_nginx.rs` |
+| `ngx.say` | `ngx::say(data: unknown) -> null` | adapted | content | 1 MiB/call | `print` plus a trailing newline. | `tests/ngx_output.rs`, `tests/output_nginx.rs` |
+| `ngx.flush` | `ngx::flush(wait: bool) -> null` | adapted | content | — | Empty flush buf. HTTP/1.0 buffering returns `buffering`. `wait=true` models write backpressure via request-owned Waiting/eventfd (no request pointers in the future). | `tests/ngx_output.rs`, `tests/output_nginx.rs` |
+| `ngx.eof` | `ngx::eof() -> null` | adapted | content | — | `last_buf` on the main request, `last_in_chain` always. Post-eof print/say/flush/eof fail. | `tests/ngx_output.rs`, `tests/output_nginx.rs` |
+
+HTTP/1.0 without Content-Length buffers until eof/`send_headers` then
+sets `content_length_n`. HTTP/1.1 streams with chunked encoding when
+length is unknown. The content handler remains the sole completion
+owner and sends last_buf if the script omitted `eof`.
+
 ## Control flow
 
 Hosts set request-owned `RequestDisposition` then stop the VM. AccessExec consumes disposition only when it is set. Ordinary HostError cannot forge control. First disposition wins. The access handler is the sole finalizer: it returns the NGINX status; hosts never call `ngx_http_finalize_request`.
@@ -611,7 +638,7 @@ acceptance is `tests/nginx_integration.py`.
 
 Not production hosts in this matrix (do not import them):
 
-- Remaining body/output APIs (`ngx.req.read_body`, `ngx.print` / `ngx.say`, `ngx.eof`, ...)
+- Remaining body APIs (`ngx.req.read_body`)
 - `ngx.exec` / internal redirect (`set_uri jump=true`)
 - Timer callbacks, light threads
 - Stream subsystem, `ndk.set_var.*`, Lua `coroutine.*`
@@ -619,8 +646,9 @@ Not production hosts in this matrix (do not import them):
 - `print`, `runtime::sleep`, and test hosts `ngx::probe` / `ngx::ready` /
   `ngx::fail`
 
-Catalog phase names other than `access` document OpenResty allowlists
-for later directives. They are not runnable entry points in this matrix.
+Catalog phase names other than `access` and `content` document OpenResty
+allowlists for later directives. They are not runnable entry points in
+this matrix.
 
 ## Maintaining this matrix
 

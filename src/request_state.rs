@@ -179,6 +179,10 @@ impl<T> IdentityRegistry<T> {
     pub fn clear(&mut self) {
         self.map.clear();
     }
+
+    pub fn iter_values(&self) -> impl Iterator<Item = &T> {
+        self.map.values()
+    }
 }
 
 impl<T> Default for IdentityRegistry<T> {

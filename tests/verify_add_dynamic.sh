@@ -76,11 +76,13 @@ for stub in ngx_conf_full_name ngx_conf_log_error ngx_array_push ngx_log_error_c
   ngx_http_test_reading ngx_http_block_reading ngx_handle_read_event ngx_posted_events \
   ngx_pid ngx_worker ngx_exiting ngx_cycle ngx_core_module ngx_processes ngx_http_get_variable \
   ngx_list_push ngx_pnalloc ngx_hash_find ngx_hash_strlow ngx_http_parse_time ngx_parse_http_time ngx_http_set_exten \
-  ngx_http_send_header ngx_http_send_special \
+  ngx_http_send_header ngx_http_send_special ngx_http_output_filter ngx_http_set_content_type \
+  ngx_handle_write_event \
   ngx_rustscript_test_request_new ngx_rustscript_test_request_free ngx_rustscript_test_request_sizeof \
   ngx_rustscript_test_request_set_internal ngx_rustscript_test_request_set_filter_finalize \
   ngx_rustscript_test_request_set_error_page ngx_rustscript_test_request_set_header_sent \
   ngx_rustscript_test_request_set_reading_body ngx_rustscript_test_request_set_discard_body \
+  ngx_rustscript_test_request_set_header_only \
   ngx_rustscript_stub_alloc_fail_after ngx_rustscript_stub_alloc_reset \
   ngx_rustscript_test_headers_in_msie ngx_rustscript_test_install_variable; do
   if printf '%s\n' "$NM_OUT" | awk '{print $1}' | grep -qx "$stub"; then

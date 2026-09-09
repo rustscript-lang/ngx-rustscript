@@ -12,6 +12,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include <sys/socket.h>
 
 unsigned int ngx_rustscript_c_request_is_internal(const ngx_http_request_t *r)
 {
@@ -574,6 +575,419 @@ void ngx_rustscript_c_request_main_count_inc(ngx_http_request_t *r)
         return;
     }
     r->main->count++;
+}
+
+unsigned int ngx_rustscript_c_request_header_only(const ngx_http_request_t *r)
+{
+    return r != NULL && (r->header_only || r->method == NGX_HTTP_HEAD) ? 1 : 0;
+}
+
+unsigned int ngx_rustscript_c_request_is_http10(const ngx_http_request_t *r)
+{
+    return r != NULL && r->http_version < NGX_HTTP_VERSION_11 ? 1 : 0;
+}
+
+ngx_int_t ngx_rustscript_c_send_response_headers(ngx_http_request_t *r)
+{
+    ngx_int_t rc;
+
+    if (r == NULL) {
+        return NGX_ERROR;
+    }
+    if (r->header_sent) {
+        return NGX_OK;
+    }
+    if (r->headers_out.status == 0) {
+        r->headers_out.status = NGX_HTTP_OK;
+    }
+    rc = ngx_http_set_content_type(r);
+    if (rc != NGX_OK) {
+        return rc;
+    }
+    rc = ngx_http_send_header(r);
+    if (rc == NGX_OK || rc == NGX_DONE) {
+        r->header_sent = 1;
+    }
+    return rc;
+}
+
+ngx_int_t ngx_rustscript_c_output_body(ngx_http_request_t *r, const u_char *data, size_t len,
+    unsigned flush, unsigned last)
+{
+    ngx_buf_t *b;
+    ngx_chain_t *cl;
+    u_char *p;
+
+    if (r == NULL || r->pool == NULL) {
+        return NGX_ERROR;
+    }
+    b = ngx_palloc(r->pool, sizeof(ngx_buf_t));
+    if (b == NULL) {
+        return NGX_ERROR;
+    }
+    ngx_memzero(b, sizeof(ngx_buf_t));
+    if (len > 0) {
+        if (data == NULL) {
+            return NGX_ERROR;
+        }
+        p = ngx_palloc(r->pool, len);
+        if (p == NULL) {
+            return NGX_ERROR;
+        }
+        ngx_memcpy(p, data, len);
+        b->pos = p;
+        b->last = p + len;
+        b->memory = 1;
+    } else {
+        b->sync = 1;
+    }
+    b->last_in_chain = 1;
+    b->flush = flush ? 1 : 0;
+    if (last) {
+        if (r->main == r) {
+            b->last_buf = 1;
+        } else {
+            b->sync = 1;
+            b->last_buf = 0;
+        }
+    }
+    cl = ngx_palloc(r->pool, sizeof(ngx_chain_t));
+    if (cl == NULL) {
+        return NGX_ERROR;
+    }
+    cl->buf = b;
+    cl->next = NULL;
+    return ngx_http_output_filter(r, cl);
+}
+
+ngx_int_t ngx_rustscript_c_output_special(ngx_http_request_t *r, unsigned flush, unsigned last)
+{
+    ngx_uint_t flags = 0;
+
+    if (r == NULL) {
+        return NGX_ERROR;
+    }
+    if (flush) {
+        flags |= NGX_HTTP_FLUSH;
+    }
+    if (last) {
+        flags |= NGX_HTTP_LAST;
+    }
+    if (flags == 0) {
+        return NGX_OK;
+    }
+    return ngx_http_send_special(r, flags);
+}
+
+unsigned ngx_rustscript_stub_output_needs_flush_wait(void) __attribute__((weak));
+unsigned ngx_rustscript_stub_skip_event_timers(void) __attribute__((weak));
+ngx_int_t ngx_rustscript_stub_flush_continue_result(void) __attribute__((weak));
+
+off_t ngx_rustscript_c_content_length_n(const ngx_http_request_t *r)
+{
+    return r == NULL ? (off_t) -1 : r->headers_out.content_length_n;
+}
+
+static void
+ngx_rustscript_flush_timeouts(ngx_http_request_t *r, ngx_msec_t *timeout, size_t *lowat)
+{
+    ngx_http_core_loc_conf_t *clcf = NULL;
+    ngx_http_request_t *main;
+
+    *timeout = 60000;
+    *lowat = 0;
+    if (r == NULL) {
+        return;
+    }
+    main = r->main != NULL ? r->main : r;
+    if (main->loc_conf == NULL) {
+        return;
+    }
+    clcf = ngx_http_get_module_loc_conf(main, ngx_http_core_module);
+    if (clcf == NULL) {
+        return;
+    }
+    *timeout = clcf->send_timeout;
+    *lowat = clcf->send_lowat;
+}
+
+static unsigned
+ngx_rustscript_skip_event_timers(void)
+{
+    return ngx_rustscript_stub_skip_event_timers != NULL
+        && ngx_rustscript_stub_skip_event_timers();
+}
+
+static void
+ngx_rustscript_flush_add_timer(ngx_event_t *wev, ngx_msec_t timeout)
+{
+    if (wev == NULL) {
+        return;
+    }
+    if (ngx_rustscript_skip_event_timers()) {
+        wev->timer_set = 1;
+        (void) timeout;
+        return;
+    }
+#ifndef NGX_RUSTSCRIPT_ABI_PROBE
+    ngx_add_timer(wev, timeout);
+#else
+    wev->timer_set = 1;
+    (void) timeout;
+#endif
+}
+
+static void
+ngx_rustscript_flush_del_timer(ngx_event_t *wev)
+{
+    if (wev == NULL || !wev->timer_set || wev->delayed) {
+        return;
+    }
+    if (ngx_rustscript_skip_event_timers()) {
+        wev->timer_set = 0;
+        return;
+    }
+#ifndef NGX_RUSTSCRIPT_ABI_PROBE
+    ngx_del_timer(wev);
+#else
+    wev->timer_set = 0;
+#endif
+}
+
+unsigned int ngx_rustscript_c_connection_needs_flush_wait(ngx_http_request_t *r)
+{
+    ngx_event_t *wev;
+
+    if (ngx_rustscript_stub_output_needs_flush_wait
+        && ngx_rustscript_stub_output_needs_flush_wait())
+    {
+        return 1;
+    }
+    if (r == NULL || r->connection == NULL || r->connection->write == NULL) {
+        return 0;
+    }
+    wev = r->connection->write;
+    if (wev->delayed) {
+        return 1;
+    }
+    return (r->connection->buffered
+            & (NGX_HTTP_LOWLEVEL_BUFFERED | NGX_LOWLEVEL_BUFFERED)) != 0 ? 1 : 0;
+}
+
+static void
+ngx_rustscript_c_note_log_status(ngx_http_request_t *r, ngx_int_t status)
+{
+    if (r == NULL) {
+        return;
+    }
+    /* After headers are on the wire, $status uses err_status. Do not rewrite
+     * headers_out.status (already sent) and do not call finalize here. */
+    if (r->header_sent && r->err_status == 0 && status > 0) {
+        r->err_status = (ngx_uint_t) status;
+    }
+}
+
+static void
+ngx_rustscript_log_flush_wait_armed(ngx_http_request_t *r)
+{
+#ifndef NGX_RUSTSCRIPT_ABI_PROBE
+    if (r == NULL || r->connection == NULL || r->connection->log == NULL) {
+        return;
+    }
+    ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "FLUSH_WAIT_ARMING");
+#else
+    (void) r;
+#endif
+}
+
+static unsigned
+ngx_rustscript_flush_client_closed(ngx_connection_t *c, ngx_event_t *wev)
+{
+    if (c == NULL) {
+        return 0;
+    }
+    if (c->error) {
+        return 1;
+    }
+    return wev != NULL && wev->error;
+}
+
+static ngx_int_t
+ngx_rustscript_flush_continue_status(ngx_http_request_t *r, ngx_int_t rc)
+{
+    ngx_connection_t *c;
+    ngx_event_t *wev;
+
+    if (rc == NGX_AGAIN || rc == NGX_OK || rc == NGX_DONE) {
+        return rc;
+    }
+    c = r != NULL ? r->connection : NULL;
+    wev = (c != NULL) ? c->write : NULL;
+    if (rc == NGX_HTTP_REQUEST_TIME_OUT) {
+        ngx_rustscript_c_note_log_status(r, NGX_HTTP_REQUEST_TIME_OUT);
+        return NGX_HTTP_REQUEST_TIME_OUT;
+    }
+    if (rc == NGX_HTTP_CLIENT_CLOSED_REQUEST
+        || ngx_rustscript_flush_client_closed(c, wev))
+    {
+        ngx_rustscript_c_note_log_status(r, NGX_HTTP_CLIENT_CLOSED_REQUEST);
+        return NGX_HTTP_CLIENT_CLOSED_REQUEST;
+    }
+    return rc;
+}
+
+ngx_int_t ngx_rustscript_c_arm_flush_wait(ngx_http_request_t *r, ngx_http_event_handler_pt handler)
+{
+    ngx_event_t *wev;
+    ngx_msec_t timeout;
+    size_t lowat;
+
+    if (r == NULL || handler == NULL) {
+        return NGX_ERROR;
+    }
+
+    /* Request-level write callback only. Leave c->write->handler as the
+     * official ngx_http_request_handler so NGINX still owns the event. */
+    r->write_event_handler = handler;
+
+    if (ngx_rustscript_stub_output_needs_flush_wait
+        && ngx_rustscript_stub_output_needs_flush_wait())
+    {
+        /* Do not ngx_post_event a ready write: that busy-spins the handler. */
+        ngx_rustscript_log_flush_wait_armed(r);
+        return NGX_OK;
+    }
+
+    if (r->connection == NULL || r->connection->write == NULL) {
+        return NGX_ERROR;
+    }
+
+    wev = r->connection->write;
+    ngx_rustscript_flush_timeouts(r, &timeout, &lowat);
+    if (!wev->delayed) {
+        ngx_rustscript_flush_add_timer(wev, timeout);
+    }
+    if (ngx_handle_write_event(wev, lowat) != NGX_OK) {
+        return NGX_ERROR;
+    }
+    ngx_rustscript_log_flush_wait_armed(r);
+    return NGX_OK;
+}
+
+ngx_int_t ngx_rustscript_c_continue_output(ngx_http_request_t *r)
+{
+    ngx_connection_t *c;
+    ngx_event_t *wev;
+    ngx_int_t rc;
+    ngx_msec_t timeout;
+    size_t lowat;
+
+    if (r == NULL) {
+        return NGX_ERROR;
+    }
+    if (ngx_rustscript_stub_flush_continue_result != NULL) {
+        return ngx_rustscript_flush_continue_status(
+            r, ngx_rustscript_stub_flush_continue_result());
+    }
+
+    c = r->connection;
+    if (c == NULL || c->write == NULL) {
+        return NGX_ERROR;
+    }
+    wev = c->write;
+    ngx_rustscript_flush_timeouts(r, &timeout, &lowat);
+
+    if (wev->timedout) {
+        if (!wev->delayed) {
+            c->timedout = 1;
+            return ngx_rustscript_flush_continue_status(r, NGX_HTTP_REQUEST_TIME_OUT);
+        }
+        wev->timedout = 0;
+        wev->delayed = 0;
+        if (!wev->ready) {
+            ngx_rustscript_flush_add_timer(wev, timeout);
+            if (ngx_handle_write_event(wev, lowat) != NGX_OK) {
+                return NGX_ERROR;
+            }
+            return NGX_AGAIN;
+        }
+    }
+
+    if (ngx_rustscript_flush_client_closed(c, wev)) {
+        return ngx_rustscript_flush_continue_status(r, NGX_HTTP_CLIENT_CLOSED_REQUEST);
+    }
+
+    if (!wev->ready && !wev->timedout) {
+        return NGX_AGAIN;
+    }
+
+    if (c->buffered & (NGX_HTTP_LOWLEVEL_BUFFERED | NGX_LOWLEVEL_BUFFERED)) {
+        rc = ngx_http_output_filter(r, NULL);
+        if (rc == NGX_ERROR || rc > NGX_OK) {
+            return ngx_rustscript_flush_continue_status(r, rc);
+        }
+        if (c->buffered & (NGX_HTTP_LOWLEVEL_BUFFERED | NGX_LOWLEVEL_BUFFERED)) {
+            if (!wev->delayed) {
+                ngx_rustscript_flush_add_timer(wev, timeout);
+            }
+            if (ngx_handle_write_event(wev, lowat) != NGX_OK) {
+                return NGX_ERROR;
+            }
+            return NGX_AGAIN;
+        }
+    }
+
+    ngx_rustscript_flush_del_timer(wev);
+    return NGX_OK;
+}
+
+void ngx_rustscript_c_disarm_flush_wait(ngx_http_request_t *r)
+{
+    /* Caller restores r->write_event_handler. Never replace core wev handlers. */
+    if (r == NULL || r->connection == NULL || r->connection->write == NULL) {
+        return;
+    }
+    ngx_rustscript_flush_del_timer(r->connection->write);
+}
+
+void ngx_rustscript_c_note_client_closed_log_status(ngx_http_request_t *r)
+{
+    ngx_rustscript_c_note_log_status(r, NGX_HTTP_CLIENT_CLOSED_REQUEST);
+}
+
+void ngx_rustscript_c_test_reading_and_note_client_closed(ngx_http_request_t *r)
+{
+    ngx_connection_t *c;
+    char buf[1];
+    ssize_t n;
+    ngx_err_t err;
+
+    if (r == NULL) {
+        return;
+    }
+    c = r->connection;
+    if (r->header_sent && r->err_status == 0 && c != NULL
+        && c->fd != (ngx_socket_t) -1)
+    {
+        n = recv(c->fd, buf, 1, MSG_PEEK);
+        err = ngx_socket_errno;
+        if (n == 0 || c->error
+            || (n == -1 && err != NGX_EAGAIN && err != NGX_EINTR))
+        {
+            r->err_status = NGX_HTTP_CLIENT_CLOSED_REQUEST;
+        }
+    }
+#ifndef NGX_RUSTSCRIPT_ABI_PROBE
+    ngx_http_test_reading(r);
+#endif
+}
+
+void ngx_rustscript_c_set_content_length(ngx_http_request_t *r, off_t n)
+{
+    if (r == NULL) {
+        return;
+    }
+    r->headers_out.content_length_n = n;
 }
 
 #ifndef NGX_RUSTSCRIPT_NO_C_PUBLIC_ALIAS
