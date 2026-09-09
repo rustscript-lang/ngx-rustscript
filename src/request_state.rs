@@ -333,9 +333,10 @@ impl AccessExec {
         let waker = waiter.waker(self.identity);
         let mut cx = Context::from_waker(&waker);
         let identity = self.identity;
-        let ctx = &mut self.ctx as *mut RequestLocalCtx;
         let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
-        match with_vm_entry(identity, ctx, || vm.poll_waiting_host_op(&mut cx)) {
+        match with_vm_entry(identity, std::ptr::null_mut(), || {
+            vm.poll_waiting_host_op(&mut cx)
+        }) {
             Poll::Pending => {
                 self.state = ExecState::Suspended;
                 self.last_status = match self.last_status {
@@ -426,13 +427,14 @@ impl AccessExec {
         waiter: &impl AsyncWait,
     ) -> ReadyEffect {
         let identity = self.identity;
-        let ctx = &mut self.ctx as *mut RequestLocalCtx;
         let Some(vm) = self.vm.as_mut() else {
             return ReadyEffect::Ignored;
         };
         let waker = waiter.waker(identity);
         let mut cx = Context::from_waker(&waker);
-        match with_vm_entry(identity, ctx, || vm.poll_waiting_host_op(&mut cx)) {
+        match with_vm_entry(identity, std::ptr::null_mut(), || {
+            vm.poll_waiting_host_op(&mut cx)
+        }) {
             Poll::Pending => ReadyEffect::Ignored,
             Poll::Ready(Ok(())) => {
                 registry.remove_exact(self.identity, &self.request_id);

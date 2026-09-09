@@ -849,3 +849,44 @@ fn access_phase_ctx_persists_across_two_sleeps() {
         "missing nested ctx in log:\n{log}"
     );
 }
+
+#[test]
+fn access_phase_ctx_sync_no_sleep_set_get_delete_clear() {
+    let nginx = nginx_binary();
+    let module = module_cdylib();
+    let port = free_port();
+    let prefix = isolated_prefix("ngx-rustscript-ctx-sync");
+    write_index(&prefix, "ctx-sync/index.html", "ctx-sync-ok\n");
+    let script = prefix.join("conf/ctx_sync.rss");
+    std::fs::copy(fixture("ctx_sync.rss"), &script).unwrap();
+    let conf = meta_conf(
+        &nginx_quote_path(&module).unwrap(),
+        &prefix,
+        port,
+        &format!(
+            r#"
+        location /ctx-sync/ {{
+            access_by_rss_file {script};
+        }}
+"#,
+            script = nginx_quote_path(&script).unwrap(),
+        ),
+    );
+    write_conf(&prefix, &conf);
+    let out = nginx_test(&nginx, &prefix);
+    let text = combined(&out);
+    assert!(
+        out.status.success(),
+        "ctx-only no-sleep script must compile:\n{text}"
+    );
+
+    let _child = spawn_nginx(&nginx, &prefix);
+    wait_for_port(port, Duration::from_secs(5));
+    let (status, response) = http_get(port, "/ctx-sync/");
+    assert_eq!(status, 200, "ctx-only no-sleep request failed:\n{response}");
+    let log = fs::read_to_string(prefix.join("logs/error.log")).unwrap();
+    assert!(
+        log.contains("CTX_SYNC=ok"),
+        "missing CTX_SYNC=ok marker in log:\n{log}"
+    );
+}

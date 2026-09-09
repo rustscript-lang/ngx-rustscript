@@ -1,0 +1,15 @@
+use ngx;
+ngx::ctx::set("k", "v");
+if ngx::ctx::get("k") != "v" {
+    1 / 0;
+}
+ngx::ctx::delete("k");
+if ngx::ctx::get("k") != null {
+    1 / 0;
+}
+ngx::ctx::set("tmp", 1);
+ngx::ctx::clear();
+if ngx::ctx::get("tmp") != null {
+    1 / 0;
+}
+ngx::log(ngx::log_level::notice(), "CTX_SYNC=ok");

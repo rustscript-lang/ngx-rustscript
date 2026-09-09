@@ -17,7 +17,7 @@ use vm::{
     CompileSourceFileOptions, Program, SourceFlavor, Vm, compile_source_with_flavor_and_options,
 };
 
-use crate::host::{HostSyncKind, NgxPhase, ngx_host_catalog, ngx_host_manifest};
+use crate::host::{HostFamily, HostSyncKind, NgxPhase, ngx_host_catalog, ngx_host_manifest};
 
 /// Compiled access-phase program stored on the location config.
 #[derive(Default)]
@@ -182,12 +182,16 @@ pub fn validate_program_imports_for_phase(
     Ok(())
 }
 
-/// True when the compiled program imported an async ngx host that needs Waiting.
-pub fn program_needs_sleep(program: &Program) -> bool {
+/// True when the compiled program needs request-owned `AccessExec`.
+///
+/// Async hosts (sleep) and RequestCtx hosts both require per-request state.
+/// Pure-sync programs without those families stay on the pooled VM fast path.
+pub fn program_requires_request_state(program: &Program) -> bool {
     program.imports.iter().any(|import| {
-        ngx_host_manifest()
-            .iter()
-            .any(|entry| entry.name == import.name.as_str() && entry.sync == HostSyncKind::Async)
+        ngx_host_manifest().iter().any(|entry| {
+            entry.name == import.name.as_str()
+                && (entry.sync == HostSyncKind::Async || entry.family == HostFamily::RequestCtx)
+        })
     })
 }
 

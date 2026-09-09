@@ -231,6 +231,8 @@ def runtime_conf(module, prefix, port):
             location("/iso-b/", fixture("request_iso.rss")),
             location("/ctx-iso-a/", fixture("ctx_iso.rss")),
             location("/ctx-iso-b/", fixture("ctx_iso.rss")),
+            location("/ctx-sync/", fixture("ctx_sync.rss")),
+            location("/ctx-persist/", fixture("ctx_persist.rss")),
             """
         location /plain/ {
         }
@@ -547,6 +549,8 @@ def run_acceptance(nginx, module):
         write_index(prefix, "iso-b/index.html", "iso-b\n")
         write_index(prefix, "ctx-iso-a/index.html", "ctx-iso-a\n")
         write_index(prefix, "ctx-iso-b/index.html", "ctx-iso-b\n")
+        write_index(prefix, "ctx-sync/index.html", "ctx-sync\n")
+        write_index(prefix, "ctx-persist/index.html", "ctx-persist\n")
 
         write_text(
             os.path.join(prefix, "conf", "nginx.conf"),
@@ -897,6 +901,46 @@ def run_acceptance(nginx, module):
                 "ctx-iso-b logs must not contain ctx-iso-a id",
                 dump_owned(prefix, proc, "\n".join(ctx_b_lines)),
             )
+
+        status, body, raw = http_get(port, "/ctx-sync/", timeout=8.0)
+        if status != 200:
+            raise CheckError(
+                f"ctx-sync expected 200, got {status}",
+                dump_owned(prefix, proc, raw),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        if "CTX_SYNC=ok" not in error_text:
+            raise CheckError(
+                "ctx-sync must log CTX_SYNC=ok",
+                dump_owned(prefix, proc, error_text),
+            )
+
+        status, body, raw = http_get(port, "/ctx-persist/", timeout=8.0)
+        if status != 200:
+            raise CheckError(
+                f"ctx-persist expected 200, got {status}",
+                dump_owned(prefix, proc, raw),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        if not (
+            "CTX_PERSIST=" in error_text
+            and "n=2" in error_text
+            and "k=v" in error_text
+        ):
+            raise CheckError(
+                "ctx-persist must log persisted values after two waits",
+                dump_owned(prefix, proc, error_text),
+            )
+        if not (
+            "CTX_USER=" in error_text
+            and "id=7" in error_text
+            and "name=ada" in error_text
+        ):
+            raise CheckError(
+                "ctx-persist must log nested user after two waits",
+                dump_owned(prefix, proc, error_text),
+            )
+        summary["ctx"] = "sync=ok persist=ok"
         summary["concurrent"] = "12/12 mapped plain=200/plain isolation=ok"
 
         # Disconnect during 30s sleep -> access log 499, then routes still work.

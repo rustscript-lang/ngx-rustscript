@@ -32,7 +32,7 @@ pub use context::{
 };
 pub use layout::helpers::request_ctx::{
     MAX_CTX_CONTAINER_ELEMS, MAX_CTX_DEPTH, MAX_CTX_KEY_BYTES, MAX_CTX_KEYS, MAX_CTX_SCALAR_BYTES,
-    MAX_CTX_TOTAL_BYTES, RequestLocalCtx,
+    MAX_CTX_TOTAL_BYTES, RequestLocalCtx, live_owned_entry_count,
 };
 
 /// Override the OS clock sampled by time hosts. Used by tests and by

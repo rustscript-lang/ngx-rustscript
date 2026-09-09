@@ -410,10 +410,13 @@ the request pointer.
 `ssl_client_hello`. Not `init` / `init_worker` / `exit_worker`.
 
 The map persists across `ngx::sleep` `Waiting`/resume cycles on the same
-`AccessExec`. Concurrent requests are isolated. Values are released on
-cleanup, HostError, cancellation, and `AccessExec` drop. Ctx hosts run only
-on the worker main thread inside VM run/resume/poll; the sleep future owns
-no ctx pointer.
+`AccessExec`, including two sequential waits. Ctx-only scripts that never
+wait are also request-owned: every program that imports RequestCtx or Async
+hosts runs on a per-request `AccessExec` rather than the pooled VM path.
+Concurrent requests are isolated. Values are released on cleanup, HostError,
+cancellation, and `AccessExec` drop. Ctx hosts run only on the worker main
+thread inside VM run/resume; polling the Tokio sleep future receives no ctx
+pointer, and a stale wake cannot access a dropped ctx.
 
 ## Out of scope for Release A
 

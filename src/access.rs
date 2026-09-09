@@ -192,7 +192,9 @@ fn run_configured_access(request: &mut Request, conf: &LocationConf) -> Status {
     let Some(program) = conf.program() else {
         return Status::NGX_DECLINED;
     };
-    if !config::program_needs_sleep(program) {
+    if !config::program_requires_request_state(program) {
+        // Pool fast path: no Async and no RequestCtx. Keep ctx-null VM scope;
+        // do not wrap a pooled VM with a stack ctx.
         let raw = request.as_mut() as *mut ngx_http_request_t;
         let identity = allocate_scope_identity();
         return enter_access_scope(raw, identity, || {
@@ -213,10 +215,10 @@ fn run_configured_access(request: &mut Request, conf: &LocationConf) -> Status {
             })
         });
     }
-    run_sleep_access(request, program)
+    run_request_owned_access(request, program)
 }
 
-fn run_sleep_access(request: &mut Request, program: &Arc<Program>) -> Status {
+fn run_request_owned_access(request: &mut Request, program: &Arc<Program>) -> Status {
     let raw = request.as_mut() as *mut ngx_http_request_t;
     if request
         .get_module_ctx::<AccessCtx>(Module::module())

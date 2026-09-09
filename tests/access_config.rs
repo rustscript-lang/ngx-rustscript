@@ -178,8 +178,66 @@ fn runtime_sleep_import_is_rejected() {
 fn ngx_sleep_is_accepted_at_config_time() {
     let program = compile_rss_source(include_str!("fixtures/ngx_sleep.rss")).expect("ngx::sleep");
     assert!(
-        ngx_rustscript::config::program_needs_sleep(&program),
+        ngx_rustscript::config::program_requires_request_state(&program),
         "ngx::sleep import must be recorded"
+    );
+}
+
+#[test]
+fn ctx_only_program_requires_request_owned_exec() {
+    let program = compile_rss_source(include_str!("fixtures/ctx_sync.rss")).expect("ctx-only");
+    assert!(
+        !program.imports.iter().any(|import| {
+            ngx_rustscript::host::ngx_host_manifest()
+                .iter()
+                .any(|entry| {
+                    entry.name == import.name.as_str()
+                        && entry.sync == ngx_rustscript::host::HostSyncKind::Async
+                })
+        }),
+        "ctx_sync.rss must not import async hosts"
+    );
+    assert!(
+        ngx_rustscript::config::program_requires_request_state(&program),
+        "ctx-only scripts must select the request-owned AccessExec path"
+    );
+}
+
+#[test]
+fn import_free_and_codec_programs_stay_on_pool_fast_path() {
+    let ok = compile_rss_source(include_str!("fixtures/ok.rss")).expect("ok.rss");
+    assert!(
+        !ngx_rustscript::config::program_requires_request_state(&ok),
+        "import-free programs may stay on the pooled sync path"
+    );
+    let codec = compile_rss_source("use ngx;\nngx::md5(\"x\");\n").expect("codec");
+    assert!(
+        !ngx_rustscript::config::program_requires_request_state(&codec),
+        "codec-only programs may stay on the pooled sync path"
+    );
+}
+
+#[test]
+fn request_state_routing_uses_manifest_async_or_request_ctx() {
+    let config = include_str!("../src/config.rs");
+    assert!(
+        config.contains("HostFamily::RequestCtx") || config.contains("HostCapability::RequestCtx"),
+        "routing must use authoritative RequestCtx manifest metadata, not string matching"
+    );
+    assert!(
+        config.contains("HostSyncKind::Async"),
+        "routing must use authoritative Async manifest metadata"
+    );
+    let access = include_str!("../src/access.rs");
+    assert!(
+        access.contains("program_requires_request_state")
+            || access.contains("program_needs_request_exec"),
+        "access handler must consult request-state routing"
+    );
+    assert!(
+        ngx_rustscript::host::AllowedOps::for_phase(ngx_rustscript::host::NgxPhase::Access)
+            .contains(ngx_rustscript::host::AllowedOps::REQUEST_CTX),
+        "Access phase AllowedOps must include RequestCtx"
     );
 }
 

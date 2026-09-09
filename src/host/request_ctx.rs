@@ -35,12 +35,11 @@ pub const MAX_CTX_SCALAR_BYTES: usize = 8_192;
 
 const NODE_OVERHEAD: usize = 8;
 
-#[cfg(test)]
 thread_local! {
     static LIVE_OWNED_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
+/// Live top-level ctx entries on this thread. Used by lifecycle tests.
 pub fn live_owned_entry_count() -> usize {
     LIVE_OWNED_ENTRIES.with(|cell| cell.get())
 }
@@ -91,10 +90,6 @@ impl RequestLocalCtx {
 
     pub fn set(&mut self, key: &str, value: &Value) -> Result<(), String> {
         validate_key(key)?;
-        let (owned, value_size) = deep_own(value, 1, &mut HashSet::new())?;
-        let key_cost = NODE_OVERHEAD
-            .checked_add(key.len())
-            .ok_or_else(|| "ngx::ctx size overflow".to_string())?;
         let old = self.map.get(key);
         let replacing = old.is_some();
         let old_total = old.map(|stored| stored.size).unwrap_or(0);
@@ -105,6 +100,16 @@ impl RequestLocalCtx {
             .bytes
             .checked_sub(old_total)
             .ok_or_else(|| "ngx::ctx size overflow".to_string())?;
+        let mut remaining = MAX_CTX_TOTAL_BYTES
+            .checked_sub(without_old)
+            .ok_or_else(|| "ngx::ctx size overflow".to_string())?;
+        let key_cost = NODE_OVERHEAD
+            .checked_add(key.len())
+            .ok_or_else(|| "ngx::ctx size overflow".to_string())?;
+        if !replacing {
+            charge(&mut remaining, key_cost)?;
+        }
+        let (owned, value_size) = deep_own(value, 1, &mut remaining, &mut HashSet::new())?;
         let added = if replacing {
             value_size
         } else {
@@ -116,9 +121,7 @@ impl RequestLocalCtx {
             .checked_add(added)
             .ok_or_else(|| "ngx::ctx size overflow".to_string())?;
         if new_total > MAX_CTX_TOTAL_BYTES {
-            return Err(format!(
-                "ngx::ctx total size exceeds {MAX_CTX_TOTAL_BYTES} bytes"
-            ));
+            return Err(total_size_err());
         }
         let previous = self.map.insert(
             key.to_string(),
@@ -137,20 +140,26 @@ impl RequestLocalCtx {
 
     pub fn delete(&mut self, key: &str) -> Result<Value, String> {
         validate_key(key)?;
-        match self.map.remove(key) {
-            Some(stored) => {
-                let key_cost = NODE_OVERHEAD
-                    .checked_add(key.len())
-                    .ok_or_else(|| "ngx::ctx size overflow".to_string())?;
-                let released = key_cost
-                    .checked_add(stored.size)
-                    .ok_or_else(|| "ngx::ctx size overflow".to_string())?;
-                self.bytes = self.bytes.saturating_sub(released);
-                account_remove();
-                Ok(clone_owned(&stored.value))
-            }
-            None => Ok(Value::Null),
+        let Some(stored) = self.map.get(key) else {
+            return Ok(Value::Null);
+        };
+        let key_cost = NODE_OVERHEAD
+            .checked_add(key.len())
+            .ok_or_else(|| "ngx::ctx size overflow".to_string())?;
+        let released = key_cost
+            .checked_add(stored.size)
+            .ok_or_else(|| "ngx::ctx size overflow".to_string())?;
+        if released > self.bytes {
+            return Err("ngx::ctx size overflow".into());
         }
+        let out = clone_owned(&stored.value);
+        let _removed = self
+            .map
+            .remove(key)
+            .expect("ctx key still present after accounting");
+        self.bytes -= released;
+        account_remove();
+        Ok(out)
     }
 
     pub fn clear(&mut self) {
@@ -168,7 +177,6 @@ impl Drop for RequestLocalCtx {
 }
 
 fn account_insert() {
-    #[cfg(test)]
     LIVE_OWNED_ENTRIES.with(|cell| cell.set(cell.get().saturating_add(1)));
 }
 
@@ -177,10 +185,19 @@ fn account_remove() {
 }
 
 fn account_remove_n(n: usize) {
-    #[cfg(test)]
     LIVE_OWNED_ENTRIES.with(|cell| cell.set(cell.get().saturating_sub(n)));
-    #[cfg(not(test))]
-    let _ = n;
+}
+
+fn total_size_err() -> String {
+    format!("ngx::ctx total size exceeds {MAX_CTX_TOTAL_BYTES} bytes")
+}
+
+fn charge(remaining: &mut usize, amount: usize) -> Result<(), String> {
+    if amount > *remaining {
+        return Err(total_size_err());
+    }
+    *remaining -= amount;
+    Ok(())
 }
 
 fn validate_key(key: &str) -> Result<(), String> {
@@ -216,17 +233,25 @@ fn clone_owned(value: &Value) -> Value {
 fn deep_own(
     value: &Value,
     depth: usize,
+    remaining: &mut usize,
     seen: &mut HashSet<usize>,
 ) -> Result<(Value, usize), String> {
     if depth > MAX_CTX_DEPTH {
         return Err(format!("ngx::ctx nesting depth exceeds {MAX_CTX_DEPTH}"));
     }
+    if *remaining < NODE_OVERHEAD {
+        return Err(total_size_err());
+    }
     match value {
         Value::Callable(_) => Err("ngx::ctx cannot store callable values".into()),
-        Value::Null => Ok((Value::Null, NODE_OVERHEAD)),
-        Value::Bool(_) => Ok((value.clone(), NODE_OVERHEAD)),
-        Value::Int(_) => Ok((value.clone(), NODE_OVERHEAD)),
-        Value::Float(_) => Ok((value.clone(), NODE_OVERHEAD)),
+        Value::Null => {
+            charge(remaining, NODE_OVERHEAD)?;
+            Ok((Value::Null, NODE_OVERHEAD))
+        }
+        Value::Bool(_) | Value::Int(_) | Value::Float(_) => {
+            charge(remaining, NODE_OVERHEAD)?;
+            Ok((value.clone(), NODE_OVERHEAD))
+        }
         Value::String(text) => {
             if text.len() > MAX_CTX_SCALAR_BYTES {
                 return Err(format!(
@@ -236,6 +261,7 @@ fn deep_own(
             let size = NODE_OVERHEAD
                 .checked_add(text.len())
                 .ok_or_else(|| "ngx::ctx size overflow".to_string())?;
+            charge(remaining, size)?;
             Ok((Value::string(text.as_str().to_owned()), size))
         }
         Value::Bytes(bytes) => {
@@ -247,6 +273,7 @@ fn deep_own(
             let size = NODE_OVERHEAD
                 .checked_add(bytes.len())
                 .ok_or_else(|| "ngx::ctx size overflow".to_string())?;
+            charge(remaining, size)?;
             Ok((Value::bytes(bytes.as_ref().to_vec()), size))
         }
         Value::Array(items) => {
@@ -260,10 +287,14 @@ fn deep_own(
                     "ngx::ctx container exceeds {MAX_CTX_CONTAINER_ELEMS} elements"
                 ));
             }
+            if let Err(err) = charge(remaining, NODE_OVERHEAD) {
+                seen.remove(&ptr);
+                return Err(err);
+            }
             let mut owned = Vec::with_capacity(items.len());
             let mut size = NODE_OVERHEAD;
             for item in items.iter() {
-                let (child, child_size) = match deep_own(item, depth + 1, seen) {
+                let (child, child_size) = match deep_own(item, depth + 1, remaining, seen) {
                     Ok(result) => result,
                     Err(err) => {
                         seen.remove(&ptr);
@@ -293,17 +324,21 @@ fn deep_own(
                     "ngx::ctx container exceeds {MAX_CTX_CONTAINER_ELEMS} elements"
                 ));
             }
+            if let Err(err) = charge(remaining, NODE_OVERHEAD) {
+                seen.remove(&ptr);
+                return Err(err);
+            }
             let mut owned = VmMap::new();
             let mut size = NODE_OVERHEAD;
             for (key, item) in map.iter() {
-                let (owned_key, key_size) = match deep_own(key, depth + 1, seen) {
+                let (owned_key, key_size) = match deep_own(key, depth + 1, remaining, seen) {
                     Ok(result) => result,
                     Err(err) => {
                         seen.remove(&ptr);
                         return Err(err);
                     }
                 };
-                let (owned_item, item_size) = match deep_own(item, depth + 1, seen) {
+                let (owned_item, item_size) = match deep_own(item, depth + 1, remaining, seen) {
                     Ok(result) => result,
                     Err(err) => {
                         seen.remove(&ptr);
@@ -463,5 +498,72 @@ mod ctx_store_tests {
         }
         let err = ctx.set("overflow", &Value::Int(0)).expect_err("keys");
         assert!(err.contains("key count"), "{err}");
+    }
+
+    #[test]
+    fn deep_clone_aborts_before_late_sentinel_when_aggregate_exceeds_total() {
+        let mut ctx = RequestLocalCtx::new();
+        let chunk = Value::string("n".repeat(8181));
+        let mut items = vec![chunk; 8];
+        items.push(Value::string("S".repeat(MAX_CTX_SCALAR_BYTES + 1)));
+        let err = ctx
+            .set("a", &Value::array(items))
+            .expect_err("aggregate must exceed total before the sentinel");
+        assert!(
+            err.contains("total size"),
+            "must fail on total budget, not the late sentinel: {err}"
+        );
+        assert!(
+            !err.contains("scalar"),
+            "must abort before visiting the oversize sentinel: {err}"
+        );
+        assert!(ctx.is_empty());
+        assert_eq!(ctx.byte_size(), 0);
+    }
+
+    #[test]
+    fn inclusive_key_scalar_depth_and_exact_total_boundaries() {
+        let mut ctx = RequestLocalCtx::new();
+        ctx.set(&"k".repeat(MAX_CTX_KEY_BYTES), &Value::Int(1))
+            .expect("256-byte key must be allowed");
+        ctx.clear();
+
+        ctx.set("s", &Value::string("x".repeat(MAX_CTX_SCALAR_BYTES)))
+            .expect("8192-byte scalar must be allowed");
+        ctx.clear();
+
+        let mut nested = Value::Int(1);
+        for _ in 0..(MAX_CTX_DEPTH - 1) {
+            nested = Value::array(vec![nested]);
+        }
+        ctx.set("d", &nested)
+            .expect("depth 16 must be allowed");
+        ctx.clear();
+
+        let key = "abcdefgh";
+        let items = vec![Value::string("n".repeat(8181)); 8];
+        ctx.set(key, &Value::array(items))
+            .expect("exact 65536 total must be allowed");
+        assert_eq!(ctx.byte_size(), MAX_CTX_TOTAL_BYTES);
+        let err = ctx
+            .set("overflow", &Value::Int(1))
+            .expect_err("one extra byte must reject");
+        assert!(err.contains("total size") || err.contains("key count"), "{err}");
+        assert_eq!(ctx.byte_size(), MAX_CTX_TOTAL_BYTES);
+    }
+
+    #[test]
+    fn failed_delete_leaves_map_unchanged() {
+        let mut ctx = RequestLocalCtx::new();
+        ctx.set("keep", &Value::Int(7)).unwrap();
+        let before = ctx.byte_size();
+        assert_eq!(ctx.delete("missing").unwrap(), Value::Null);
+        assert_eq!(ctx.byte_size(), before);
+        match ctx.delete("keep").unwrap() {
+            Value::Int(7) => {}
+            other => panic!("delete must return the removed value, got {other:?}"),
+        }
+        assert!(ctx.is_empty());
+        assert_eq!(ctx.byte_size(), 0);
     }
 }
