@@ -39,6 +39,7 @@ pub const FORBIDDEN_DEFINED_NGINX_STUBS: &[&str] = &[
     "ngx_cycle",
     "ngx_core_module",
     "ngx_processes",
+    "ngx_http_get_variable",
 ];
 
 pub fn resolve_module_candidate(

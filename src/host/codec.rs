@@ -340,6 +340,38 @@ fn insert_decoded_arg(args: &mut VmMap, key: String, value: Value) {
     }
 }
 
+pub(crate) fn decode_query_args(query: &[u8], max_args: usize) -> (VmMap, bool) {
+    let mut args = VmMap::new();
+    let mut seen = 0usize;
+    let mut truncated = false;
+    if query.is_empty() {
+        return (args, false);
+    }
+    for part in query.split(|byte| *byte == b'&') {
+        if part.is_empty() {
+            continue;
+        }
+        if seen >= max_args {
+            truncated = true;
+            break;
+        }
+        let (raw_key, value) = match part.iter().position(|byte| *byte == b'=') {
+            Some(idx) => (
+                &part[..idx],
+                Value::string(bytes_as_string(unescape_bytes(&part[idx + 1..]))),
+            ),
+            None => (part, Value::Bool(true)),
+        };
+        let key = bytes_as_string(unescape_bytes(raw_key));
+        if key.is_empty() {
+            continue;
+        }
+        insert_decoded_arg(&mut args, key, value);
+        seen += 1;
+    }
+    (args, truncated)
+}
+
 /// Decodes an application/x-www-form-urlencoded string.
 ///
 /// Returns `{ args, truncated }`. `max_args` is `null` (default 100), a
@@ -364,34 +396,7 @@ pub fn decode_args(query: &str, max_args: &Value) -> VmResult<CallOutcome> {
         Some(value) => value,
     } as usize;
 
-    let mut args = VmMap::new();
-    let mut seen = 0usize;
-    let mut truncated = false;
-    if !query.is_empty() {
-        for part in query.split('&') {
-            if part.is_empty() {
-                continue;
-            }
-            if seen >= max_args {
-                truncated = true;
-                break;
-            }
-            let (raw_key, value) = match part.split_once('=') {
-                Some((key, raw_value)) => (
-                    key,
-                    Value::string(bytes_as_string(unescape_bytes(raw_value.as_bytes()))),
-                ),
-                None => (part, Value::Bool(true)),
-            };
-            let key = bytes_as_string(unescape_bytes(raw_key.as_bytes()));
-            if key.is_empty() {
-                continue;
-            }
-            insert_decoded_arg(&mut args, key, value);
-            seen += 1;
-        }
-    }
-
+    let (args, truncated) = decode_query_args(query.as_bytes(), max_args);
     let mut result = VmMap::new();
     result.insert(Value::string("args"), Value::Map(std::sync::Arc::new(args)));
     result.insert(Value::string("truncated"), Value::Bool(truncated));

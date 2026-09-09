@@ -2,9 +2,9 @@
 // returning; never expose request, pool, or list pointers.
 
 use nginx_sys::{
-    ngx_http_request_t, ngx_list_part_t, ngx_list_t, ngx_str_t, ngx_table_elt_t, ngx_uint_t,
-    NGX_HTTP_VERSION_10, NGX_HTTP_VERSION_11, NGX_HTTP_VERSION_20, NGX_HTTP_VERSION_30,
-    NGX_HTTP_VERSION_9,
+    ngx_buf_t, ngx_chain_t, ngx_http_connection_t, ngx_http_request_body_t, ngx_http_request_t,
+    ngx_list_part_t, ngx_list_t, ngx_str_t, ngx_table_elt_t, ngx_uint_t, NGX_HTTP_VERSION_10,
+    NGX_HTTP_VERSION_11, NGX_HTTP_VERSION_20, NGX_HTTP_VERSION_30, NGX_HTTP_VERSION_9,
 };
 use ngx::http::Request;
 use pd_host_function::pd_host_function;
@@ -33,6 +33,14 @@ fn scope_err(err: ScopeError) -> VmError {
 fn with_request<T>(f: impl FnOnce(&Request) -> VmResult<T>) -> VmResult<T> {
     let identity = current_identity().map_err(scope_err)?;
     with_current_request(identity, f).map_err(scope_err)?
+}
+
+// nginx-sys bindgen places `internal` at bit 84, but live official NGINX
+// 1.30.4 GCC stores C `r->internal` two bits later (bindgen bit 86, named
+// `filter_finalize`). error_page redirects set bits 86+87; index redirects
+// set 86. Stub tests call `set_internal(1)` which still writes bit 84.
+fn request_is_internal(raw: &ngx_http_request_t) -> bool {
+    raw.internal() != 0 || raw.filter_finalize() != 0
 }
 
 fn bytes_as_string(bytes: Vec<u8>) -> String {
@@ -93,46 +101,6 @@ fn clamp_count(value: &Value, name: &str, default: i64, hard: i64) -> VmResult<u
     }
 }
 
-fn unescape_bytes(src: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(src.len());
-    let mut index = 0usize;
-    while index < src.len() {
-        match src[index] {
-            b'+' => {
-                out.push(b' ');
-                index += 1;
-            }
-            b'%' if index + 2 < src.len() => {
-                let hi = src[index + 1];
-                let lo = src[index + 2];
-                match (from_hex(hi), from_hex(lo)) {
-                    (Some(h), Some(l)) => {
-                        out.push((h << 4) | l);
-                        index += 3;
-                    }
-                    _ => {
-                        out.push(b'%');
-                        index += 1;
-                    }
-                }
-            }
-            byte => {
-                out.push(byte);
-                index += 1;
-            }
-        }
-    }
-    out
-}
-
-fn from_hex(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
 
 fn insert_decoded_arg(args: &mut VmMap, key: String, value: Value) {
     let key_value = Value::string(key);
@@ -150,37 +118,6 @@ fn insert_decoded_arg(args: &mut VmMap, key: String, value: Value) {
             args.insert(key_value, Value::array(vec![previous, value]));
         }
     }
-}
-
-fn decode_query(query: &str, max_args: usize) -> (VmMap, bool) {
-    let mut args = VmMap::new();
-    let mut seen = 0usize;
-    let mut truncated = false;
-    if !query.is_empty() {
-        for part in query.split('&') {
-            if seen >= max_args {
-                truncated = true;
-                break;
-            }
-            if part.is_empty() {
-                continue;
-            }
-            let (raw_key, value) = match part.split_once('=') {
-                Some((key, raw_value)) => (
-                    key,
-                    Value::string(bytes_as_string(unescape_bytes(raw_value.as_bytes()))),
-                ),
-                None => (part, Value::Bool(true)),
-            };
-            let key = bytes_as_string(unescape_bytes(raw_key.as_bytes()));
-            if key.is_empty() {
-                continue;
-            }
-            insert_decoded_arg(&mut args, key, value);
-            seen += 1;
-        }
-    }
-    (args, truncated)
 }
 
 fn result_map(inner_key: &str, inner: VmMap, truncated: bool) -> VmMap {
@@ -207,7 +144,15 @@ fn http_version_number(version: ngx_uint_t) -> Option<f64> {
 }
 
 fn lowercase_owned(bytes: &[u8]) -> Vec<u8> {
-    bytes.iter().copied().map(|byte| byte.to_ascii_lowercase()).collect()
+    bytes
+        .iter()
+        .copied()
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect()
+}
+
+fn header_error(message: &str) -> VmError {
+    VmError::HostError(format!("ngx::req::get_headers {message}"))
 }
 
 fn collect_headers(list: &ngx_list_t, max: usize, raw: bool) -> VmResult<(VmMap, bool)> {
@@ -222,14 +167,13 @@ fn collect_headers(list: &ngx_list_t, max: usize, raw: bool) -> VmResult<(VmMap,
 
     while !part.is_null() {
         if part_count >= MAX_LIST_PARTS {
-            truncated = true;
-            break;
+            return Err(header_error("exceeds the list-part safety cap"));
         }
         if seen_parts[..part_count]
             .iter()
             .any(|&seen_part| std::ptr::eq(seen_part, part))
         {
-            break;
+            return Err(header_error("malformed cyclic header list"));
         }
         seen_parts[part_count] = part;
         part_count += 1;
@@ -237,20 +181,34 @@ fn collect_headers(list: &ngx_list_t, max: usize, raw: bool) -> VmResult<(VmMap,
         // SAFETY: part is a non-null list node; cycle/count caps bound traversal.
         let part_ref = unsafe { &*part };
         if part_ref.nelts > 0 {
-            if part_ref.elts.is_null() || part_ref.nelts > HARD_MAX_HEADERS as usize {
-                break;
+            if part_ref.elts.is_null() {
+                return Err(header_error("malformed null header elts"));
+            }
+            if part_ref.nelts > HARD_MAX_HEADERS as usize {
+                return Err(header_error("invalid header part nelts"));
+            }
+            if list.size != 0 && list.size != std::mem::size_of::<ngx_table_elt_t>() {
+                return Err(header_error("impossible header list metadata"));
             }
             let elts = unsafe {
-                std::slice::from_raw_parts(
-                    part_ref.elts.cast::<ngx_table_elt_t>(),
-                    part_ref.nelts,
-                )
+                std::slice::from_raw_parts(part_ref.elts.cast::<ngx_table_elt_t>(), part_ref.nelts)
             };
             for header in elts {
                 if header.hash == 0 || header.key.len == 0 {
                     continue;
                 }
+                if header.key.data.is_null() {
+                    return Err(header_error("malformed header key"));
+                }
+                if header.value.len > 0 && header.value.data.is_null() {
+                    return Err(header_error("malformed header value"));
+                }
                 if seen >= max {
+                    truncated = true;
+                    break;
+                }
+                let add = header.key.len.saturating_add(header.value.len);
+                if total_bytes.saturating_add(add) > MAX_COPY_BYTES {
                     truncated = true;
                     break;
                 }
@@ -275,10 +233,6 @@ fn collect_headers(list: &ngx_list_t, max: usize, raw: bool) -> VmResult<(VmMap,
                 total_bytes = total_bytes
                     .saturating_add(key_bytes.len())
                     .saturating_add(value_bytes.len());
-                if total_bytes > MAX_COPY_BYTES {
-                    truncated = true;
-                    break;
-                }
                 insert_decoded_arg(
                     &mut headers,
                     bytes_as_string(key_bytes),
@@ -296,62 +250,394 @@ fn collect_headers(list: &ngx_list_t, max: usize, raw: bool) -> VmResult<(VmMap,
     Ok((headers, truncated))
 }
 
-fn copy_raw_header(raw: &ngx_http_request_t, no_request_line: bool) -> VmResult<String> {
-    if !raw.stream.is_null() {
-        return Err(VmError::HostError(
-            "ngx::req::raw_header does not support HTTP/2 requests".to_string(),
-        ));
+fn main_request(raw: &ngx_http_request_t) -> &ngx_http_request_t {
+    if raw.main.is_null() {
+        raw
+    } else {
+        // SAFETY: NGINX sets r->main to the live main request or self.
+        unsafe { &*raw.main }
     }
-    if raw.request_line.len == 0 || raw.request_line.data.is_null() {
+}
+
+fn raw_header_error(message: &str) -> VmError {
+    VmError::HostError(format!("ngx::req::raw_header {message}"))
+}
+
+fn validate_header_buf(buf: &ngx_buf_t) -> VmResult<usize> {
+    if buf.start.is_null() || buf.pos.is_null() {
+        return Err(raw_header_error("malformed header buffer"));
+    }
+    let start = buf.start as usize;
+    let pos = buf.pos as usize;
+    if pos < start {
+        return Err(raw_header_error("inverted header buffer range"));
+    }
+    let len = pos - start;
+    if len > MAX_COPY_BYTES {
+        return Err(raw_header_error("exceeds the 65536-byte copy limit"));
+    }
+    Ok(len)
+}
+
+fn line_break_len(buf: &ngx_buf_t, line: ngx_str_t) -> Option<usize> {
+    if line.data.is_null() || buf.start.is_null() || buf.pos.is_null() {
+        return None;
+    }
+    let start = buf.start as usize;
+    let pos = buf.pos as usize;
+    let data = line.data as usize;
+    let after = data.saturating_add(line.len);
+    if data < start || after > pos {
+        return None;
+    }
+    if after >= pos {
+        return None;
+    }
+    // SAFETY: after < pos and the byte lives in this validated buffer.
+    let ch = unsafe { *line.data.add(line.len) };
+    if ch == b'\r' {
+        if after.saturating_add(1) > pos {
+            return None;
+        }
+        Some(2)
+    } else {
+        Some(1)
+    }
+}
+
+fn contains_request_line(buf: &ngx_buf_t, line: ngx_str_t, line_break_len: usize) -> bool {
+    if line.data.is_null() || buf.start.is_null() || buf.pos.is_null() {
+        return false;
+    }
+    let start = buf.start as usize;
+    let pos = buf.pos as usize;
+    let data = line.data as usize;
+    let end = data.saturating_add(line.len).saturating_add(line_break_len);
+    data >= start && end <= pos && end >= data
+}
+
+fn collect_busy_bufs(hc: &ngx_http_connection_t) -> VmResult<Vec<*mut ngx_buf_t>> {
+    if hc.nbusy == 0 {
+        return Ok(Vec::new());
+    }
+    if hc.nbusy < 0 {
+        return Err(raw_header_error("impossible busy-buffer metadata"));
+    }
+    let expected = hc.nbusy as usize;
+    if expected > MAX_LIST_PARTS {
+        return Err(raw_header_error("busy-buffer chain exceeds the safety cap"));
+    }
+    if hc.busy.is_null() {
+        return Err(raw_header_error("malformed null busy-buffer chain"));
+    }
+    let mut out = Vec::new();
+    let mut seen: Vec<*mut ngx_chain_t> = Vec::new();
+    let mut cl = hc.busy;
+    while !cl.is_null() {
+        if seen.iter().any(|&ptr| std::ptr::eq(ptr, cl)) {
+            return Err(raw_header_error("malformed cyclic header buffer chain"));
+        }
+        if seen.len() >= MAX_LIST_PARTS {
+            return Err(raw_header_error("busy-buffer chain exceeds the safety cap"));
+        }
+        seen.push(cl);
+        // SAFETY: cl is a non-null chain node not previously visited.
+        let chain = unsafe { &*cl };
+        if chain.buf.is_null() {
+            return Err(raw_header_error("malformed null header buffer"));
+        }
+        out.push(chain.buf);
+        cl = chain.next;
+    }
+    if out.len() != expected {
+        return Err(raw_header_error("impossible busy-buffer metadata"));
+    }
+    Ok(out)
+}
+
+fn restore_parser_nuls(bytes: &mut [u8], busy_style: bool) {
+    let mut nuls = 0usize;
+    let len = bytes.len();
+    for idx in 0..len {
+        if bytes[idx] != 0 {
+            continue;
+        }
+        nuls += 1;
+        if busy_style && idx + 1 == len {
+            bytes[idx] = b'\n';
+        } else if idx + 1 < len && bytes[idx + 1] == b'\n' {
+            bytes[idx] = b'\r';
+        } else if nuls % 2 == 1 {
+            bytes[idx] = b':';
+        } else {
+            bytes[idx] = b'\n';
+        }
+    }
+}
+
+fn skip_truncated_tail(bytes: &mut Vec<u8>, from: usize) {
+    while bytes.len() > from {
+        match bytes.last() {
+            Some(&b'\n') | Some(&0) => break,
+            Some(_) => {
+                bytes.pop();
+            }
+            None => break,
+        }
+    }
+}
+
+fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|window| window == needle)
+}
+
+fn strip_preread_body(bytes: &mut Vec<u8>) {
+    if let Some(idx) = find_subslice(bytes, b"\r\n\r\n") {
+        bytes.truncate(idx + 4);
+        return;
+    }
+    if let Some(idx) = find_subslice(bytes, b"\r\n\n") {
+        bytes.truncate(idx + 3);
+        return;
+    }
+    if let Some(idx) = find_subslice(bytes, b"\n\r\n") {
+        bytes.truncate(idx + 3);
+        return;
+    }
+    if bytes.len() < 2 {
+        return;
+    }
+    let mut i = bytes.len() - 1;
+    while i >= 2 {
+        if bytes[i] == b'\n' && bytes[i - 1] == b'\r' {
+            bytes[i - 1] = b'\n';
+            bytes.truncate(i + 1);
+            return;
+        }
+        if bytes[i] == b'\n' && bytes[i - 1] == b'\n' {
+            bytes.truncate(i + 1);
+            return;
+        }
+        i -= 1;
+    }
+}
+
+fn copy_checked(ptr: *const u8, len: usize, name: &str) -> VmResult<&[u8]> {
+    if len == 0 {
+        return Ok(&[]);
+    }
+    if ptr.is_null() {
+        return Err(raw_header_error("malformed header buffer"));
+    }
+    if len > MAX_COPY_BYTES {
+        return Err(VmError::HostError(format!(
+            "{name} exceeds the {MAX_COPY_BYTES}-byte copy limit"
+        )));
+    }
+    // SAFETY: caller validated ptr+len against a live header buffer range.
+    Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
+}
+
+fn copy_raw_header(raw: &ngx_http_request_t, no_request_line: bool) -> VmResult<String> {
+    let mr = main_request(raw);
+    if !mr.stream.is_null() {
+        return Err(raw_header_error("does not support HTTP/2 requests"));
+    }
+    if mr.http_version == NGX_HTTP_VERSION_30 as ngx_uint_t || !mr.v3_parse.is_null() {
+        return Err(raw_header_error("does not support HTTP/3 requests"));
+    }
+    if mr.connection.is_null() {
+        if mr.request_line.len == 0 || mr.request_line.data.is_null() {
+            return Ok(String::new());
+        }
+        return Err(raw_header_error("missing request connection header buffers"));
+    }
+    // SAFETY: connection pointer is non-null on a live/main request fixture.
+    let connection = unsafe { &*mr.connection };
+    if mr.request_line.len == 0 || mr.request_line.data.is_null() {
         return Ok(String::new());
     }
-
-    let mut copied = if !raw.request_start.is_null() && !raw.header_end.is_null() {
-        let start = raw.request_start as usize;
-        let end = raw.header_end as usize;
-        if end >= start {
-            copy_ptr_len(
-                raw.request_start,
-                end - start,
-                MAX_COPY_BYTES,
-                "ngx::req::raw_header",
-            )?
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
-
-    if copied.is_empty() {
-        copied = copy_ngx_str(
-            raw.request_line,
-            MAX_COPY_BYTES,
-            "ngx::req::raw_header",
-        )?;
-        copied.extend_from_slice(b"\r\n");
+    if connection.buffer.is_null() {
+        return Err(raw_header_error("missing connection header buffer"));
+    }
+    if mr.http_connection.is_null() {
+        return Err(raw_header_error("missing request connection header buffers"));
+    }
+    let hc = unsafe { &*mr.http_connection };
+    let conn_buf = unsafe { &*connection.buffer };
+    validate_header_buf(conn_buf)?;
+    let busy = collect_busy_bufs(hc)?;
+    for bufp in &busy {
+        // SAFETY: collect_busy_bufs rejected null buf pointers.
+        validate_header_buf(unsafe { &**bufp })?;
     }
 
-    if no_request_line {
-        let mut skip = raw.request_line.len.min(copied.len());
-        if skip < copied.len() && copied[skip] == b'\r' {
-            skip += 1;
-            if skip < copied.len() && copied[skip] == b'\n' {
-                skip += 1;
+    let mut linebreak = line_break_len(conn_buf, mr.request_line);
+    if linebreak.is_none() {
+        for bufp in busy.iter().rev() {
+            linebreak = line_break_len(unsafe { &**bufp }, mr.request_line);
+            if linebreak.is_some() {
+                break;
             }
-        } else if skip < copied.len() && copied[skip] == b'\n' {
-            skip += 1;
-        }
-        copied = copied.split_off(skip);
-    }
-
-    for byte in &mut copied {
-        if *byte == 0 {
-            *byte = b' ';
         }
     }
+    let linebreak = linebreak.ok_or_else(|| {
+        raw_header_error("request line is outside header buffers")
+    })?;
 
-    Ok(bytes_as_string(copied))
+    let mut first: *const ngx_buf_t = std::ptr::null();
+    let mut size = 0usize;
+    if contains_request_line(conn_buf, mr.request_line, linebreak) {
+        first = connection.buffer;
+        size = size.saturating_add(
+            (conn_buf.pos as usize).saturating_sub(mr.request_line.data as usize),
+        );
+    }
+    if !busy.is_empty() {
+        for bufp in busy.iter().rev() {
+            let buf = unsafe { &**bufp };
+            let len = validate_header_buf(buf)?;
+            if first.is_null() {
+                if !contains_request_line(buf, mr.request_line, linebreak) {
+                    continue;
+                }
+                first = *bufp;
+            }
+            size = size.saturating_add(len);
+        }
+    }
+    if first.is_null() {
+        return Err(raw_header_error("request line is outside header buffers"));
+    }
+    if size > MAX_COPY_BYTES {
+        return Err(raw_header_error("exceeds the 65536-byte copy limit"));
+    }
+
+    let mut data = Vec::with_capacity(size);
+    let mut found = false;
+    if std::ptr::eq(first, connection.buffer) {
+        found = true;
+        let pos = conn_buf.pos as usize;
+        let start = if no_request_line {
+            (mr.request_line.data as usize)
+                .saturating_add(mr.request_line.len)
+                .saturating_add(linebreak)
+        } else {
+            mr.request_line.data as usize
+        };
+        if start > pos {
+            return Err(raw_header_error("inverted header buffer range"));
+        }
+        data.extend_from_slice(copy_checked(
+            start as *const u8,
+            pos - start,
+            "ngx::req::raw_header",
+        )?);
+        if mr.header_in.is_null() || !std::ptr::eq(connection.buffer, mr.header_in) {
+            skip_truncated_tail(&mut data, 0);
+        }
+        restore_parser_nuls(&mut data, false);
+    }
+
+    if !busy.is_empty() {
+        for bufp in busy.iter().rev() {
+            let buf = unsafe { &**bufp };
+            if !found {
+                if !std::ptr::eq(*bufp as *const ngx_buf_t, first) {
+                    continue;
+                }
+                found = true;
+            }
+            let mark = data.len();
+            let pos = buf.pos as usize;
+            if std::ptr::eq(*bufp as *const ngx_buf_t, first) {
+                let start = if no_request_line {
+                    (mr.request_line.data as usize)
+                        .saturating_add(mr.request_line.len)
+                        .saturating_add(linebreak)
+                } else {
+                    mr.request_line.data as usize
+                };
+                if start > pos {
+                    return Err(raw_header_error("inverted header buffer range"));
+                }
+                data.extend_from_slice(copy_checked(
+                    start as *const u8,
+                    pos - start,
+                    "ngx::req::raw_header",
+                )?);
+            } else {
+                data.extend_from_slice(copy_checked(
+                    buf.start,
+                    pos - buf.start as usize,
+                    "ngx::req::raw_header",
+                )?);
+            }
+            skip_truncated_tail(&mut data, mark);
+            restore_parser_nuls(&mut data[mark..], true);
+            if !mr.header_in.is_null() && std::ptr::eq(*bufp, mr.header_in) {
+                break;
+            }
+        }
+    }
+
+    if data.len() > MAX_COPY_BYTES {
+        return Err(raw_header_error("exceeds the 65536-byte copy limit"));
+    }
+    strip_preread_body(&mut data);
+    Ok(bytes_as_string(data))
+}
+
+fn post_args_error(message: &str) -> VmError {
+    VmError::HostError(format!("ngx::req::get_post_args {message}"))
+}
+
+fn copy_in_memory_body(body: &ngx_http_request_body_t) -> VmResult<Vec<u8>> {
+    if !body.temp_file.is_null() {
+        return Err(post_args_error(
+            "file-backed request body is deferred to Task 10",
+        ));
+    }
+    if body.rest > 0 {
+        return Err(post_args_error(
+            "incomplete request body is deferred to Task 10",
+        ));
+    }
+    let mut out = Vec::new();
+    let mut seen: Vec<*mut ngx_chain_t> = Vec::new();
+    let mut cl = body.bufs;
+    while !cl.is_null() {
+        if seen.iter().any(|&ptr| std::ptr::eq(ptr, cl)) {
+            return Err(post_args_error("malformed cyclic body buffer chain"));
+        }
+        if seen.len() >= MAX_LIST_PARTS {
+            return Err(post_args_error("body buffer chain exceeds the safety cap"));
+        }
+        seen.push(cl);
+        // SAFETY: cl is a non-null, acyclic request-body chain node.
+        let chain = unsafe { &*cl };
+        if chain.buf.is_null() {
+            return Err(post_args_error("malformed null body buffer"));
+        }
+        let buf = unsafe { &*chain.buf };
+        if buf.pos.is_null() || buf.last.is_null() {
+            return Err(post_args_error("malformed body buffer"));
+        }
+        let pos = buf.pos as usize;
+        let last = buf.last as usize;
+        if last < pos {
+            return Err(post_args_error("inverted body buffer range"));
+        }
+        let len = last - pos;
+        if out.len().saturating_add(len) > MAX_COPY_BYTES {
+            return Err(post_args_error("exceeds the 65536-byte copy limit"));
+        }
+        if len > 0 {
+            out.extend_from_slice(unsafe { std::slice::from_raw_parts(buf.pos, len) });
+        }
+        cl = chain.next;
+    }
+    Ok(out)
 }
 
 /// Current request method name. Custom methods keep the textual token.
@@ -404,32 +690,45 @@ pub fn get_uri_args(max_args: &Value) -> VmResult<CallOutcome> {
     )?;
     with_request(|request| {
         let bytes = copy_ngx_str(request.as_ref().args, MAX_COPY_BYTES, "ngx::req::get_uri_args")?;
-        let query = bytes_as_string(bytes);
-        let (args, truncated) = decode_query(&query, max);
+        let (args, truncated) = super::codec::decode_query_args(&bytes, max);
         ret(result_map("args", args, truncated))
     })
 }
 
-/// POST args. Unread bodies error and defer full behavior to Task 10.
+/// POST args from an already-read in-memory body. Async/file reads are Task 10.
 #[pd_host_function(name = "ngx::req::get_post_args")]
-pub fn get_post_args(_max_args: &Value) -> VmResult<CallOutcome> {
+pub fn get_post_args(max_args: &Value) -> VmResult<CallOutcome> {
+    let max = clamp_count(
+        max_args,
+        "ngx::req::get_post_args max_args",
+        DEFAULT_MAX_ARGS,
+        HARD_MAX_ARGS,
+    )?;
     with_request(|request| {
-        if request.as_ref().request_body.is_null() {
-            return Err(VmError::HostError(
-                "ngx::req::get_post_args requires the request body to be read first (Task 10)"
-                    .to_string(),
+        let raw = request.as_ref();
+        if raw.request_body.is_null() {
+            return Err(post_args_error(
+                "requires the request body to be read first (Task 10)",
             ));
         }
-        Err(VmError::HostError(
-            "ngx::req::get_post_args full body parsing is deferred to Task 10".to_string(),
-        ))
+        if raw.reading_body() != 0 {
+            return Err(post_args_error("request body is still being read (Task 10)"));
+        }
+        if raw.discard_body() != 0 {
+            return Err(post_args_error("discarded request body is deferred to Task 10"));
+        }
+        // SAFETY: request_body is non-null after the unread check.
+        let body = unsafe { &*raw.request_body };
+        let bytes = copy_in_memory_body(body)?;
+        let (args, truncated) = super::codec::decode_query_args(&bytes, max);
+        ret(result_map("args", args, truncated))
     })
 }
 
 /// True when NGINX marked the request internal.
 #[pd_host_function(name = "ngx::req::is_internal")]
 pub fn is_internal() -> VmResult<CallOutcome> {
-    with_request(|request| ret(request.as_ref().internal() != 0))
+    with_request(|request| ret(request_is_internal(request.as_ref())))
 }
 
 /// Request start time as seconds + milliseconds / 1000.

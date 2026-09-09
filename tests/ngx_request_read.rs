@@ -14,8 +14,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nginx_sys::{
-    NGX_HTTP_VERSION_10, NGX_HTTP_VERSION_11, ngx_http_request_t, ngx_list_part_t, ngx_str_t,
-    ngx_table_elt_t,
+    NGX_HTTP_VERSION_10, NGX_HTTP_VERSION_11, NGX_HTTP_VERSION_20, NGX_HTTP_VERSION_30, ngx_buf_t,
+    ngx_chain_t, ngx_connection_t, ngx_http_connection_t, ngx_http_request_body_t,
+    ngx_http_request_t, ngx_http_v2_stream_t, ngx_list_part_t, ngx_str_t, ngx_table_elt_t,
+    ngx_temp_file_t,
 };
 use ngx_rustscript::config::{
     ConfigError, compile_rss_source, reject_program_imports, validate_program_imports_for_phase,
@@ -118,6 +120,152 @@ fn dummy_request() -> Box<ngx_http_request_t> {
     let ptr = (&mut *req) as *mut ngx_http_request_t;
     req.main = ptr;
     req
+}
+
+fn zeroed_box<T>() -> Box<T> {
+    Box::new(unsafe { MaybeUninit::<T>::zeroed().assume_init() })
+}
+
+#[allow(clippy::vec_box)]
+struct LiveHeaderBuffers {
+    _conn: Box<ngx_connection_t>,
+    _hc: Box<ngx_http_connection_t>,
+    _bufs: Vec<Box<ngx_buf_t>>,
+    _chains: Vec<Box<ngx_chain_t>>,
+    _dummy: Option<Vec<u8>>,
+}
+
+fn fill_header_buf(storage: &mut [u8]) -> Box<ngx_buf_t> {
+    let mut buf = zeroed_box::<ngx_buf_t>();
+    buf.start = storage.as_mut_ptr();
+    buf.pos = unsafe { storage.as_mut_ptr().add(storage.len()) };
+    buf.last = buf.pos;
+    buf.end = buf.pos;
+    buf
+}
+
+fn install_single_header_buffer(
+    req: &mut ngx_http_request_t,
+    storage: &mut [u8],
+    request_line_len: usize,
+) -> LiveHeaderBuffers {
+    let mut buf = fill_header_buf(storage);
+    let mut conn = zeroed_box::<ngx_connection_t>();
+    conn.buffer = buf.as_mut() as *mut ngx_buf_t;
+    let mut hc = zeroed_box::<ngx_http_connection_t>();
+    req.connection = conn.as_mut() as *mut ngx_connection_t;
+    req.http_connection = hc.as_mut() as *mut ngx_http_connection_t as *mut _;
+    req.header_in = buf.as_mut() as *mut ngx_buf_t;
+    req.request_line = ngx_str_t {
+        len: request_line_len,
+        data: storage.as_mut_ptr(),
+    };
+    req.request_start = std::ptr::null_mut();
+    req.header_end = std::ptr::null_mut();
+    LiveHeaderBuffers {
+        _conn: conn,
+        _hc: hc,
+        _bufs: vec![buf],
+        _chains: Vec::new(),
+        _dummy: None,
+    }
+}
+
+fn install_busy_header_buffers(
+    req: &mut ngx_http_request_t,
+    chunks: &mut [Vec<u8>],
+    request_line_len: usize,
+) -> LiveHeaderBuffers {
+    assert!(!chunks.is_empty());
+    let mut dummy_storage = b"not-the-request-line".to_vec();
+    let mut dummy_buf = fill_header_buf(&mut dummy_storage);
+    let mut conn = zeroed_box::<ngx_connection_t>();
+    conn.buffer = dummy_buf.as_mut() as *mut ngx_buf_t;
+
+    let mut bufs: Vec<Box<ngx_buf_t>> = chunks
+        .iter_mut()
+        .map(|chunk| fill_header_buf(chunk))
+        .collect();
+    let mut chains: Vec<Box<ngx_chain_t>> = (0..bufs.len())
+        .map(|_| zeroed_box::<ngx_chain_t>())
+        .collect();
+    // NGINX busy chain is newest-first: last chunk -> ... -> first chunk.
+    for index in (0..chains.len()).rev() {
+        chains[index].buf = bufs[index].as_mut() as *mut ngx_buf_t;
+        if index == 0 {
+            chains[index].next = std::ptr::null_mut();
+        } else {
+            let prev = chains[index - 1].as_mut() as *mut ngx_chain_t;
+            chains[index].next = prev;
+        }
+    }
+    let newest = chains.len() - 1;
+    let mut hc = zeroed_box::<ngx_http_connection_t>();
+    hc.busy = chains[newest].as_mut() as *mut ngx_chain_t;
+    hc.nbusy = chains.len() as _;
+    req.connection = conn.as_mut() as *mut ngx_connection_t;
+    req.http_connection = hc.as_mut() as *mut ngx_http_connection_t as *mut _;
+    req.header_in = bufs[newest].as_mut() as *mut ngx_buf_t;
+    req.request_line = ngx_str_t {
+        len: request_line_len,
+        data: chunks[0].as_mut_ptr(),
+    };
+    req.request_start = std::ptr::null_mut();
+    req.header_end = std::ptr::null_mut();
+    let mut all_bufs = vec![dummy_buf];
+    all_bufs.append(&mut bufs);
+    LiveHeaderBuffers {
+        _conn: conn,
+        _hc: hc,
+        _bufs: all_bufs,
+        _chains: chains,
+        _dummy: Some(dummy_storage),
+    }
+}
+
+#[allow(clippy::vec_box)]
+struct LiveBody {
+    body: Box<ngx_http_request_body_t>,
+    _bufs: Vec<Box<ngx_buf_t>>,
+    _chains: Vec<Box<ngx_chain_t>>,
+}
+
+fn install_in_memory_body(req: &mut ngx_http_request_t, chunks: &mut [Vec<u8>]) -> LiveBody {
+    let mut body = zeroed_box::<ngx_http_request_body_t>();
+    let mut bufs: Vec<Box<ngx_buf_t>> = chunks
+        .iter_mut()
+        .map(|chunk| {
+            let mut buf = zeroed_box::<ngx_buf_t>();
+            buf.start = chunk.as_mut_ptr();
+            buf.pos = chunk.as_mut_ptr();
+            buf.last = unsafe { chunk.as_mut_ptr().add(chunk.len()) };
+            buf.end = buf.last;
+            buf
+        })
+        .collect();
+    let mut chains: Vec<Box<ngx_chain_t>> = (0..bufs.len())
+        .map(|_| zeroed_box::<ngx_chain_t>())
+        .collect();
+    for index in 0..chains.len() {
+        chains[index].buf = bufs[index].as_mut() as *mut ngx_buf_t;
+        chains[index].next = if index + 1 < chains.len() {
+            chains[index + 1].as_mut() as *mut ngx_chain_t
+        } else {
+            std::ptr::null_mut()
+        };
+    }
+    body.bufs = if chains.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        chains[0].as_mut() as *mut ngx_chain_t
+    };
+    body.temp_file = std::ptr::null_mut();
+    req.request_body = body.as_mut() as *mut ngx_http_request_body_t;
+    LiveBody {
+        body,
+        _bufs: bufs,
+        _chains: chains,
+    }
 }
 
 fn ngx_str(bytes: &mut [u8]) -> ngx_str_t {
@@ -463,6 +611,49 @@ fn get_uri_args_uses_request_args_with_decode_args_shape() {
 }
 
 #[test]
+fn get_uri_args_matches_decode_args_trailing_amp_invalid_percent_nul_empty_keys_and_max_zero() {
+    let mut req = dummy_request();
+    let mut args = b"a=1&b=2&".to_vec();
+    req.args = ngx_str(&mut args);
+    let ptr = (&mut *req) as *mut ngx_http_request_t;
+    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_uri_args(2);\n").expect("trail");
+    assert_eq!(
+        map_get(expect_map(&decoded), "truncated"),
+        &Value::Bool(false),
+        "trailing empty & at max_args must not mark truncated"
+    );
+
+    let mut args = b"a=%ZZb&b=%00c&=skip&ok=1".to_vec();
+    req.args = ngx_str(&mut args);
+    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_uri_args(null);\n").expect("pct");
+    let parsed = expect_map(map_get(expect_map(&decoded), "args"));
+    assert_eq!(map_get(parsed, "a"), &Value::string("%ZZb"));
+    assert_eq!(map_get(parsed, "b"), &Value::string("\0c"));
+    assert!(parsed.get(&Value::string("")).is_none());
+    assert_eq!(map_get(parsed, "ok"), &Value::string("1"));
+
+    let codec =
+        eval("use ngx;\nngx::decode_args(\"a=%ZZb&b=%00c&=skip&ok=1\", null);\n").expect("codec");
+    assert_eq!(
+        decoded, codec,
+        "get_uri_args must share decode_args behavior"
+    );
+
+    let mut many = (0..1024)
+        .map(|i| format!("k{i}=1"))
+        .collect::<Vec<_>>()
+        .join("&")
+        .into_bytes();
+    req.args = ngx_str(&mut many);
+    let at_cap = eval_in_request(ptr, "use ngx;\nngx::req::get_uri_args(0);\n").expect("max0");
+    assert_eq!(
+        map_get(expect_map(&at_cap), "truncated"),
+        &Value::Bool(false)
+    );
+    assert_eq!(expect_map(map_get(expect_map(&at_cap), "args")).len(), 1024);
+}
+
+#[test]
 fn get_headers_canonical_raw_duplicates_empty_and_truncation() {
     let mut req = dummy_request();
     let mut host_key = b"Host".to_vec();
@@ -527,6 +718,43 @@ fn get_headers_canonical_raw_duplicates_empty_and_truncation() {
 }
 
 #[test]
+fn get_headers_multipart_count_and_byte_caps_set_truncated_without_partial_false() {
+    let mut req = dummy_request();
+    let mut keys = [
+        (b"X-A".to_vec(), b"x-a".to_vec(), b"1".to_vec()),
+        (b"X-B".to_vec(), b"x-b".to_vec(), b"2".to_vec()),
+        (b"X-C".to_vec(), b"x-c".to_vec(), b"3".to_vec()),
+        (b"X-D".to_vec(), b"x-d".to_vec(), b"4".to_vec()),
+    ];
+    let mut part1 = [
+        header_elt(&mut keys[0].0, &mut keys[0].1, &mut keys[0].2, 1),
+        header_elt(&mut keys[1].0, &mut keys[1].1, &mut keys[1].2, 2),
+    ];
+    let mut part2 = [
+        header_elt(&mut keys[2].0, &mut keys[2].1, &mut keys[2].2, 3),
+        header_elt(&mut keys[3].0, &mut keys[3].1, &mut keys[3].2, 4),
+    ];
+    let mut second = ngx_list_part_t {
+        elts: part2.as_mut_ptr().cast(),
+        nelts: part2.len(),
+        next: std::ptr::null_mut(),
+    };
+    req.headers_in.headers.part.elts = part1.as_mut_ptr().cast();
+    req.headers_in.headers.part.nelts = part1.len();
+    req.headers_in.headers.part.next = &mut second;
+    req.headers_in.headers.last = &mut second;
+    req.headers_in.headers.size = std::mem::size_of::<ngx_table_elt_t>();
+    req.headers_in.headers.nalloc = 2;
+    let ptr = (&mut *req) as *mut ngx_http_request_t;
+    let capped = eval_in_request(ptr, "use ngx;\nngx::req::get_headers(3, null);\n").expect("cap");
+    let root = expect_map(&capped);
+    assert_eq!(map_get(root, "truncated"), &Value::Bool(true));
+    let headers = expect_map(map_get(root, "headers"));
+    assert_eq!(headers.len(), 3);
+    assert!(headers.get(&Value::string("x-d")).is_none());
+}
+
+#[test]
 fn get_headers_skips_hash_zero_and_stops_on_corrupt_lists() {
     let mut req = dummy_request();
     let mut live_key = b"X-Live".to_vec();
@@ -549,11 +777,13 @@ fn get_headers_skips_hash_zero_and_stops_on_corrupt_lists() {
 
     req.headers_in.headers.part.elts = std::ptr::null_mut();
     req.headers_in.headers.part.nelts = 8;
-    let empty = eval_in_request(ptr, "use ngx;\nngx::req::get_headers(null, null);\n")
-        .expect("null elts must not crash");
-    assert_eq!(
-        map_get(expect_map(&empty), "truncated"),
-        &Value::Bool(false)
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_headers(null, null);\n")
+        .expect_err("null elts with nelts>0 must be a host error");
+    assert!(
+        err.to_ascii_lowercase().contains("header")
+            || err.to_ascii_lowercase().contains("malformed")
+            || err.to_ascii_lowercase().contains("invalid"),
+        "corrupt elts must surface a structured host error, got {err}"
     );
 
     let mut cycle = ngx_list_part_t {
@@ -563,8 +793,15 @@ fn get_headers_skips_hash_zero_and_stops_on_corrupt_lists() {
     };
     cycle.next = &mut cycle;
     req.headers_in.headers.part = cycle;
-    eval_in_request(ptr, "use ngx;\nngx::req::get_headers(null, null);\n")
-        .expect("cyclic list must not hang");
+    let cycle_err = eval_in_request(ptr, "use ngx;\nngx::req::get_headers(null, null);\n")
+        .expect_err("cyclic list must be a host error");
+    assert!(
+        cycle_err.to_ascii_lowercase().contains("header")
+            || cycle_err.to_ascii_lowercase().contains("cycle")
+            || cycle_err.to_ascii_lowercase().contains("malformed")
+            || cycle_err.to_ascii_lowercase().contains("invalid"),
+        "cyclic list must surface a structured host error, got {cycle_err}"
+    );
 }
 
 #[test]
@@ -572,24 +809,172 @@ fn raw_header_copies_request_line_and_optional_skip() {
     let mut req = dummy_request();
     let mut buf = b"GET /t HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec();
     let line_len = b"GET /t HTTP/1.1".len();
-    req.request_line = ngx_str_t {
-        len: line_len,
-        data: buf.as_mut_ptr(),
-    };
-    req.request_start = buf.as_mut_ptr();
-    req.header_end = unsafe { buf.as_mut_ptr().add(buf.len()) };
+    let _live = install_single_header_buffer(&mut req, &mut buf, line_len);
     let ptr = (&mut *req) as *mut ngx_http_request_t;
     let raw = expect_string(
         eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n").expect("raw"),
     );
     assert!(raw.contains("GET /t HTTP/1.1"), "{raw:?}");
     assert!(raw.contains("Host: localhost"), "{raw:?}");
+    assert!(
+        raw.contains("\r\n"),
+        "raw_header must keep CRLF separators, got {raw:?}"
+    );
 
     let skipped = expect_string(
         eval_in_request(ptr, "use ngx;\nngx::req::raw_header(true);\n").expect("skip"),
     );
     assert!(!skipped.contains("GET /t HTTP/1.1"), "{skipped:?}");
     assert!(skipped.contains("Host: localhost"), "{skipped:?}");
+    assert!(skipped.starts_with("Host:"), "{skipped:?}");
+}
+
+#[test]
+fn raw_header_restores_parser_nuls_to_colon_and_crlf() {
+    let mut req = dummy_request();
+    let mut buf = b"GET /t HTTP/1.1\r\nHost\0 example.test\0\nX-Foo\0 bar\0\n\r\n".to_vec();
+    let line_len = b"GET /t HTTP/1.1".len();
+    let _live = install_single_header_buffer(&mut req, &mut buf, line_len);
+    let ptr = (&mut *req) as *mut ngx_http_request_t;
+    let raw = expect_string(
+        eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n").expect("raw"),
+    );
+    assert!(
+        raw.contains("Host: example.test\r\n"),
+        "parser NULs must become colon/CRLF, got {raw:?}"
+    );
+    assert!(
+        raw.contains("X-Foo: bar\r\n"),
+        "second header must restore colon/CRLF, got {raw:?}"
+    );
+    assert!(
+        !raw.contains('\0'),
+        "raw_header must not leak parser NULs, got {raw:?}"
+    );
+}
+
+#[test]
+fn raw_header_walks_busy_buffers_and_strips_preread_body() {
+    let mut req = dummy_request();
+    let mut chunks = [
+        b"GET /t HTTP/1.1\r\nHost\0 x\0\n".to_vec(),
+        b"X-Foo\0 y\0\n\r\npreread-body".to_vec(),
+    ];
+    let line_len = b"GET /t HTTP/1.1".len();
+    let _live = install_busy_header_buffers(&mut req, &mut chunks, line_len);
+    let ptr = (&mut *req) as *mut ngx_http_request_t;
+    let raw = expect_string(
+        eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n").expect("raw"),
+    );
+    assert!(raw.contains("GET /t HTTP/1.1\r\n"), "{raw:?}");
+    assert!(raw.contains("Host: x\r\n"), "{raw:?}");
+    assert!(raw.contains("X-Foo: y\r\n"), "{raw:?}");
+    assert!(
+        !raw.contains("preread-body"),
+        "preread body after CRLFCRLF must be stripped, got {raw:?}"
+    );
+}
+
+#[test]
+fn raw_header_rejects_http2_and_http3_on_main_not_current_stream() {
+    let mut main = dummy_request();
+    let mut child = dummy_request();
+    child.main = (&mut *main) as *mut ngx_http_request_t;
+    child.stream = std::ptr::null_mut();
+    child.http_version = NGX_HTTP_VERSION_11 as _;
+    main.http_version = NGX_HTTP_VERSION_11 as _;
+    let mut line = b"GET /t HTTP/1.1".to_vec();
+    child.request_line = ngx_str(&mut line);
+    main.request_line = ngx_str(&mut line);
+    let child_ptr = (&mut *child) as *mut ngx_http_request_t;
+
+    main.stream = std::ptr::dangling_mut::<ngx_http_v2_stream_t>();
+    let err = eval_in_request(child_ptr, "use ngx;\nngx::req::raw_header(null);\n")
+        .expect_err("HTTP/2 on MAIN must reject");
+    assert!(
+        err.to_ascii_lowercase().contains("http/2") || err.to_ascii_lowercase().contains("http2"),
+        "got {err}"
+    );
+
+    main.stream = std::ptr::null_mut();
+    main.http_version = NGX_HTTP_VERSION_30 as _;
+    child.http_version = NGX_HTTP_VERSION_11 as _;
+    let err = eval_in_request(child_ptr, "use ngx;\nngx::req::raw_header(null);\n")
+        .expect_err("HTTP/3 on MAIN must reject");
+    assert!(
+        err.to_ascii_lowercase().contains("http/3") || err.to_ascii_lowercase().contains("http3"),
+        "got {err}"
+    );
+
+    main.http_version = NGX_HTTP_VERSION_11 as _;
+    child.stream = std::ptr::dangling_mut::<ngx_http_v2_stream_t>();
+    child.http_version = NGX_HTTP_VERSION_20 as _;
+    let mut buf = b"GET /t HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec();
+    let _live = install_single_header_buffer(&mut main, &mut buf, b"GET /t HTTP/1.1".len());
+    child.connection = main.connection;
+    child.http_connection = main.http_connection;
+    child.header_in = main.header_in;
+    child.request_line = main.request_line;
+    let raw = expect_string(
+        eval_in_request(child_ptr, "use ngx;\nngx::req::raw_header(null);\n")
+            .expect("subrequest stream must not override main HTTP/1.x"),
+    );
+    assert!(raw.contains("Host: localhost"), "{raw:?}");
+}
+
+#[test]
+fn raw_header_rejects_malformed_ranges_null_cycles_and_caps() {
+    let mut req = dummy_request();
+    let mut line = b"GET /t HTTP/1.1".to_vec();
+    req.request_line = ngx_str(&mut line);
+    let ptr = (&mut *req) as *mut ngx_http_request_t;
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n")
+        .expect_err("missing connection buffers must error");
+    assert!(
+        err.to_ascii_lowercase().contains("header")
+            || err.to_ascii_lowercase().contains("buffer")
+            || err.to_ascii_lowercase().contains("connection"),
+        "got {err}"
+    );
+
+    let mut storage = b"GET /t HTTP/1.1\r\nHost: x\r\n\r\n".to_vec();
+    let mut live = install_single_header_buffer(&mut req, &mut storage, b"GET /t HTTP/1.1".len());
+    live._bufs[0].pos = live._bufs[0].start; // empty / inverted range
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n")
+        .expect_err("inverted buffer range must error");
+    assert!(!err.is_empty(), "got {err}");
+
+    let mut chunks = [
+        b"GET /t HTTP/1.1\r\nHost\0 a\0\n".to_vec(),
+        b"X-Foo\0 b\0\n\r\n".to_vec(),
+    ];
+    let mut live = install_busy_header_buffers(&mut req, &mut chunks, b"GET /t HTTP/1.1".len());
+    live._chains[0].next = live._chains[1].as_mut() as *mut ngx_chain_t;
+    live._chains[1].next = live._chains[0].as_mut() as *mut ngx_chain_t;
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n")
+        .expect_err("busy-chain cycle must error");
+    assert!(
+        err.to_ascii_lowercase().contains("cycle")
+            || err.to_ascii_lowercase().contains("buffer")
+            || err.to_ascii_lowercase().contains("header")
+            || err.to_ascii_lowercase().contains("malformed"),
+        "got {err}"
+    );
+
+    let mut huge = vec![b'A'; 70_000];
+    huge.splice(0..0, b"GET /t HTTP/1.1\r\nX: ".iter().copied());
+    huge.extend_from_slice(b"\r\n\r\n");
+    let line_len = b"GET /t HTTP/1.1".len();
+    let _live = install_single_header_buffer(&mut req, &mut huge, line_len);
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n")
+        .expect_err("over-cap raw header must error");
+    assert!(
+        err.to_ascii_lowercase().contains("limit")
+            || err.to_ascii_lowercase().contains("cap")
+            || err.contains("65536")
+            || err.to_ascii_lowercase().contains("byte"),
+        "got {err}"
+    );
 }
 
 #[test]
@@ -602,6 +987,80 @@ fn get_post_args_unread_body_is_task10_host_error() {
     assert!(
         err.contains("body") && (err.contains("Task 10") || err.contains("task 10")),
         "unread body must defer to Task 10, got {err}"
+    );
+}
+
+#[test]
+fn get_post_args_parses_already_read_single_and_multi_chain_bodies() {
+    let mut req = dummy_request();
+    let mut single = b"a=1&b=2&a=3&flag&empty=".to_vec();
+    let _live = install_in_memory_body(&mut req, std::slice::from_mut(&mut single));
+    let ptr = (&mut *req) as *mut ngx_http_request_t;
+    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n").expect("post");
+    let root = expect_map(&decoded);
+    assert_eq!(map_get(root, "truncated"), &Value::Bool(false));
+    let parsed = expect_map(map_get(root, "args"));
+    assert_eq!(map_get(parsed, "b"), &Value::string("2"));
+    assert_eq!(map_get(parsed, "flag"), &Value::Bool(true));
+    assert_eq!(map_get(parsed, "empty"), &Value::string(""));
+    match map_get(parsed, "a") {
+        Value::Array(values) => {
+            assert_eq!(values.as_slice(), &[Value::string("1"), Value::string("3")]);
+        }
+        other => panic!("repeated post keys must become an array, got {other:?}"),
+    }
+
+    let mut chunks = [b"a=1&b=".to_vec(), b"2&flag".to_vec()];
+    let _live = install_in_memory_body(&mut req, &mut chunks);
+    let decoded =
+        eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n").expect("multi");
+    let parsed = expect_map(map_get(expect_map(&decoded), "args"));
+    assert_eq!(map_get(parsed, "a"), &Value::string("1"));
+    assert_eq!(map_get(parsed, "b"), &Value::string("2"));
+    assert_eq!(map_get(parsed, "flag"), &Value::Bool(true));
+
+    let capped = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(1);\n").expect("cap");
+    assert_eq!(
+        map_get(expect_map(&capped), "truncated"),
+        &Value::Bool(true)
+    );
+}
+
+#[test]
+fn get_post_args_file_backed_still_reading_and_corrupt_are_host_errors() {
+    let mut req = dummy_request();
+    let mut body = b"a=1".to_vec();
+    let mut live = install_in_memory_body(&mut req, std::slice::from_mut(&mut body));
+    live.body.temp_file = std::ptr::dangling_mut::<ngx_temp_file_t>();
+    let ptr = (&mut *req) as *mut ngx_http_request_t;
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
+        .expect_err("file-backed body must defer");
+    assert!(
+        err.to_ascii_lowercase().contains("file")
+            || err.contains("Task 10")
+            || err.contains("task 10"),
+        "got {err}"
+    );
+
+    live.body.temp_file = std::ptr::null_mut();
+    req.set_reading_body(1);
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
+        .expect_err("still-reading body must error");
+    assert!(
+        err.to_ascii_lowercase().contains("read") || err.to_ascii_lowercase().contains("body"),
+        "got {err}"
+    );
+
+    req.set_reading_body(0);
+    live._chains[0].buf = std::ptr::null_mut();
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
+        .expect_err("corrupt body chain must error");
+    assert!(
+        err.to_ascii_lowercase().contains("body")
+            || err.to_ascii_lowercase().contains("buffer")
+            || err.to_ascii_lowercase().contains("malformed")
+            || err.to_ascii_lowercase().contains("invalid"),
+        "got {err}"
     );
 }
 
@@ -805,6 +1264,15 @@ fn nginx_request_read_semantics_methods_headers_args_vars_and_internal() {
     write_index(&prefix, "read/index.html", "read-ok\n");
     write_index(&prefix, "internal-read/index.html", "internal-ok\n");
     write_index(&prefix, "post-read/index.html", "post-ok\n");
+    write_index(&prefix, "idx/index.html", "idx-ok\n");
+    write_index(
+        &prefix,
+        "ssi.html",
+        "<!--# include virtual=\"/ssi-sub\" -->\n",
+    );
+    write_index(&prefix, "ssi-sub", "sub-ok\n");
+    write_index(&prefix, "mirror-parent.html", "parent-ok\n");
+    write_index(&prefix, "mirror-sub", "mirror-ok\n");
     let script = prefix.join("conf/request_read.rss");
     write_script(
         &script,
@@ -855,7 +1323,29 @@ ngx::req::get_post_args(null);
         &internal_script,
         r#"
 use ngx;
-ngx::log(ngx::log_level::notice(), "REQ_INTERNAL_LOC=" + ngx::encode_args({ internal: ngx::req::is_internal(), uri: ngx::var::get("uri") }));
+if ngx::req::is_internal() {
+    ngx::log(ngx::log_level::notice(), "REQ_INTERNAL_REDIR=true");
+} else {
+    ngx::log(ngx::log_level::notice(), "REQ_INTERNAL_REDIR=false");
+}
+ngx::log(ngx::log_level::notice(), "REQ_INTERNAL_URI=" + ngx::encode_args({ uri: ngx::var::get("uri") }));
+"#,
+    );
+    let sub_script = prefix.join("conf/sub_read.rss");
+    write_script(
+        &sub_script,
+        r#"
+use ngx;
+if ngx::is_subrequest() {
+    ngx::log(ngx::log_level::notice(), "REQ_SUB_EVIDENCE=true");
+} else {
+    ngx::log(ngx::log_level::notice(), "REQ_SUB_EVIDENCE=false");
+}
+if ngx::req::is_internal() {
+    ngx::log(ngx::log_level::notice(), "REQ_SUB_INTERNAL=true");
+} else {
+    ngx::log(ngx::log_level::notice(), "REQ_SUB_INTERNAL=false");
+}
 "#,
     );
     let conf = request_conf(
@@ -865,6 +1355,8 @@ ngx::log(ngx::log_level::notice(), "REQ_INTERNAL_LOC=" + ngx::encode_args({ inte
         &format!(
             r#"
         set $rss_empty "";
+        client_header_buffer_size 512;
+        large_client_header_buffers 4 4k;
         location /read/ {{
             access_by_rss_file {script};
         }}
@@ -879,10 +1371,31 @@ ngx::log(ngx::log_level::notice(), "REQ_INTERNAL_LOC=" + ngx::encode_args({ inte
             internal;
             access_by_rss_file {internal};
         }}
+        location /idx/ {{
+            index index.html;
+            access_by_rss_file {internal};
+        }}
+        location = /ssi.html {{
+            ssi on;
+            default_type text/html;
+        }}
+        location = /ssi-sub {{
+            internal;
+            access_by_rss_file {sub};
+        }}
+        location = /mirror-parent.html {{
+            mirror /mirror-sub;
+            mirror_request_body off;
+        }}
+        location = /mirror-sub {{
+            internal;
+            access_by_rss_file {sub};
+        }}
 "#,
             script = nginx_quote_path(&script).unwrap(),
             post_script = nginx_quote_path(&post_script).unwrap(),
             internal = nginx_quote_path(&internal_script).unwrap(),
+            sub = nginx_quote_path(&sub_script).unwrap(),
         ),
     );
     fs::write(prefix.join("conf/nginx.conf"), &conf).unwrap();
@@ -931,6 +1444,39 @@ ngx::log(ngx::log_level::notice(), "REQ_INTERNAL_LOC=" + ngx::encode_args({ inte
     );
     assert_eq!(status, 200, "{response}");
 
+    let (status, response) = http_exchange(
+        port,
+        "GET /idx/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(status, 200, "index internal redirect: {response}");
+
+    let (status, response) = http_exchange(
+        port,
+        "GET /ssi.html HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(status, 200, "ssi parent: {response}");
+    assert!(
+        response.contains("sub-ok"),
+        "SSI include must run the subrequest body; got:\n{response}"
+    );
+
+    let (status, response) = http_exchange(
+        port,
+        "GET /mirror-parent.html HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(status, 200, "mirror parent: {response}");
+
+    let extra_headers = (1..=40)
+        .map(|i| format!("X-Large-{i}: value-{i}\r\n"))
+        .collect::<String>();
+    let (status, response) = http_exchange(
+        port,
+        &format!(
+            "GET /read/ HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra_headers}Connection: close\r\n\r\n"
+        ),
+    );
+    assert_eq!(status, 200, "large headers: {response}");
+
     let log = fs::read_to_string(prefix.join("logs/error.log")).unwrap_or_default();
     assert!(
         log.contains("REQ_METHOD=GET"),
@@ -957,12 +1503,23 @@ ngx::log(ngx::log_level::notice(), "REQ_INTERNAL_LOC=" + ngx::encode_args({ inte
         "normal requests are not internal; got:\n{log}"
     );
     assert!(
-        log.contains("internal-read"),
-        "error_page must internally redirect to /internal-read/; got:\n{log}"
+        log.contains("REQ_INTERNAL_REDIR=true"),
+        "real internal redirect/index must observe is_internal=true; got:\n{log}"
+    );
+    assert!(
+        log.contains("internal-read") || log.contains("/idx/"),
+        "internal evidence URI must appear; got:\n{log}"
     );
     assert!(
         log.contains("REQ_SUB=false"),
         "normal requests are not subrequests; got:\n{log}"
+    );
+    // ngx_http_core_access_phase skips every handler when r != r->main, so
+    // access_by_rss_file cannot observe is_subrequest=true. SSI still returns
+    // sub-ok as evidence the subrequest ran. Stub tests cover true.
+    assert!(
+        !log.contains("REQ_SUB_EVIDENCE=true"),
+        "access must not run on SSI/mirror subrequests (NGINX skips access); got:\n{log}"
     );
     assert!(
         log.contains("REQ_SENT=false"),
@@ -976,6 +1533,14 @@ ngx::log(ngx::log_level::notice(), "REQ_INTERNAL_LOC=" + ngx::encode_args({ inte
     assert!(
         log.contains("GET /read/?a=1&a=2&flag&empty= HTTP/1.1"),
         "raw_header must include the request line; got:\n{log}"
+    );
+    assert!(
+        log.contains("Host: 127.0.0.1") || log.contains("Host:127.0.0.1"),
+        "raw_header must include Host with a colon, not only the request line; got:\n{log}"
+    );
+    assert!(
+        log.contains("X-Large-40") || log.contains("x-large-40") || log.contains("X-Large-1"),
+        "raw_header/get_headers must survive multi-buffer large headers; got:\n{log}"
     );
     let headers = log_field(&log, "REQ_HEADERS=");
     assert!(

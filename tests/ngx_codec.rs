@@ -309,6 +309,21 @@ fn decode_args_max_args_zero_means_hard_max_and_1024_is_accepted() {
 }
 
 #[test]
+fn decode_args_trailing_empty_ampersand_at_max_args_is_not_truncated() {
+    let decoded = eval("use ngx;\nngx::decode_args(\"a=1&b=2&\", 2);\n");
+    let root = expect_map(&decoded);
+    assert_eq!(
+        map_get(root, "truncated"),
+        &Value::Bool(false),
+        "trailing empty & at max_args must not mark truncated"
+    );
+    let args = expect_map(map_get(root, "args"));
+    assert_eq!(args.len(), 2);
+    assert_eq!(map_get(args, "a"), &Value::string("1"));
+    assert_eq!(map_get(args, "b"), &Value::string("2"));
+}
+
+#[test]
 fn encode_base64_padding_and_decode_variants() {
     assert_eq!(
         expect_string(eval(

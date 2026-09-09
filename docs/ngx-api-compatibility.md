@@ -5,7 +5,7 @@ This matrix is the authoritative Release A ngx host surface for
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **103** names in the same order.
+Those three lists contain the same **114** names in the same order.
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and does not claim
@@ -56,8 +56,9 @@ argument.
 | Time | 9 | sync |
 | Metadata / worker / config / phase | 12 | sync |
 | Logging | 1 | sync |
+| Request-read / var | 11 | sync |
 | Constants | 65 | sync |
-| **Production total** | **103** | |
+| **Production total** | **114** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
 the production manifest, catalog, or `bind_ngx_hosts`.
@@ -95,6 +96,14 @@ Shared sets used by the tables:
 | `PHASE_CONFIG_BUILD` | `init`, `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `timer` |
 | `PHASE_WORKER_PIDS` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `timer`, `exit_worker` |
 | `PHASE_WORKER_ID` | `init_worker`, `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `timer`, `exit_worker` |
+| `PHASE_REQ_GET_METHOD` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `balancer`, `log` |
+| `PHASE_REQ_HTTP_VERSION` | `set`, `rewrite`, `access`, `content`, `header_filter` |
+| `PHASE_REQ_GET_URI_ARGS` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `balancer` |
+| `PHASE_REQ_GET_POST_ARGS` | `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log` |
+| `PHASE_REQ_GET_HEADERS` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log` |
+| `PHASE_REQ_FLAGS` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log` |
+| `PHASE_HEADERS_SENT` | `set`, `rewrite`, `access`, `content` |
+| `PHASE_VAR_GET` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `balancer` |
 
 ## Cross-cutting adaptations
 
@@ -168,6 +177,10 @@ host adds a further difference.
 | Async in-flight waits | 1024 (`DEFAULT_MAX_IN_FLIGHT`) | `ngx::sleep` / `ngx::sleep_ms` |
 | Idle VM pool | 4 | import-free programs |
 | Cached clock stale limit | 1 second | time hosts without `update_time` |
+| Request copy / body / raw header | 65536 bytes | `ngx::req::raw_header`, `get_headers` total, `get_uri_args` / `get_post_args` source |
+| Header field | 8192 bytes | single `get_headers` name or value |
+| Header / args default cap | 100 | `null` `max_headers` / `max_args` |
+| Header / args hard cap | 1024 | explicit cap; `0` clamps to this |
 
 ## Sleep
 
@@ -353,14 +366,34 @@ strings).
 
 Use these with `ngx::log(ngx::log_level::error(), "message")`.
 
+## Request-read and variables
+
+All eleven hosts are **sync**. They copy ngx_str / list / buffer bytes into
+owned VM values on the worker main thread and never retain request, pool,
+or list pointers. They require a live request scope.
+
+| OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ngx.req.get_method` | `ngx::req::get_method() -> string` | supported | `PHASE_REQ_GET_METHOD` | 256-byte method token | Custom methods keep the textual token. | `tests/ngx_request_read.rs` |
+| `ngx.req.http_version` | `ngx::req::http_version() -> optional<float>` | adapted | `PHASE_REQ_HTTP_VERSION` | none | `0.9`/`1.0`/`1.1`/`2.0`/`3.0`, or `null` if unrecognized. | `tests/ngx_request_read.rs` |
+| `ngx.req.raw_header` | `ngx::req::raw_header(no_request_line: unknown) -> string` | adapted | `PHASE_REQ_HTTP_VERSION` | 65536-byte reconstruction | Reconstructs from the **main** request connection header buffer and busy chain (OpenResty v0.10.29). Validates every pointer/range and rejects HTTP/2 (`r->main->stream`) and HTTP/3 (`http_version` 3.0 or non-null `v3_parse`) using main-request protocol truth. Parser NULs restore to `:` and CR/LF. Preread body after CRLFCRLF is stripped. `no_request_line` is `null`/`false`/`true`. Malformed ranges, null buffers, cycles, and over-cap copies are host errors. | `tests/ngx_request_read.rs` (`raw_header_*`) |
+| `ngx.req.get_headers` | `ngx::req::get_headers(max_headers: unknown, raw: unknown) -> map` | adapted | `PHASE_REQ_GET_HEADERS` | default 100; hard 1024; 8192-byte field; 65536-byte total | Returns `{ headers, truncated }`. `raw` `true` keeps original names; otherwise lowercase. Duplicate names become arrays. Empty values kept. `hash==0` skipped. Count/byte caps set `truncated=true` before further copy. Null elts with `nelts>0`, cycles, and impossible metadata are host errors, not silent `truncated=false`. | `tests/ngx_request_read.rs` (`get_headers_*`) |
+| `ngx.req.get_uri_args` | `ngx::req::get_uri_args(max_args: unknown) -> map` | adapted | `PHASE_REQ_GET_URI_ARGS` | default 100; hard 1024; 65536-byte query | Returns `{ args, truncated }` via the crate-private `decode_query_args` helper shared with `ngx::decode_args`. Trailing empty `&` at max_args is not truncated. `0` clamps to 1024. | `tests/ngx_request_read.rs`, `tests/ngx_codec.rs` |
+| `ngx.req.get_post_args` | `ngx::req::get_post_args(max_args: unknown) -> map` | adapted | `PHASE_REQ_GET_POST_ARGS` | same arg caps; 65536-byte body | Sync parse **only** when `request_body` is already read and in-memory buffers exist. Returns `{ args, truncated }` with the shared decoder. Unread, still-reading, file-backed, discarded, incomplete, or corrupt bodies are structured host errors (async/file read is Task 10). Never initiates body read, I/O, or yield. Stub tests cover already-read buffers; real NGINX already-read success is stub-only until Task 10. | `tests/ngx_request_read.rs` (`get_post_args_*`) |
+| `ngx.req.is_internal` | `ngx::req::is_internal() -> bool` | adapted | `PHASE_REQ_FLAGS` | none | Live `r->internal`. Official NGINX 1.30.4 GCC stores the flag two bits after nginx-sys bindgen `internal()`; the host ORs that slot so stub `set_internal` and live error_page/index redirects both observe true (`REQ_INTERNAL_REDIR=true`). | `tests/ngx_request_read.rs` |
+| `ngx.req.start_time` | `ngx::req::start_time() -> float` | supported | `PHASE_REQ_FLAGS` | none | `start_sec + start_msec/1000`. | `tests/ngx_request_read.rs` |
+| `ngx.is_subrequest` | `ngx::is_subrequest() -> bool` | supported | `PHASE_REQ_FLAGS` | none | `r != r->main`. Live false-path on main requests (`REQ_SUB=false`). `ngx_http_core_access_phase` skips all access handlers when `r != r->main`, so SSI/mirror/auth_request subrequests cannot run `access_by_rss_file`. True is stub-covered; SSI include still returns `sub-ok` as evidence the subrequest ran. | `tests/ngx_request_read.rs` |
+| `ngx.headers_sent` | `ngx::headers_sent() -> bool` | supported | `PHASE_HEADERS_SENT` | none | Live `r->header_sent`. Access-phase scripts observe `false`. | `tests/ngx_request_read.rs` |
+| `ngx.var.VARIABLE` | `ngx::var::get(name: string) -> optional<string>` | adapted | `PHASE_VAR_GET` | 256-byte name; 65536-byte value | Indexed lookup with `ngx_hash_strlow`. Missing is `null`; present empty is `""`. Rejects empty/NUL names. | `tests/ngx_request_read.rs` (`var_get_*`) |
+
 ## Out of scope for Release A
 
 Not production hosts in this matrix (do not import them):
 
-- Request/response/body/variable/ctx/control APIs (`ngx.req.*`,
-  `ngx.var`, `ngx.header`, `ngx.exit`, `ngx.redirect`, `ngx.print` /
-  `ngx.say`, ...)
-- Shared dict, subrequest, cosocket, timer callbacks, light threads
+- Remaining request/response/body/control APIs (`ngx.req.set_*`,
+  `ngx.req.read_body`, `ngx.header`, `ngx.exit`, `ngx.redirect`,
+  `ngx.print` / `ngx.say`, ...)
+- Shared dict, cosocket, timer callbacks, light threads
 - Stream subsystem, `ndk.set_var.*`, Lua `coroutine.*`
 - `print`, `runtime::sleep`, and test hosts `ngx::probe` / `ngx::ready` /
   `ngx::fail`
