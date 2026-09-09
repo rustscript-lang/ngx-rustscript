@@ -27,10 +27,12 @@ pub use catalog::{
     NGX_SHARED_EXPIRE_NAME, NGX_SHARED_FREE_SPACE_NAME, NGX_SHARED_GET_NAME,
     NGX_SHARED_GET_STALE_NAME, NGX_SHARED_INCR_NAME, NGX_SHARED_REPLACE_NAME,
     NGX_SHARED_SAFE_ADD_NAME, NGX_SHARED_SAFE_SET_NAME, NGX_SHARED_SET_NAME, NGX_SHARED_TTL_NAME,
-    NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_STATUS_GET_NAME, NGX_STATUS_SET_NAME, NGX_TIME_NAME,
-    NGX_TODAY_NAME, NGX_UNESCAPE_URI_NAME, NGX_UPDATE_TIME_NAME, NGX_UTCTIME_NAME,
-    NGX_VAR_GET_NAME, NGX_VAR_SET_NAME, NgxPhase, host_allowed_in_phase, manifest_entry,
-    ngx_host_catalog, ngx_host_manifest,
+    NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_SOCKET_UDP_BIND_NAME, NGX_SOCKET_UDP_CLOSE_NAME,
+    NGX_SOCKET_UDP_NAME, NGX_SOCKET_UDP_RECEIVE_NAME, NGX_SOCKET_UDP_RESOURCE_KEY,
+    NGX_SOCKET_UDP_SEND_NAME, NGX_SOCKET_UDP_SETPEERNAME_NAME, NGX_SOCKET_UDP_SETTIMEOUT_NAME,
+    NGX_STATUS_GET_NAME, NGX_STATUS_SET_NAME, NGX_TIME_NAME, NGX_TODAY_NAME, NGX_UNESCAPE_URI_NAME,
+    NGX_UPDATE_TIME_NAME, NGX_UTCTIME_NAME, NGX_VAR_GET_NAME, NGX_VAR_SET_NAME, NgxPhase,
+    host_allowed_in_phase, manifest_entry, ngx_host_catalog, ngx_host_manifest,
 };
 pub use context::{
     AllowedOps, RequestDisposition, ScopeError, VmEntryObservation, capture_vm_entries,
@@ -235,6 +237,13 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         NGX_SHARED_EXPIRE_NAME,
         NGX_SHARED_CAPACITY_NAME,
         NGX_SHARED_FREE_SPACE_NAME,
+        NGX_SOCKET_UDP_NAME,
+        NGX_SOCKET_UDP_BIND_NAME,
+        NGX_SOCKET_UDP_SETPEERNAME_NAME,
+        NGX_SOCKET_UDP_SEND_NAME,
+        NGX_SOCKET_UDP_RECEIVE_NAME,
+        NGX_SOCKET_UDP_CLOSE_NAME,
+        NGX_SOCKET_UDP_SETTIMEOUT_NAME,
     ]
 }
 
@@ -632,6 +641,22 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
         NGX_SHARED_FREE_SPACE_NAME,
         layout::helpers::shared_dict::free_space,
     );
+    vm.bind_static_function(NGX_SOCKET_UDP_NAME, layout::helpers::socket::udp);
+    vm.bind_static_function(NGX_SOCKET_UDP_BIND_NAME, layout::helpers::socket::bind);
+    vm.bind_static_function(
+        NGX_SOCKET_UDP_SETPEERNAME_NAME,
+        layout::helpers::socket::setpeername,
+    );
+    vm.bind_static_function(NGX_SOCKET_UDP_SEND_NAME, layout::helpers::socket::send);
+    vm.bind_static_function(
+        NGX_SOCKET_UDP_RECEIVE_NAME,
+        layout::helpers::socket::receive,
+    );
+    vm.bind_static_function(NGX_SOCKET_UDP_CLOSE_NAME, layout::helpers::socket::close);
+    vm.bind_static_function(
+        NGX_SOCKET_UDP_SETTIMEOUT_NAME,
+        layout::helpers::socket::settimeout,
+    );
 }
 
 #[cfg(test)]
@@ -692,6 +717,9 @@ mod layout {
                 env!("CARGO_MANIFEST_DIR"),
                 "/src/host/shared_dict.rs"
             ));
+        }
+        pub mod socket {
+            include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/socket.rs"));
         }
 
         pub mod functions {

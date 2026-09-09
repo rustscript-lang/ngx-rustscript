@@ -190,14 +190,16 @@ pub fn validate_program_imports_for_phase(
 
 /// True when the compiled program needs request-owned `AccessExec`.
 ///
-/// Async hosts, RequestCtx, and mutation/control capabilities all require
-/// per-request state. Pure-sync request-read programs stay on the pooled path.
+/// Async hosts, RequestCtx, Cosocket, and mutation/control capabilities
+/// all require per-request state. Pure-sync request-read programs stay on
+/// the pooled path.
 pub fn program_requires_request_state(program: &Program) -> bool {
     program.imports.iter().any(|import| {
         ngx_host_manifest().iter().any(|entry| {
             entry.name == import.name.as_str()
                 && (entry.sync == HostSyncKind::Async
                     || entry.family == HostFamily::RequestCtx
+                    || entry.family == HostFamily::Cosocket
                     || entry.capabilities.iter().any(|cap| {
                         matches!(
                             cap,

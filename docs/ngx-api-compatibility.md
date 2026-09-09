@@ -1,15 +1,15 @@
-# Release B ngx API compatibility matrix
+# ngx API compatibility matrix
 
-This matrix is the authoritative Release B ngx host surface for
+This matrix is the authoritative current ngx host surface for
 `ngx-rustscript`. It is derived from the production manifest
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **146** names in the same order.
+Those three lists contain the same **153** names in the same order.
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
-not run Lua, does not depend on an OpenResty binary, and does not claim
-APIs beyond this Release B set.
+not run Lua, does not depend on an OpenResty binary, and documents only
+the hosts in this matrix (including UDP cosocket).
 
 **Built and tested against official NGINX 1.30.4** (`nginx_version`
 1030004), ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`, and the
@@ -61,9 +61,10 @@ argument.
 | Response metadata | 6 | sync |
 | Control | 2 | sync |
 | Shared dict | 14 | sync |
+| Cosocket (UDP) | 7 | mixed |
 | Constants | 65 | sync |
 | of which HTTP status | 35 | sync |
-| **Production total** | **146** | |
+| **Production total** | **153** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
 the production manifest, catalog, or `bind_ngx_hosts`.
@@ -185,7 +186,9 @@ host adds a further difference.
 | `decode_args` hard `max_args` | 1024 | explicit cap; `0` clamps to this |
 | `encode_args` pairs | 1024 | including array expansion |
 | `parse_http_time` input | 128 bytes | over-limit is a host error |
-| Async in-flight waits | 1024 (`DEFAULT_MAX_IN_FLIGHT`) | `ngx::sleep` / `ngx::sleep_ms` |
+| Async in-flight waits | 1024 (`DEFAULT_MAX_IN_FLIGHT`) | `ngx::sleep` / `ngx::sleep_ms` / UDP ops |
+| UDP datagram | 65535 bytes | send payload and receive size |
+| UDP DNS host | 255 bytes | `setpeername` host before lookup |
 | Idle VM pool | 4 | import-free programs |
 | Cached clock stale limit | 1 second | time hosts without `update_time` |
 | Request copy / body / raw header | 65536 bytes | `ngx::req::raw_header`, `get_headers` total, `get_uri_args` / `get_post_args` source |
@@ -459,8 +462,9 @@ the request pointer.
 
 The map persists across `ngx::sleep` `Waiting`/resume cycles on the same
 `AccessExec`, including two sequential waits. Ctx-only scripts that never
-wait are also request-owned: every program that imports RequestCtx or Async
-hosts runs on a per-request `AccessExec` rather than the pooled VM path.
+wait are also request-owned: every program that imports RequestCtx,
+Cosocket, or Async hosts runs on a per-request `AccessExec` rather than
+the pooled VM path.
 Concurrent requests are isolated. Values are released on cleanup, HostError,
 cancellation, and `AccessExec` drop. Ctx hosts run only on the worker main
 thread inside VM run/resume; polling the Tokio sleep future receives no ctx
@@ -507,7 +511,41 @@ List/queue APIs (`lpush`/`rpush`/`lpop`/`rpop`/`llen`), `flush_all`,
 Cross-worker visibility, atomic incr, and reload reuse are covered by
 `tests/shared_dict_nginx.rs`. Config parsing is `tests/shared_dict_config.rs`.
 
-## Out of scope for Release B
+## UDP cosocket
+
+`ngx.socket.udp` is adapted as a typed VM resource plus seven explicit
+hosts. The constructor returns a `resource` handle (`ngx.socket.udp`).
+Async I/O futures hold only a Tokio `UdpSocket`, owned buffer, timeout,
+and a generation captured at operation start — never a request, pool, VM,
+or raw pointer. Generation is checked before and after each await and on
+close. Request cleanup cancels the pending future and closes the
+resource (including the UDP fd). Default receive size is 8192 bytes;
+datagrams and requested sizes above 65535 bytes are rejected. Timeout is
+milliseconds (OpenResty); `0` disables the timer rather than substituting
+a year-long deadline. DNS for `setpeername` uses Tokio, not the nginx
+resolver, and host names longer than 255 bytes are rejected before lookup.
+
+| OpenResty API | RustScript callable | Status | Phases | Yield | Limits | Semantic differences | Acceptance |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `ngx.socket.udp` | `ngx::socket::udp() -> resource` | adapted | `PHASE_SOCKET_UDP` | sync | VM resource table | Typed handle, not userdata. Cosocket request-owned even though sync. | `tests/ngx_udp_socket.rs`, `tests/socket_lifecycle.rs` |
+| `udpsock:bind` | `ngx::socket::udp::bind(sock, host, port) -> null` | adapted | `PHASE_SOCKET_UDP` | Waiting | host string/`null`; port 0–65535 | `null`/`*` bind any IPv4. | `tests/ngx_udp_socket.rs`, `tests/socket_lifecycle.rs` |
+| `udpsock:setpeername` | `ngx::socket::udp::setpeername(sock, host, port) -> null` | adapted | `PHASE_SOCKET_UDP` | Waiting | host string ≤255 bytes; port 0–65535 | Tokio DNS; auto-bind if needed. | `tests/ngx_udp_socket.rs`, `tests/socket_lifecycle.rs` |
+| `udpsock:send` | `ngx::socket::udp::send(sock, data) -> null` | adapted | `PHASE_SOCKET_UDP` | Waiting | 65535-byte payload; string or bytes | Requires `setpeername`. | `tests/ngx_udp_socket.rs`, `tests/socket_lifecycle.rs` |
+| `udpsock:receive` | `ngx::socket::udp::receive(sock, size) -> bytes` | adapted | `PHASE_SOCKET_UDP` | Waiting | default 8192; max 65535; `null` size | Oversized datagrams error instead of silent truncate. | `tests/ngx_udp_socket.rs`, `tests/socket_lifecycle.rs` |
+| `udpsock:close` | `ngx::socket::udp::close(sock) -> null` | adapted | `PHASE_SOCKET_UDP` | sync | — | Double close is HostError. Cosocket request-owned. | `tests/ngx_udp_socket.rs`, `tests/socket_lifecycle.rs` |
+| `udpsock:settimeout` | `ngx::socket::udp::settimeout(sock, ms) -> null` | adapted | `PHASE_SOCKET_UDP` | sync | non-negative ms; `0` = no timer | Applies to subsequent ops; default 60000. | `tests/ngx_udp_socket.rs`, `tests/socket_lifecycle.rs` |
+
+`PHASE_SOCKET_UDP` (OpenResty v0.10.29 `ngx.socket.udp` contexts):
+`rewrite`, `access`, `content`, `timer`, `ssl_certificate`,
+`ssl_session_fetch`. Same as sleep.
+
+UDP programs are request-owned (`HostFamily::Cosocket`), including the
+sync constructor, `close`, and `settimeout`. Timeout, cancel, shutdown,
+generation, DNS, IPv6, workers, and handle reuse after close are covered
+by `tests/ngx_udp_socket.rs` and `tests/socket_lifecycle.rs`. NGINX
+acceptance is `tests/nginx_integration.py`.
+
+## Out of scope
 
 Not production hosts in this matrix (do not import them):
 
@@ -519,7 +557,7 @@ Not production hosts in this matrix (do not import them):
   `ngx::fail`
 
 Catalog phase names other than `access` document OpenResty allowlists
-for later directives. They are not runnable entry points in Release B.
+for later directives. They are not runnable entry points in this matrix.
 
 ## Maintaining this matrix
 

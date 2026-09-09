@@ -225,6 +225,15 @@ fn request_state_routing_uses_manifest_async_or_request_ctx() {
         "routing must use authoritative RequestCtx manifest metadata, not string matching"
     );
     assert!(
+        config.contains("HostFamily::Cosocket"),
+        "routing must use Cosocket family metadata for UDP constructor/close/settimeout"
+    );
+    let shared = compile_rss_source("use ngx;\nngx::shared::dict(\"dogs\");\n").expect("shared");
+    assert!(
+        !ngx_rustscript::config::program_requires_request_state(&shared),
+        "shared dict programs stay on the pooled path"
+    );
+    assert!(
         config.contains("HostSyncKind::Async"),
         "routing must use authoritative Async manifest metadata"
     );

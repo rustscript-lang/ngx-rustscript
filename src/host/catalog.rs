@@ -8,7 +8,7 @@ use std::fmt;
 
 use vm::{
     HostApiBuilder, HostApiCatalog, HostFunctionSchema, HostParamPassing, HostParamSchema,
-    HostTypeSchema, ResourceTypeSchema,
+    HostTypeSchema, ResourceTypeKey, ResourceTypeSchema,
 };
 
 /// Import name compiled into access-phase programs for OpenResty-style sleep.
@@ -71,6 +71,14 @@ pub const NGX_CTX_GET_NAME: &str = "ngx::ctx::get";
 pub const NGX_CTX_SET_NAME: &str = "ngx::ctx::set";
 pub const NGX_CTX_DELETE_NAME: &str = "ngx::ctx::delete";
 pub const NGX_CTX_CLEAR_NAME: &str = "ngx::ctx::clear";
+pub const NGX_SOCKET_UDP_NAME: &str = "ngx::socket::udp";
+pub const NGX_SOCKET_UDP_BIND_NAME: &str = "ngx::socket::udp::bind";
+pub const NGX_SOCKET_UDP_SETPEERNAME_NAME: &str = "ngx::socket::udp::setpeername";
+pub const NGX_SOCKET_UDP_SEND_NAME: &str = "ngx::socket::udp::send";
+pub const NGX_SOCKET_UDP_RECEIVE_NAME: &str = "ngx::socket::udp::receive";
+pub const NGX_SOCKET_UDP_CLOSE_NAME: &str = "ngx::socket::udp::close";
+pub const NGX_SOCKET_UDP_SETTIMEOUT_NAME: &str = "ngx::socket::udp::settimeout";
+pub const NGX_SOCKET_UDP_RESOURCE_KEY: &str = "ngx.socket.udp";
 
 pub const NGX_SHARED_DICT_NAME: &str = "ngx::shared::dict";
 pub const NGX_SHARED_GET_NAME: &str = "ngx::shared::get";
@@ -145,6 +153,7 @@ pub enum HostFamily {
     Response,
     Control,
     SharedDict,
+    Cosocket,
 }
 
 /// Whether a host submits a future or returns synchronously.
@@ -170,6 +179,7 @@ pub enum HostCapability {
     ResponseWrite,
     Control,
     SharedDict,
+    Cosocket,
 }
 
 /// One production ngx host. Schema fields stay next to the catalog builder.
@@ -326,6 +336,8 @@ const REQUEST_CTX_CAPABILITIES: &[HostCapability] = &[HostCapability::RequestCtx
 const RESPONSE_WRITE_CAPABILITIES: &[HostCapability] = &[HostCapability::ResponseWrite];
 const CONTROL_CAPABILITIES: &[HostCapability] = &[HostCapability::Control];
 const SHARED_DICT_CAPABILITIES: &[HostCapability] = &[HostCapability::SharedDict];
+const COSOCKET_CAPABILITIES: &[HostCapability] = &[HostCapability::Cosocket];
+const PHASE_SOCKET_UDP: &[NgxPhase] = SLEEP_PHASES;
 
 /// `ngx.req.get_method` contexts from OpenResty v0.10.29.
 const PHASE_REQ_GET_METHOD: &[NgxPhase] = &[
@@ -1062,6 +1074,13 @@ const MANIFEST: &[HostManifestEntry] = &[
         "ngx.shared.DICT.free_space",
         PHASE_DICT_WRITE,
     ),
+    cosocket_entry(NGX_SOCKET_UDP_NAME, HostSyncKind::Sync),
+    cosocket_entry(NGX_SOCKET_UDP_BIND_NAME, HostSyncKind::Async),
+    cosocket_entry(NGX_SOCKET_UDP_SETPEERNAME_NAME, HostSyncKind::Async),
+    cosocket_entry(NGX_SOCKET_UDP_SEND_NAME, HostSyncKind::Async),
+    cosocket_entry(NGX_SOCKET_UDP_RECEIVE_NAME, HostSyncKind::Async),
+    cosocket_entry(NGX_SOCKET_UDP_CLOSE_NAME, HostSyncKind::Sync),
+    cosocket_entry(NGX_SOCKET_UDP_SETTIMEOUT_NAME, HostSyncKind::Sync),
 ];
 
 const fn codec_entry(
@@ -1223,6 +1242,30 @@ const fn shared_dict_entry(
         capabilities: SHARED_DICT_CAPABILITIES,
         openresty_name,
     }
+}
+
+const fn cosocket_entry(name: &'static str, sync: HostSyncKind) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::Cosocket,
+        sync,
+        phases: PHASE_SOCKET_UDP,
+        capabilities: COSOCKET_CAPABILITIES,
+        openresty_name: "ngx.socket.udp",
+    }
+}
+
+pub fn udp_socket_resource_key() -> ResourceTypeKey {
+    ResourceTypeKey::new(NGX_SOCKET_UDP_RESOURCE_KEY)
+        .expect("ngx.socket.udp is a valid resource type key")
+}
+
+fn udp_sock_param() -> HostParamSchema {
+    HostParamSchema::with_passing(
+        "sock",
+        HostTypeSchema::Resource(udp_socket_resource_key()),
+        HostParamPassing::Borrow,
+    )
 }
 
 /// Auditable list of production ngx hosts.
@@ -1580,6 +1623,58 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             vec![dict_handle_param()],
             HostTypeSchema::Int,
         ),
+        NGX_SOCKET_UDP_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_UDP_NAME,
+            vec![],
+            HostTypeSchema::Resource(udp_socket_resource_key()),
+        ),
+        NGX_SOCKET_UDP_BIND_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_UDP_BIND_NAME,
+            vec![
+                udp_sock_param(),
+                HostParamSchema::value("host", HostTypeSchema::Unknown),
+                HostParamSchema::value("port", HostTypeSchema::Int),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_SOCKET_UDP_SETPEERNAME_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_UDP_SETPEERNAME_NAME,
+            vec![
+                udp_sock_param(),
+                HostParamSchema::value("host", HostTypeSchema::String),
+                HostParamSchema::value("port", HostTypeSchema::Int),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_SOCKET_UDP_SEND_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_UDP_SEND_NAME,
+            vec![
+                udp_sock_param(),
+                HostParamSchema::value("data", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_SOCKET_UDP_RECEIVE_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_UDP_RECEIVE_NAME,
+            vec![
+                udp_sock_param(),
+                HostParamSchema::value("size", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Bytes,
+        ),
+        NGX_SOCKET_UDP_CLOSE_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_UDP_CLOSE_NAME,
+            vec![udp_sock_param()],
+            HostTypeSchema::Null,
+        ),
+        NGX_SOCKET_UDP_SETTIMEOUT_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_UDP_SETTIMEOUT_NAME,
+            vec![
+                udp_sock_param(),
+                HostParamSchema::value("ms", HostTypeSchema::Int),
+            ],
+            HostTypeSchema::Null,
+        ),
         other => metadata_schema(other)
             .unwrap_or_else(|| panic!("ngx host catalog has no schema for {other}")),
     }
@@ -1693,6 +1788,10 @@ pub fn ngx_host_catalog() -> HostApiCatalog {
     builder.resource(ResourceTypeSchema::new(
         crate::shared_dict::shared_dict_resource_key(),
         "Shared dictionary zone handle",
+    ));
+    builder.resource(ResourceTypeSchema::new(
+        udp_socket_resource_key(),
+        "OpenResty ngx.socket.udp handle",
     ));
     for entry in MANIFEST {
         builder.function(schema_for(entry.name));

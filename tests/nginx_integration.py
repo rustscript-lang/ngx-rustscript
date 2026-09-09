@@ -177,6 +177,49 @@ def write_index(prefix, rel, body):
     write_text(os.path.join(prefix, "html", rel), body)
 
 
+def write_udp_echo_script(path, peer_port):
+    write_text(
+        path,
+        "use ngx;\n"
+        "let sock = ngx::socket::udp();\n"
+        "ngx::socket::udp::settimeout(sock, 1000);\n"
+        f'ngx::socket::udp::setpeername(sock, "127.0.0.1", {int(peer_port)});\n'
+        'ngx::socket::udp::send(sock, "ping");\n'
+        "ngx::socket::udp::receive(sock, null);\n"
+        "ngx::socket::udp::close(sock);\n"
+        'ngx::log(ngx::log_level::notice(), "UDP_ECHO=ok");\n',
+    )
+
+
+def start_udp_echo():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.settimeout(0.2)
+    port = sock.getsockname()[1]
+    stop = threading.Event()
+
+    def run():
+        try:
+            while not stop.is_set():
+                try:
+                    data, addr = sock.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if data == b"ping":
+                    try:
+                        sock.sendto(b"pong", addr)
+                    except OSError:
+                        break
+        finally:
+            sock.close()
+
+    thread = threading.Thread(target=run, name="udp-echo", daemon=True)
+    thread.start()
+    return port, stop, thread
+
+
 def skeleton_conf(module, prefix, locations, port=18080, access_log=False, error="emerg"):
     module_q = quote_nginx_path(module)
     pid_q = quote_nginx_path(os.path.join(prefix, "logs", "nginx.pid"))
@@ -227,9 +270,8 @@ def content_location(path, script):
 """
 
 
-def runtime_conf(module, prefix, port):
-    locations = "".join(
-        [
+def runtime_conf(module, prefix, port, udp_script=None):
+    locations = [
             location("/sleep/", fixture("sleep_30ms.rss")),
             location("/two/", fixture("two_sleeps_access.rss")),
             location("/slow/", fixture("sleep_2s.rss")),
@@ -265,14 +307,17 @@ def runtime_conf(module, prefix, port):
                 quote_nginx_path(fixture("task7_iso.rss")),
                 quote_nginx_path(fixture("task7_iso.rss")),
             ),
+    ]
+    if udp_script:
+        locations.append(location("/udp/", udp_script))
+    locations.append(
             """
         location /plain/ {
         }
-""",
-        ]
+"""
     )
     return skeleton_conf(
-        module, prefix, locations, port=port, access_log=True, error="info"
+        module, prefix, "".join(locations), port=port, access_log=True, error="info"
     )
 
 
@@ -595,6 +640,7 @@ def run_acceptance(nginx, module):
     proc = None
     handles = []
     summary = {}
+    udp_stop = None
     try:
         for child in ("logs", "conf", "html"):
             os.makedirs(os.path.join(prefix, child), exist_ok=True)
@@ -615,6 +661,7 @@ def run_acceptance(nginx, module):
         write_index(prefix, "task7-iso-a/index.html", "task7-iso-a\n")
         write_index(prefix, "task7-iso-b/index.html", "task7-iso-b\n")
         write_index(prefix, "content/index.html", "content-static\n")
+        write_index(prefix, "udp/index.html", "udp-ok\n")
 
         write_text(
             os.path.join(prefix, "conf", "nginx.conf"),
@@ -641,9 +688,12 @@ def run_acceptance(nginx, module):
         )
 
         port = free_port()
+        udp_port, udp_stop, _udp_thread = start_udp_echo()
+        udp_script = os.path.join(prefix, "html", "udp_echo.rss")
+        write_udp_echo_script(udp_script, udp_port)
         write_text(
             os.path.join(prefix, "conf", "nginx.conf"),
-            runtime_conf(module, prefix, port),
+            runtime_conf(module, prefix, port, udp_script=udp_script),
         )
         runtime_t = nginx_test(nginx, prefix)
         runtime_text = combined_output(runtime_t)
@@ -767,6 +817,20 @@ def run_acceptance(nginx, module):
         summary["continue"] = (
             f"sleep=200/slept two=200/twice access=1,1"
         )
+
+        udp_status, udp_body, udp_raw = http_get(port, "/udp/", timeout=5.0)
+        if udp_status != 200 or udp_body != "udp-ok\n":
+            raise CheckError(
+                "udp route must return 200/udp-ok",
+                dump_owned(prefix, proc, udp_raw),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        if "UDP_ECHO=ok" not in error_text:
+            raise CheckError(
+                "udp route must log UDP_ECHO=ok",
+                dump_owned(prefix, proc, error_text),
+            )
+        summary["udp"] = "200/udp-ok UDP_ECHO=ok"
 
         # Concurrent mapping across two routes/durations/bodies.
         jobs = [("/alpha/", "alpha-body\n")] * 6 + [("/beta/", "beta-body\n")] * 6
@@ -1282,6 +1346,8 @@ def run_acceptance(nginx, module):
         proc = None
         return summary
     finally:
+        if udp_stop is not None:
+            udp_stop.set()
         stop_owned(proc, handles)
         shutil.rmtree(prefix, ignore_errors=True)
 
@@ -1293,6 +1359,7 @@ def format_summary(summary):
         f"content: {summary['content']}",
         f"nonblock: {summary['nonblock']}",
         f"continue: {summary['continue']}",
+        f"udp: {summary['udp']}",
         f"concurrent: {summary['concurrent']}",
         f"task7: {summary['task7']}",
         f"disconnect: {summary['disconnect']}",

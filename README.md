@@ -160,7 +160,7 @@ The file is read once at `nginx -t` / reload, must be a regular UTF-8 file,
 and is compiled with `compile_source`.
 
 Config accepts catalogued ngx hosts in the access phase, including timers,
-codec, time, metadata, constants, `ngx::log`, and `ngx::shared::*`. `print` is not a host (use `ngx::log`); `runtime::sleep`, unknown imports, and
+codec, time, metadata, constants, `ngx::log`, `ngx::shared::*`, and UDP cosocket. `print` is not a host (use `ngx::log`); `runtime::sleep`, unknown imports, and
 phase-forbidden imports are rejected at configuration time. Unknown
 modules fail compile or import check. Duplicate directives in the same
 location are rejected. Unset nested locations inherit the parent
@@ -209,6 +209,18 @@ ngx::sleep(0.01);
 ngx::sleep_ms(10);
 ```
 
+UDP echo to a connected peer:
+
+```rss
+use ngx;
+let sock = ngx::socket::udp();
+ngx::socket::udp::settimeout(sock, 1000);
+ngx::socket::udp::setpeername(sock, "127.0.0.1", 53);
+ngx::socket::udp::send(sock, "ping");
+ngx::socket::udp::receive(sock, null);
+ngx::socket::udp::close(sock);
+```
+
 `ngx::sleep` is a `pd-host-function` async host (`seconds:number -> null`).
 `seconds` is an OpenResty-style integer or float; negative, NaN, infinity,
 and duration overflow are rejected. `ngx::sleep_ms` is the millisecond
@@ -235,7 +247,7 @@ returned to the pool.
 
 ## Runtime and compatibility limits
 
-The Release A ngx host surface (signatures, phases, yield behavior,
+The current ngx host surface (signatures, phases, yield behavior,
 limits, and OpenResty adaptations) is listed in
 [docs/ngx-api-compatibility.md](docs/ngx-api-compatibility.md).
 

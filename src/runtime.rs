@@ -81,6 +81,7 @@ impl WorkerRuntime {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_time()
+            .enable_io()
             .thread_name("ngx-rustscript-async")
             .build()
             .map_err(|err| RuntimeError::RuntimeBuild(err.to_string()))?;

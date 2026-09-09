@@ -186,6 +186,15 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
                     entry.openresty_name
                 );
             }
+            HostFamily::Cosocket => {
+                assert_eq!(entry.capabilities, &[HostCapability::Cosocket]);
+                assert!(
+                    entry.openresty_name.starts_with("ngx.socket."),
+                    "{} Cosocket hosts must name ngx.socket.*, got {}",
+                    entry.name,
+                    entry.openresty_name
+                );
+            }
         }
     }
 }
