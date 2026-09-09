@@ -457,10 +457,11 @@ mod tests {
     }
 
     #[test]
-    fn compile_time_runtime_has_only_time_not_net() {
+    fn compile_time_runtime_enables_time_and_io() {
         let _rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_time()
+            .enable_io()
             .build()
             .unwrap();
     }

@@ -29,12 +29,16 @@ pub use catalog::{
     NGX_SHARED_GET_STALE_NAME, NGX_SHARED_INCR_NAME, NGX_SHARED_LLEN_NAME, NGX_SHARED_LPOP_NAME,
     NGX_SHARED_LPUSH_NAME, NGX_SHARED_REPLACE_NAME, NGX_SHARED_RPOP_NAME, NGX_SHARED_RPUSH_NAME,
     NGX_SHARED_SAFE_ADD_NAME, NGX_SHARED_SAFE_SET_NAME, NGX_SHARED_SET_NAME, NGX_SHARED_TTL_NAME,
-    NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_SOCKET_UDP_BIND_NAME, NGX_SOCKET_UDP_CLOSE_NAME,
-    NGX_SOCKET_UDP_NAME, NGX_SOCKET_UDP_RECEIVE_NAME, NGX_SOCKET_UDP_RESOURCE_KEY,
-    NGX_SOCKET_UDP_SEND_NAME, NGX_SOCKET_UDP_SETPEERNAME_NAME, NGX_SOCKET_UDP_SETTIMEOUT_NAME,
-    NGX_STATUS_GET_NAME, NGX_STATUS_SET_NAME, NGX_TIME_NAME, NGX_TODAY_NAME, NGX_UNESCAPE_URI_NAME,
-    NGX_UPDATE_TIME_NAME, NGX_UTCTIME_NAME, NGX_VAR_GET_NAME, NGX_VAR_SET_NAME, NgxPhase,
-    host_allowed_in_phase, manifest_entry, ngx_host_catalog, ngx_host_manifest,
+    NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_SOCKET_CONNECT_NAME, NGX_SOCKET_TCP_CLOSE_NAME,
+    NGX_SOCKET_TCP_CONNECT_NAME, NGX_SOCKET_TCP_NAME, NGX_SOCKET_TCP_RECEIVE_NAME,
+    NGX_SOCKET_TCP_RECEIVEANY_NAME, NGX_SOCKET_TCP_RECEIVEUNTIL_NAME, NGX_SOCKET_TCP_RESOURCE_KEY,
+    NGX_SOCKET_TCP_SEND_NAME, NGX_SOCKET_TCP_SETTIMEOUT_NAME, NGX_SOCKET_UDP_BIND_NAME,
+    NGX_SOCKET_UDP_CLOSE_NAME, NGX_SOCKET_UDP_NAME, NGX_SOCKET_UDP_RECEIVE_NAME,
+    NGX_SOCKET_UDP_RESOURCE_KEY, NGX_SOCKET_UDP_SEND_NAME, NGX_SOCKET_UDP_SETPEERNAME_NAME,
+    NGX_SOCKET_UDP_SETTIMEOUT_NAME, NGX_STATUS_GET_NAME, NGX_STATUS_SET_NAME, NGX_TIME_NAME,
+    NGX_TODAY_NAME, NGX_UNESCAPE_URI_NAME, NGX_UPDATE_TIME_NAME, NGX_UTCTIME_NAME,
+    NGX_VAR_GET_NAME, NGX_VAR_SET_NAME, NgxPhase, host_allowed_in_phase, manifest_entry,
+    ngx_host_catalog, ngx_host_manifest,
 };
 pub use context::{
     AllowedOps, RequestDisposition, ScopeError, VmEntryObservation, capture_vm_entries,
@@ -254,6 +258,15 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         NGX_SOCKET_UDP_RECEIVE_NAME,
         NGX_SOCKET_UDP_CLOSE_NAME,
         NGX_SOCKET_UDP_SETTIMEOUT_NAME,
+        NGX_SOCKET_TCP_NAME,
+        NGX_SOCKET_TCP_CONNECT_NAME,
+        NGX_SOCKET_CONNECT_NAME,
+        NGX_SOCKET_TCP_SEND_NAME,
+        NGX_SOCKET_TCP_RECEIVE_NAME,
+        NGX_SOCKET_TCP_RECEIVEANY_NAME,
+        NGX_SOCKET_TCP_RECEIVEUNTIL_NAME,
+        NGX_SOCKET_TCP_CLOSE_NAME,
+        NGX_SOCKET_TCP_SETTIMEOUT_NAME,
     ]
 }
 
@@ -683,6 +696,33 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
     vm.bind_static_function(
         NGX_SOCKET_UDP_SETTIMEOUT_NAME,
         layout::helpers::socket::settimeout,
+    );
+    vm.bind_static_function(NGX_SOCKET_TCP_NAME, layout::helpers::socket::tcp);
+    vm.bind_static_function(
+        NGX_SOCKET_TCP_CONNECT_NAME,
+        layout::helpers::socket::tcp_connect,
+    );
+    vm.bind_static_function(NGX_SOCKET_CONNECT_NAME, layout::helpers::socket::connect);
+    vm.bind_static_function(NGX_SOCKET_TCP_SEND_NAME, layout::helpers::socket::tcp_send);
+    vm.bind_static_function(
+        NGX_SOCKET_TCP_RECEIVE_NAME,
+        layout::helpers::socket::tcp_receive,
+    );
+    vm.bind_static_function(
+        NGX_SOCKET_TCP_RECEIVEANY_NAME,
+        layout::helpers::socket::tcp_receiveany,
+    );
+    vm.bind_static_function(
+        NGX_SOCKET_TCP_RECEIVEUNTIL_NAME,
+        layout::helpers::socket::tcp_receiveuntil,
+    );
+    vm.bind_static_function(
+        NGX_SOCKET_TCP_CLOSE_NAME,
+        layout::helpers::socket::tcp_close,
+    );
+    vm.bind_static_function(
+        NGX_SOCKET_TCP_SETTIMEOUT_NAME,
+        layout::helpers::socket::tcp_settimeout,
     );
 }
 

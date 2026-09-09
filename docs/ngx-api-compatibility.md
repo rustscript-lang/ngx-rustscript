@@ -5,11 +5,11 @@ This matrix is the authoritative current ngx host surface for
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **161** names in the same order.
+Those three lists contain the same **170** names in the same order.
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and documents only
-the hosts in this matrix (including UDP cosocket).
+the hosts in this matrix (including UDP and TCP cosocket).
 
 **Built and tested against official NGINX 1.30.4** (`nginx_version`
 1030004), ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`, and the
@@ -62,9 +62,10 @@ argument.
 | Control | 2 | sync |
 | Shared dict | 22 | sync |
 | Cosocket (UDP) | 7 | mixed |
+| Cosocket (TCP) | 9 | mixed |
 | Constants | 65 | sync |
 | of which HTTP status | 35 | sync |
-| **Production total** | **161** | |
+| **Production total** | **170** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
 the production manifest, catalog, or `bind_ngx_hosts`.
@@ -552,13 +553,57 @@ generation, DNS, IPv6, workers, and handle reuse after close are covered
 by `tests/ngx_udp_socket.rs` and `tests/socket_lifecycle.rs`. NGINX
 acceptance is `tests/nginx_integration.py`.
 
+## TCP cosocket
+
+`ngx.socket.tcp` is adapted as a typed VM resource plus nine explicit
+hosts (eight methods plus convenience `ngx.socket.connect`). The
+constructor returns a `resource` handle (`ngx.socket.tcp`). Async I/O
+futures hold only Tokio TCP/Unix stream halves, owned unread buffer,
+timeout, generation, and cancel identity — never a request, pool, VM,
+or raw pointer. Generation is checked before and after each await and
+on close. Request cleanup cancels the pending future and closes the
+resource (including the fd). One pending read and one pending write may
+run concurrently; a second same-direction op is a structured host
+error. Send loops until the full payload is written. Receive modes are
+exact size, `null`/`"*l"` line (CR ignored), and `"*a"` until peer
+close. `receiveany` returns at most `max` bytes. `receiveuntil` is
+exclusive of a bounded delimiter and preserves unread bytes, including
+overlap across fragments. Caps: DNS host 255 bytes, Unix path 107
+bytes, send/receive/unread buffer 1048576 bytes, delimiter 256 bytes.
+Timeout is milliseconds (OpenResty); `0` disables the timer. A transport
+timeout on send/receive is a `HostError` (`"{name} timeout"`). The
+socket stays connected and reusable (generation and fd survive), but
+under current VM policy a `HostError` still aborts the current
+script/request (`Error500`). This is not OpenResty's `nil, err`
+continuation. Connect timeout is also a `HostError` and drops the
+in-progress handshake. DNS and connect use Tokio, not the nginx
+resolver. The raw fd is never exposed.
+
+| OpenResty API | RustScript callable | Status | Phases | Yield | Limits | Semantic differences | Acceptance |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `ngx.socket.tcp` | `ngx::socket::tcp() -> resource` | adapted | `PHASE_SOCKET_UDP` | sync | VM resource table | Typed handle, not userdata. Cosocket request-owned even though sync. | `tests/ngx_tcp_socket.rs`, `tests/socket_lifecycle.rs` |
+| `tcpsock:connect` | `ngx::socket::tcp::connect(sock, host, port) -> null` | adapted | `PHASE_SOCKET_UDP` | Waiting | host ≤255; `unix:` path ≤107 with port 0; port 0–65535 | Tokio DNS/connect; IPv4/IPv6/Unix. | `tests/ngx_tcp_socket.rs`, `tests/socket_lifecycle.rs` |
+| `ngx.socket.connect` | `ngx::socket::connect(host, port) -> resource` | adapted | `PHASE_SOCKET_UDP` | Waiting | same as connect | Creates the TCP resource then connects. | `tests/ngx_tcp_socket.rs` |
+| `tcpsock:send` | `ngx::socket::tcp::send(sock, data) -> null` | adapted | `PHASE_SOCKET_UDP` | Waiting | 1048576-byte payload; string or bytes | Partial-write loop until complete. Transport timeout is HostError; the socket stays connected, but HostError aborts the current script/request. | `src/socket/tcp.rs`, `tests/ngx_tcp_socket.rs` |
+| `tcpsock:receive` | `ngx::socket::tcp::receive(sock, mode) -> bytes` | adapted | `PHASE_SOCKET_UDP` | Waiting | exact/`null`/`*l`/`*a`; max 1048576 | Line ignores CR. `*a` succeeds on peer close. Transport timeout is HostError; the socket stays connected, but HostError aborts the current script/request. | `src/socket/tcp.rs`, `tests/ngx_tcp_socket.rs` |
+| `tcpsock:receiveany` | `ngx::socket::tcp::receiveany(sock, max) -> bytes` | adapted | `PHASE_SOCKET_UDP` | Waiting | 1–1048576 | Returns unread first; one kernel read otherwise. | `tests/ngx_tcp_socket.rs` |
+| `tcpsock:receiveuntil` | `ngx::socket::tcp::receiveuntil(sock, delimiter) -> bytes` | adapted | `PHASE_SOCKET_UDP` | Waiting | delimiter 1–256 bytes | Single-shot, exclusive delimiter, unread preserved. | `tests/ngx_tcp_socket.rs` |
+| `tcpsock:close` | `ngx::socket::tcp::close(sock) -> null` | adapted | `PHASE_SOCKET_UDP` | sync | — | Double close is HostError. Cosocket request-owned. | `tests/ngx_tcp_socket.rs` |
+| `tcpsock:settimeout` | `ngx::socket::tcp::settimeout(sock, ms) -> null` | adapted | `PHASE_SOCKET_UDP` | sync | non-negative ms; `0` = no timer | Applies to subsequent ops; default 60000. | `tests/ngx_tcp_socket.rs` |
+
+TCP programs are request-owned (`HostFamily::Cosocket`). Lifecycle,
+timeout, cancel, shutdown, DNS, IPv4/IPv6/Unix, concurrent
+read+write / duplicate same-direction ops, and handle reuse are covered
+by `tests/ngx_tcp_socket.rs` and `tests/socket_lifecycle.rs`. NGINX
+acceptance is `tests/nginx_integration.py`.
+
 ## Out of scope
 
 Not production hosts in this matrix (do not import them):
 
 - Remaining body/output APIs (`ngx.req.read_body`, `ngx.print` / `ngx.say`, `ngx.eof`, ...)
 - `ngx.exec` / internal redirect (`set_uri jump=true`)
-- TCP cosocket, timer callbacks, light threads
+- Timer callbacks, light threads
 - Stream subsystem, `ndk.set_var.*`, Lua `coroutine.*`
 - `print`, `runtime::sleep`, and test hosts `ngx::probe` / `ngx::ready` /
   `ngx::fail`

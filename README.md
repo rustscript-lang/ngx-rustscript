@@ -5,8 +5,9 @@ phase. Location directive `access_by_rss_file <path>` compiles the script
 once at configuration time.
 
 Import-free scripts run synchronously to `Halted` on a worker-local VM
-pool. Scripts that import `ngx::sleep`, `ngx::sleep_ms`, or
-`ngx::socket::udp*` bind a request-local VM, return `NGX_AGAIN` while a
+pool. Scripts that import `ngx::sleep`, `ngx::sleep_ms`,
+`ngx::socket::udp*`, or `ngx::socket::tcp*` / `ngx::socket::connect`
+bind a request-local VM, return `NGX_AGAIN` while a
 generic host future is pending, and resume the same VM from the eventfd
 callback. Client disconnect during a wait finalizes the request as HTTP
 499. Graceful master shutdown cancels in-flight host futures instead of
@@ -221,6 +222,18 @@ ngx::socket::udp::receive(sock, null);
 ngx::socket::udp::close(sock);
 ```
 
+TCP echo to a connected peer:
+
+```rss
+use ngx;
+let sock = ngx::socket::tcp();
+ngx::socket::tcp::settimeout(sock, 1000);
+ngx::socket::tcp::connect(sock, "127.0.0.1", 8080);
+ngx::socket::tcp::send(sock, "ping");
+ngx::socket::tcp::receive(sock, 4);
+ngx::socket::tcp::close(sock);
+```
+
 `ngx::sleep` is a `pd-host-function` async host (`seconds:number -> null`).
 `seconds` is an OpenResty-style integer or float; negative, NaN, infinity,
 and duration overflow are rejected. `ngx::sleep_ms` is the millisecond
@@ -237,7 +250,7 @@ On each request the access handler leases a worker-thread-local VM via
 pool size is bounded. VM errors and unexpected `Waiting` on import-free
 programs fail the request with 500.
 
-Scripts that imported `ngx::sleep`, `ngx::sleep_ms`, or UDP cosocket
+Scripts that imported `ngx::sleep`, `ngx::sleep_ms`, or UDP/TCP cosocket
 hosts bind a request-local VM instead of the pool. `Waiting` returns
 `NGX_AGAIN` without incrementing `r->main->count`.
 The eventfd callback polls the waiting host op, resumes the same VM on the
@@ -256,8 +269,8 @@ limits, and OpenResty adaptations) is listed in
   `NGX_PROCESS_SINGLE`. Helper processes skip initialization. `nginx -t`,
   master, and config never create Tokio threads or the eventfd.
   `exit_process` shuts the runtime down and is idempotent.
-- Tokio features: `rt` + `rt-multi-thread` + `time` + `net` + `sync`
-  (UDP cosocket; no HTTP client). One worker thread named
+- Tokio features: `rt` + `rt-multi-thread` + `time` + `net` + `sync` + `io-util`
+  (UDP/TCP cosocket; no HTTP client). One worker thread named
   `ngx-rustscript-async`. The I/O driver is enabled alongside time.
 - Async wait capacity is `DEFAULT_MAX_IN_FLIGHT` (1024). Reserve is rejected
   when full. Host futures and wakers own only a queue sender and request

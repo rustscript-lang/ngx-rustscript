@@ -79,6 +79,16 @@ pub const NGX_SOCKET_UDP_RECEIVE_NAME: &str = "ngx::socket::udp::receive";
 pub const NGX_SOCKET_UDP_CLOSE_NAME: &str = "ngx::socket::udp::close";
 pub const NGX_SOCKET_UDP_SETTIMEOUT_NAME: &str = "ngx::socket::udp::settimeout";
 pub const NGX_SOCKET_UDP_RESOURCE_KEY: &str = "ngx.socket.udp";
+pub const NGX_SOCKET_TCP_NAME: &str = "ngx::socket::tcp";
+pub const NGX_SOCKET_TCP_CONNECT_NAME: &str = "ngx::socket::tcp::connect";
+pub const NGX_SOCKET_CONNECT_NAME: &str = "ngx::socket::connect";
+pub const NGX_SOCKET_TCP_SEND_NAME: &str = "ngx::socket::tcp::send";
+pub const NGX_SOCKET_TCP_RECEIVE_NAME: &str = "ngx::socket::tcp::receive";
+pub const NGX_SOCKET_TCP_RECEIVEANY_NAME: &str = "ngx::socket::tcp::receiveany";
+pub const NGX_SOCKET_TCP_RECEIVEUNTIL_NAME: &str = "ngx::socket::tcp::receiveuntil";
+pub const NGX_SOCKET_TCP_CLOSE_NAME: &str = "ngx::socket::tcp::close";
+pub const NGX_SOCKET_TCP_SETTIMEOUT_NAME: &str = "ngx::socket::tcp::settimeout";
+pub const NGX_SOCKET_TCP_RESOURCE_KEY: &str = "ngx.socket.tcp";
 
 pub const NGX_SHARED_DICT_NAME: &str = "ngx::shared::dict";
 pub const NGX_SHARED_GET_NAME: &str = "ngx::shared::get";
@@ -1122,13 +1132,78 @@ const MANIFEST: &[HostManifestEntry] = &[
         "ngx.shared.DICT.get_keys",
         PHASE_DICT_WRITE,
     ),
-    cosocket_entry(NGX_SOCKET_UDP_NAME, HostSyncKind::Sync),
-    cosocket_entry(NGX_SOCKET_UDP_BIND_NAME, HostSyncKind::Async),
-    cosocket_entry(NGX_SOCKET_UDP_SETPEERNAME_NAME, HostSyncKind::Async),
-    cosocket_entry(NGX_SOCKET_UDP_SEND_NAME, HostSyncKind::Async),
-    cosocket_entry(NGX_SOCKET_UDP_RECEIVE_NAME, HostSyncKind::Async),
-    cosocket_entry(NGX_SOCKET_UDP_CLOSE_NAME, HostSyncKind::Sync),
-    cosocket_entry(NGX_SOCKET_UDP_SETTIMEOUT_NAME, HostSyncKind::Sync),
+    cosocket_entry(NGX_SOCKET_UDP_NAME, HostSyncKind::Sync, "ngx.socket.udp"),
+    cosocket_entry(
+        NGX_SOCKET_UDP_BIND_NAME,
+        HostSyncKind::Async,
+        "ngx.socket.udp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_UDP_SETPEERNAME_NAME,
+        HostSyncKind::Async,
+        "ngx.socket.udp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_UDP_SEND_NAME,
+        HostSyncKind::Async,
+        "ngx.socket.udp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_UDP_RECEIVE_NAME,
+        HostSyncKind::Async,
+        "ngx.socket.udp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_UDP_CLOSE_NAME,
+        HostSyncKind::Sync,
+        "ngx.socket.udp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_UDP_SETTIMEOUT_NAME,
+        HostSyncKind::Sync,
+        "ngx.socket.udp",
+    ),
+    cosocket_entry(NGX_SOCKET_TCP_NAME, HostSyncKind::Sync, "ngx.socket.tcp"),
+    cosocket_entry(
+        NGX_SOCKET_TCP_CONNECT_NAME,
+        HostSyncKind::Async,
+        "ngx.socket.tcp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_CONNECT_NAME,
+        HostSyncKind::Async,
+        "ngx.socket.connect",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_SEND_NAME,
+        HostSyncKind::Async,
+        "ngx.socket.tcp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_RECEIVE_NAME,
+        HostSyncKind::Async,
+        "ngx.socket.tcp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_RECEIVEANY_NAME,
+        HostSyncKind::Async,
+        "ngx.socket.tcp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_RECEIVEUNTIL_NAME,
+        HostSyncKind::Async,
+        "ngx.socket.tcp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_CLOSE_NAME,
+        HostSyncKind::Sync,
+        "ngx.socket.tcp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_SETTIMEOUT_NAME,
+        HostSyncKind::Sync,
+        "ngx.socket.tcp",
+    ),
 ];
 
 const fn codec_entry(
@@ -1292,14 +1367,18 @@ const fn shared_dict_entry(
     }
 }
 
-const fn cosocket_entry(name: &'static str, sync: HostSyncKind) -> HostManifestEntry {
+const fn cosocket_entry(
+    name: &'static str,
+    sync: HostSyncKind,
+    openresty_name: &'static str,
+) -> HostManifestEntry {
     HostManifestEntry {
         name,
         family: HostFamily::Cosocket,
         sync,
         phases: PHASE_SOCKET_UDP,
         capabilities: COSOCKET_CAPABILITIES,
-        openresty_name: "ngx.socket.udp",
+        openresty_name,
     }
 }
 
@@ -1308,10 +1387,23 @@ pub fn udp_socket_resource_key() -> ResourceTypeKey {
         .expect("ngx.socket.udp is a valid resource type key")
 }
 
+pub fn tcp_socket_resource_key() -> ResourceTypeKey {
+    ResourceTypeKey::new(NGX_SOCKET_TCP_RESOURCE_KEY)
+        .expect("ngx.socket.tcp is a valid resource type key")
+}
+
 fn udp_sock_param() -> HostParamSchema {
     HostParamSchema::with_passing(
         "sock",
         HostTypeSchema::Resource(udp_socket_resource_key()),
+        HostParamPassing::Borrow,
+    )
+}
+
+fn tcp_sock_param() -> HostParamSchema {
+    HostParamSchema::with_passing(
+        "sock",
+        HostTypeSchema::Resource(tcp_socket_resource_key()),
         HostParamPassing::Borrow,
     )
 }
@@ -1765,6 +1857,73 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             ],
             HostTypeSchema::Null,
         ),
+        NGX_SOCKET_TCP_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_NAME,
+            vec![],
+            HostTypeSchema::Resource(tcp_socket_resource_key()),
+        ),
+        NGX_SOCKET_TCP_CONNECT_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_CONNECT_NAME,
+            vec![
+                tcp_sock_param(),
+                HostParamSchema::value("host", HostTypeSchema::String),
+                HostParamSchema::value("port", HostTypeSchema::Int),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_SOCKET_CONNECT_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_CONNECT_NAME,
+            vec![
+                HostParamSchema::value("host", HostTypeSchema::String),
+                HostParamSchema::value("port", HostTypeSchema::Int),
+            ],
+            HostTypeSchema::Resource(tcp_socket_resource_key()),
+        ),
+        NGX_SOCKET_TCP_SEND_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_SEND_NAME,
+            vec![
+                tcp_sock_param(),
+                HostParamSchema::value("data", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_SOCKET_TCP_RECEIVE_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_RECEIVE_NAME,
+            vec![
+                tcp_sock_param(),
+                HostParamSchema::value("mode", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Bytes,
+        ),
+        NGX_SOCKET_TCP_RECEIVEANY_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_RECEIVEANY_NAME,
+            vec![
+                tcp_sock_param(),
+                HostParamSchema::value("max", HostTypeSchema::Int),
+            ],
+            HostTypeSchema::Bytes,
+        ),
+        NGX_SOCKET_TCP_RECEIVEUNTIL_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_RECEIVEUNTIL_NAME,
+            vec![
+                tcp_sock_param(),
+                HostParamSchema::value("delimiter", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Bytes,
+        ),
+        NGX_SOCKET_TCP_CLOSE_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_CLOSE_NAME,
+            vec![tcp_sock_param()],
+            HostTypeSchema::Null,
+        ),
+        NGX_SOCKET_TCP_SETTIMEOUT_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_SETTIMEOUT_NAME,
+            vec![
+                tcp_sock_param(),
+                HostParamSchema::value("ms", HostTypeSchema::Int),
+            ],
+            HostTypeSchema::Null,
+        ),
         other => metadata_schema(other)
             .unwrap_or_else(|| panic!("ngx host catalog has no schema for {other}")),
     }
@@ -1882,6 +2041,10 @@ pub fn ngx_host_catalog() -> HostApiCatalog {
     builder.resource(ResourceTypeSchema::new(
         udp_socket_resource_key(),
         "OpenResty ngx.socket.udp handle",
+    ));
+    builder.resource(ResourceTypeSchema::new(
+        tcp_socket_resource_key(),
+        "OpenResty ngx.socket.tcp handle",
     ));
     for entry in MANIFEST {
         builder.function(schema_for(entry.name));

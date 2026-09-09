@@ -5,7 +5,8 @@
 
 use ngx_rustscript_nginx_test_stubs as _;
 
-use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener as StdTcpListener, UdpSocket as StdUdpSocket};
 use std::os::unix::io::RawFd;
 use std::sync::Arc;
 use std::thread;
@@ -448,4 +449,68 @@ fn oversized_datagram_names_the_host() {
     );
     handle.join().expect("peer thread");
     assert_eq!(status, AccessStatus::Error500);
+}
+
+#[test]
+fn tcp_constructor_only_program_requires_request_state() {
+    let program = compile("use ngx;\nlet sock = ngx::socket::tcp();\n");
+    assert!(
+        program_requires_request_state(&program),
+        "ngx::socket::tcp constructor is Cosocket and must not use the pooled VM"
+    );
+}
+
+#[test]
+fn tcp_worker_runtimes_isolate_sockets() {
+    let left = StdTcpListener::bind("127.0.0.1:0").expect("left");
+    let right = StdTcpListener::bind("127.0.0.1:0").expect("right");
+    let left_port = left.local_addr().unwrap().port();
+    let right_port = right.local_addr().unwrap().port();
+    let echo_left = thread::spawn(move || {
+        let (mut stream, _) = left.accept().expect("left accept");
+        let mut buf = [0u8; 1];
+        stream.read_exact(&mut buf).expect("left read");
+        assert_eq!(&buf, b"A");
+        stream.write_all(b"a").expect("left write");
+    });
+    let echo_right = thread::spawn(move || {
+        let (mut stream, _) = right.accept().expect("right accept");
+        let mut buf = [0u8; 1];
+        stream.read_exact(&mut buf).expect("right read");
+        assert_eq!(&buf, b"B");
+        stream.write_all(b"b").expect("right write");
+    });
+    let left_status = Driver::new(compile(&format!(
+        "use ngx;\nlet sock = ngx::socket::tcp();\nngx::socket::tcp::settimeout(sock, 1000);\nngx::socket::tcp::connect(sock, \"127.0.0.1\", {left_port});\nngx::socket::tcp::send(sock, \"A\");\nngx::socket::tcp::receive(sock, 1);\nngx::socket::tcp::close(sock);\n"
+    )))
+    .pump_until(Duration::from_secs(3));
+    let right_status = Driver::new(compile(&format!(
+        "use ngx;\nlet sock = ngx::socket::tcp();\nngx::socket::tcp::settimeout(sock, 1000);\nngx::socket::tcp::connect(sock, \"127.0.0.1\", {right_port});\nngx::socket::tcp::send(sock, \"B\");\nngx::socket::tcp::receive(sock, 1);\nngx::socket::tcp::close(sock);\n"
+    )))
+    .pump_until(Duration::from_secs(3));
+    echo_left.join().expect("left echo");
+    echo_right.join().expect("right echo");
+    assert_eq!(left_status, AccessStatus::Ok);
+    assert_eq!(right_status, AccessStatus::Ok);
+}
+
+#[test]
+fn tcp_request_cleanup_closes_the_peer_fd() {
+    let listener = StdTcpListener::bind("127.0.0.1:0").expect("listener");
+    listener.set_nonblocking(false).ok();
+    let port = listener.local_addr().unwrap().port();
+    let peer = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        let mut buf = [0u8; 8];
+        let n = stream.read(&mut buf).expect("peer sees close");
+        assert_eq!(n, 0, "cleanup must close the TCP fd so the peer reads EOF");
+    });
+    let mut driver = Driver::new(compile(&format!(
+        "use ngx;\nlet sock = ngx::socket::tcp();\nngx::socket::tcp::settimeout(sock, 60000);\nngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});\nngx::socket::tcp::receive(sock, 4);\n"
+    )));
+    driver.wait_until_waiting(Duration::from_secs(2));
+    assert_eq!(driver.worker.in_flight().unwrap(), 1);
+    driver.cleanup_pending();
+    peer.join().expect("peer");
 }
