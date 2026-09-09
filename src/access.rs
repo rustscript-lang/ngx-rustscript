@@ -179,6 +179,32 @@ impl Drop for HandlerGuard {
     }
 }
 
+/// Get or create the request-owned `ngx.ctx` store shared by access/content/log.
+pub(crate) fn ensure_shared_ngx_ctx(
+    request: &mut Request,
+) -> Result<*mut RequestLocalCtx, &'static str> {
+    if let Some(ctx) = request.get_module_ctx::<RequestPhaseCtx>(Module::module()) {
+        return Ok(ctx.ngx_ctx_ptr());
+    }
+    let raw = request.as_mut() as *mut ngx_http_request_t;
+    let phase_ctx = RequestPhaseCtx {
+        raw,
+        ngx_ctx: RefCell::new(RequestLocalCtx::new()),
+        access: RefCell::new(None),
+        content: RefCell::new(None),
+        output: RefCell::new(None),
+    };
+    let ctx_ptr = request.pool().allocate(phase_ctx);
+    if ctx_ptr.is_null() {
+        return Err("no memory for request state");
+    }
+    request.set_module_ctx(ctx_ptr.cast(), Module::module());
+    let Some(ctx) = request.get_module_ctx::<RequestPhaseCtx>(Module::module()) else {
+        return Err("missing request module ctx after allocate");
+    };
+    Ok(ctx.ngx_ctx_ptr())
+}
+
 impl Drop for RequestPhaseCtx {
     fn drop(&mut self) {
         // `Pool::allocate` registers this Drop as `ngx_pool_cleanup_add`.
@@ -233,7 +259,7 @@ fn mark_cached_clock_event_boundary() {
     crate::host::notify_cached_clock_event_boundary();
 }
 
-fn enter_phase_scope<R>(
+pub(crate) fn enter_phase_scope<R>(
     raw: *mut ngx_http_request_t,
     identity: RequestIdentity,
     phase: NgxPhase,
@@ -243,11 +269,15 @@ fn enter_phase_scope<R>(
     with_request_scope(raw, identity, phase, AllowedOps::for_phase(phase), f)
 }
 
-fn enter_phase_vm<R>(identity: RequestIdentity, phase: NgxPhase, f: impl FnOnce() -> R) -> R {
+pub(crate) fn enter_phase_vm<R>(
+    identity: RequestIdentity,
+    phase: NgxPhase,
+    f: impl FnOnce() -> R,
+) -> R {
     with_vm_request_scope(identity, phase, AllowedOps::for_phase(phase), f)
 }
 
-fn allocate_scope_identity() -> RequestIdentity {
+pub(crate) fn allocate_scope_identity() -> RequestIdentity {
     let request_id = next_request_id();
     WORKER_ACCESS.with(|state| {
         let mut state = state.borrow_mut();
@@ -489,6 +519,8 @@ fn complete_phase_status(
 ) -> Status {
     match status {
         AccessStatus::Again if slot == PhaseSlot::Content => {
+            #[cfg(ngx_rustscript_integration_hooks)]
+            crate::request_state::record_wait_count_inc();
             unsafe { ngx_rustscript_c_request_main_count_inc(raw) };
             Status::NGX_DONE
         }
@@ -520,7 +552,7 @@ fn apply_finalize_send(raw: *mut ngx_http_request_t, code: i32) -> Status {
     AccessStatus::Finalize(code).as_nginx()
 }
 
-fn next_request_id() -> u64 {
+pub(crate) fn next_request_id() -> u64 {
     WORKER_ACCESS.with(|state| {
         let mut state = state.borrow_mut();
         let id = state.next_id;

@@ -34,6 +34,7 @@ impl AllowedOps {
     pub const REQUEST_CTX: Self = Self { bits: 1 << 3 };
     pub const RESPONSE_WRITE: Self = Self { bits: 1 << 4 };
     pub const CONTROL: Self = Self { bits: 1 << 5 };
+    pub const RESPONSE_READ: Self = Self { bits: 1 << 6 };
 
     pub const fn union(self, other: Self) -> Self {
         Self {
@@ -52,8 +53,13 @@ impl AllowedOps {
                 .union(Self::REQUEST_WRITE)
                 .union(Self::LOG)
                 .union(Self::REQUEST_CTX)
+                .union(Self::RESPONSE_READ)
                 .union(Self::RESPONSE_WRITE)
                 .union(Self::CONTROL),
+            NgxPhase::Log => Self::REQUEST_READ
+                .union(Self::LOG)
+                .union(Self::REQUEST_CTX)
+                .union(Self::RESPONSE_READ),
             _ => Self::EMPTY,
         }
     }
@@ -490,6 +496,23 @@ pub fn with_current_request<R>(
 ) -> Result<R, ScopeError> {
     let frame = verified_frame(expected)?;
     if !frame.allowed.contains(AllowedOps::REQUEST_READ) {
+        return Err(ScopeError::OpsNotAllowed);
+    }
+    let _borrow = acquire_shared()?;
+    // SAFETY: worker main thread, identity/generation matched, pointer came
+    // from [`RequestExecutionScope::enter`] and the frame is still on the stack.
+    let request = unsafe { Request::from_ngx_http_request(frame.request) };
+    Ok(f(request))
+}
+
+/// Shared request access gated by an explicit ops bit (response reads).
+pub fn with_current_request_ops<R>(
+    expected: RequestIdentity,
+    required: AllowedOps,
+    f: impl for<'a> FnOnce(&'a Request) -> R,
+) -> Result<R, ScopeError> {
+    let frame = verified_frame(expected)?;
+    if !frame.allowed.contains(required) {
         return Err(ScopeError::OpsNotAllowed);
     }
     let _borrow = acquire_shared()?;

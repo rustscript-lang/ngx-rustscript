@@ -119,6 +119,7 @@ fn eval_in_request_ops(
 fn write_ops() -> AllowedOps {
     AllowedOps::REQUEST_READ
         .union(AllowedOps::REQUEST_WRITE)
+        .union(AllowedOps::RESPONSE_READ)
         .union(AllowedOps::RESPONSE_WRITE)
         .union(AllowedOps::CONTROL)
 }

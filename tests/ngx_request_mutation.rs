@@ -211,24 +211,31 @@ fn mutation_capabilities_do_not_broaden_request_read() {
         assert!(!entry.capabilities.contains(&HostCapability::RequestRead));
         assert!(!entry.capabilities.contains(&HostCapability::RequestCtx));
     }
-    for name in [
-        STATUS_GET,
-        STATUS_SET,
-        HEADER_GET,
-        HEADER_SET,
-        HEADER_SET_ALL,
-        HEADER_CLEAR,
-    ] {
+    for name in [STATUS_GET, HEADER_GET] {
+        let entry = manifest_entry(name).unwrap();
+        assert_eq!(entry.family, HostFamily::Response);
+        assert!(entry.capabilities.contains(&HostCapability::ResponseRead));
+        assert!(!entry.capabilities.contains(&HostCapability::ResponseWrite));
+        assert!(!entry.capabilities.contains(&HostCapability::RequestRead));
+        assert!(!entry.capabilities.contains(&HostCapability::RequestCtx));
+    }
+    for name in [STATUS_SET, HEADER_SET, HEADER_SET_ALL, HEADER_CLEAR] {
         let entry = manifest_entry(name).unwrap();
         assert_eq!(entry.family, HostFamily::Response);
         assert!(entry.capabilities.contains(&HostCapability::ResponseWrite));
+        assert!(!entry.capabilities.contains(&HostCapability::ResponseRead));
         assert!(!entry.capabilities.contains(&HostCapability::RequestRead));
         assert!(!entry.capabilities.contains(&HostCapability::RequestCtx));
     }
     let access = AllowedOps::for_phase(NgxPhase::Access);
     assert!(access.contains(AllowedOps::REQUEST_WRITE));
     assert!(access.contains(AllowedOps::RESPONSE_WRITE));
+    assert!(access.contains(AllowedOps::RESPONSE_READ));
     assert!(access.contains(AllowedOps::REQUEST_READ));
+    let log = AllowedOps::for_phase(NgxPhase::Log);
+    assert!(log.contains(AllowedOps::RESPONSE_READ));
+    assert!(!log.contains(AllowedOps::RESPONSE_WRITE));
+    assert!(!log.contains(AllowedOps::REQUEST_WRITE));
 }
 
 #[test]

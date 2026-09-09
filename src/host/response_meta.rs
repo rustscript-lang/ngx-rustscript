@@ -14,8 +14,8 @@ use super::super::VmResult;
 use super::{CallOutcome, IntoHostCallOutcome};
 use crate::host::{
     control_stop_error, current_identity, with_current_disposition_mut,
-    with_current_request_and_disposition_mut, with_current_request_mut_ops, AllowedOps,
-    RequestDisposition, ScopeError,
+    with_current_request_and_disposition_mut, with_current_request_mut_ops,
+    with_current_request_ops, AllowedOps, RequestDisposition, ScopeError,
 };
 
 const MAX_COPY_BYTES: usize = 65_536;
@@ -30,7 +30,12 @@ fn scope_err(err: ScopeError) -> VmError {
     VmError::HostError(err.to_string())
 }
 
-fn with_response<T>(f: impl FnOnce(&mut Request) -> VmResult<T>) -> VmResult<T> {
+fn with_response_read<T>(f: impl FnOnce(&Request) -> VmResult<T>) -> VmResult<T> {
+    let identity = current_identity().map_err(scope_err)?;
+    with_current_request_ops(identity, AllowedOps::RESPONSE_READ, f).map_err(scope_err)?
+}
+
+fn with_response_write<T>(f: impl FnOnce(&mut Request) -> VmResult<T>) -> VmResult<T> {
     let identity = current_identity().map_err(scope_err)?;
     with_current_request_mut_ops(identity, AllowedOps::RESPONSE_WRITE, f).map_err(scope_err)?
 }
@@ -563,7 +568,7 @@ fn allowed_redirect_status(status: i64) -> bool {
 /// then HTTP/0.9 maps to `9`. Unset HTTP/1.x is `0`.
 #[pd_host_function(name = "ngx::status::get")]
 pub fn status_get() -> VmResult<CallOutcome> {
-    with_response(|request| {
+    with_response_read(|request| {
         let status = unsafe { ngx_rustscript_c_resp_status(request.as_ref()) };
         ret(status as i64)
     })
@@ -575,7 +580,7 @@ pub fn status_set(status: i64) -> VmResult<CallOutcome> {
     if !(0..=999).contains(&status) {
         return Err(VmError::HostError("invalid response status".into()));
     }
-    with_response(|request| {
+    with_response_write(|request| {
         let raw = request.as_mut();
         reject_if_headers_sent(raw)?;
         raw.headers_out.status = status as ngx_uint_t;
@@ -587,7 +592,7 @@ pub fn status_set(status: i64) -> VmResult<CallOutcome> {
 #[pd_host_function(name = "ngx::header::get")]
 pub fn header_get(name: String) -> VmResult<CallOutcome> {
     validate_header_name(&name)?;
-    with_response(|request| {
+    with_response_read(|request| {
         let raw = request.as_ref();
         if let Some(value) = dedicated_response_header(raw, &name)? {
             return ret(value);
@@ -600,7 +605,7 @@ pub fn header_get(name: String) -> VmResult<CallOutcome> {
 #[pd_host_function(name = "ngx::header::set")]
 pub fn header_set(name: String, value: &Value) -> VmResult<CallOutcome> {
     let values = parse_header_values(value)?;
-    with_response(|request| {
+    with_response_write(|request| {
         set_or_clear_response_header(request.as_mut(), &name, values.clone())?;
         ret(())
     })
@@ -620,7 +625,7 @@ pub fn header_set_all(headers: &VmMap) -> VmResult<CallOutcome> {
         let values = parse_header_values(value)?;
         prepared.push((name.to_string(), values));
     }
-    with_response(|request| {
+    with_response_write(|request| {
         let raw = request.as_mut();
         reject_if_headers_sent(raw)?;
         validate_header_list(&raw.headers_out.headers)?;
@@ -665,7 +670,7 @@ pub fn header_set_all(headers: &VmMap) -> VmResult<CallOutcome> {
 /// Clear every response header and dedicated special fields.
 #[pd_host_function(name = "ngx::header::clear")]
 pub fn header_clear() -> VmResult<CallOutcome> {
-    with_response(|request| {
+    with_response_write(|request| {
         let raw = request.as_mut();
         reject_if_headers_sent(raw)?;
         clear_all_headers(&mut raw.headers_out.headers)?;

@@ -14,7 +14,7 @@ the hosts in this matrix (including UDP and TCP cosocket).
 **Built and tested against official NGINX 1.30.4** (`nginx_version`
 1030004), ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`, and the
 pinned `pd-vm` revision in the crate README. Executable directives are
-`access_by_rss_file` and `content_by_rss_file`.
+`access_by_rss_file`, `content_by_rss_file`, and `log_by_rss_file`.
 
 ## OpenResty documentation baseline
 
@@ -33,7 +33,7 @@ helpers as part of this module.
 | OpenResty API | lua-nginx-module v0.10.29 name |
 | RustScript callable | Production host import name and catalog signature |
 | Status | `supported` (same call shape and result kind) or `adapted` (intentional RustScript mapping) |
-| Phases | Catalog allowlist. Names are the `NgxPhase` display strings below. Runnable directives are `access_by_rss_file` (`access`) and `content_by_rss_file` (`content`). Config-time import checks use the directive's phase. |
+| Phases | Catalog allowlist. Names are the `NgxPhase` display strings below. Runnable directives are `access_by_rss_file` (`access`), `content_by_rss_file` (`content`), and `log_by_rss_file` (`log`). Config-time import checks use the directive's phase. |
 | Yield | `sync` (returns immediately) or `Waiting` (`VmStatus::Waiting`, `NGX_AGAIN`) |
 | Limits | Hard caps enforced by the host |
 | Semantic differences | Intentional adaptations versus OpenResty Lua |
@@ -210,8 +210,13 @@ host adds a further difference.
 
 ## Codec and hash
 
-Shared codec limits: 65536-byte input, 196608-byte output. All rows
-are sync.
+Shared codec limits: 65536-byte input, 196608-byte output. All rows are sync.
+
+OpenResty v0.10.29 documents these codec APIs for `log_by_lua*`
+(`ngx.escape_uri` context table includes `log_by_lua*`; the other codec
+rows share that allowlist except as noted). `log_by_rss_file` accepts
+them only because that citation exists and each name is on the closed
+Log allowlist.
 
 | OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -413,14 +418,19 @@ or list pointers. They require a live request scope.
 
 ## Response metadata
 
-`headers_out` hosts. Capability is `ResponseWrite` (get and set). Rejected after `header_sent`. Ordinary list plus dedicated Content-Type/Length/Location/Last-Modified/ETag.
+`headers_out` hosts. Getters use capability `ResponseRead`; setters use
+`ResponseWrite`. OpenResty v0.10.29 context tables list `log_by_lua*`
+for both `ngx.status` and `ngx.header.HEADER` (read and write).
+`log_by_rss_file` permits getters only. Setters are rejected after
+`header_sent` and at Log config/runtime. Ordinary list plus dedicated
+Content-Type/Length/Location/Last-Modified/ETag.
 
 | OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ngx.status` | `ngx::status::get() -> int` | adapted | `PHASE_RESPONSE_META` | none | Prefers `err_status`, then `headers_out.status`, then HTTP/0.9 maps to `9`. Unset HTTP/1.x is `0`. | `tests/ngx_request_mutation.rs`, `tests/ngx_task7_hardening.rs` |
-| `ngx.status` | `ngx::status::set(status: int) -> null` | adapted | `PHASE_RESPONSE_META` | 0-999 | Rejected after headers sent. | `tests/ngx_request_mutation.rs` |
-| `ngx.header.HEADER` | `ngx::header::get(name: string) -> unknown` | adapted | `PHASE_RESPONSE_META` | 256-byte token | Missing `null`; one string; duplicates array. Owned copies. Content-Type/Content-Length prefer dedicated fields. | `tests/ngx_request_mutation.rs` |
-| `ngx.header.HEADER` | `ngx::header::set(name: string, value: unknown) -> null` | adapted | `PHASE_RESPONSE_META` | 8192-byte value | `null` clears. Injection (CRLF/NUL/non-token) rejected. Relative Location does not set the dedicated pointer. New list slots are allocated before old matching names are deactivated. | `tests/ngx_request_mutation.rs` |
+| `ngx.status` | `ngx::status::get() -> int` | adapted | `PHASE_RESPONSE_META` | none | Prefers `err_status`, then `headers_out.status`, then HTTP/0.9 maps to `9`. Unset HTTP/1.x is `0`. Capability `ResponseRead`. Allowed in `log_by_rss_file`. | `tests/ngx_request_mutation.rs`, `tests/log_config.rs` |
+| `ngx.status` | `ngx::status::set(status: int) -> null` | adapted | `PHASE_RESPONSE_META` | 0-999 | Rejected after headers sent. Capability `ResponseWrite`. Rejected by `log_by_rss_file`. | `tests/ngx_request_mutation.rs`, `tests/log_config.rs` |
+| `ngx.header.HEADER` | `ngx::header::get(name: string) -> unknown` | adapted | `PHASE_RESPONSE_META` | 256-byte token | Missing `null`; one string; duplicates array. Owned copies. Content-Type/Content-Length prefer dedicated fields. Capability `ResponseRead`. Allowed in `log_by_rss_file`. | `tests/ngx_request_mutation.rs`, `tests/log_config.rs` |
+| `ngx.header.HEADER` | `ngx::header::set(name: string, value: unknown) -> null` | adapted | `PHASE_RESPONSE_META` | 8192-byte value | `null` clears. Injection (CRLF/NUL/non-token) rejected. Relative Location does not set the dedicated pointer. New list slots are allocated before old matching names are deactivated. Capability `ResponseWrite`. Rejected by `log_by_rss_file`. | `tests/ngx_request_mutation.rs` |
 | — | `ngx::header::set_all(headers: map) -> null` | adapted | `PHASE_RESPONSE_META` | same | Validate every pair first. Allocate the intended representation, then deactivate previous headers. Validation or allocation failure leaves the logical list unchanged (pool memory is not rolled back). | `tests/ngx_request_mutation.rs` |
 | — | `ngx::header::clear() -> null` | adapted | `PHASE_RESPONSE_META` | — | Hash-zero every output header and reset dedicated fields. | `tests/ngx_request_mutation.rs` |
 
@@ -646,9 +656,18 @@ Not production hosts in this matrix (do not import them):
 - `print`, `runtime::sleep`, and test hosts `ngx::probe` / `ngx::ready` /
   `ngx::fail`
 
-Catalog phase names other than `access` and `content` document OpenResty
-allowlists for later directives. They are not runnable entry points in
-this matrix.
+Catalog phase names other than `access`, `content`, and `log` document
+OpenResty allowlists for later directives. They are not runnable entry
+points in this matrix. `log_by_rss_file` is the executable Log-phase
+directive: synchronous and fail-closed. Config uses a closed positive
+allowlist (family + capability + name). Codec is included because
+OpenResty documents those APIs for `log_by_lua*`. Response getters are
+included from the same OpenResty context tables; setters stay rejected.
+The handler runs when NGINX invokes the log phase for the current
+request (`r->loc_conf` after rewrite / `error_page`). Subrequests
+require core `log_subrequest on` on the subrequest location
+(`ngx_http_finalize_request` in NGINX 1.30.4). `Waiting` logs `log handler cannot wait`,
+drops the VM, and never arms eventfd, a timer, or `r->main->count`.
 
 ## Maintaining this matrix
 

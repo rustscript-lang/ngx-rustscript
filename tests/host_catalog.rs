@@ -14,11 +14,11 @@ use ngx_rustscript::config::{
 use ngx_rustscript::host::{
     HostCapability, HostFamily, HostSyncKind, NGX_CRC32_LONG_NAME, NGX_CRC32_SHORT_NAME,
     NGX_DECODE_ARGS_NAME, NGX_DECODE_BASE64_NAME, NGX_DECODE_BASE64MIME_NAME, NGX_ENCODE_ARGS_NAME,
-    NGX_ENCODE_BASE64_NAME, NGX_ESCAPE_URI_NAME, NGX_HMAC_SHA1_NAME, NGX_MD5_BIN_NAME,
-    NGX_MD5_NAME, NGX_NOW_NAME, NGX_QUOTE_SQL_STR_NAME, NGX_SHA1_BIN_NAME, NGX_SLEEP_MS_NAME,
-    NGX_SLEEP_NAME, NGX_TIME_NAME, NGX_UNESCAPE_URI_NAME, NGX_UPDATE_TIME_NAME, NgxPhase,
-    bind_ngx_hosts, host_allowed_in_phase, ngx_host_catalog, ngx_host_manifest,
-    production_runtime_host_names,
+    NGX_ENCODE_BASE64_NAME, NGX_ESCAPE_URI_NAME, NGX_HEADER_GET_NAME, NGX_HMAC_SHA1_NAME,
+    NGX_MD5_BIN_NAME, NGX_MD5_NAME, NGX_NOW_NAME, NGX_QUOTE_SQL_STR_NAME, NGX_SHA1_BIN_NAME,
+    NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_STATUS_GET_NAME, NGX_TIME_NAME, NGX_UNESCAPE_URI_NAME,
+    NGX_UPDATE_TIME_NAME, NgxPhase, bind_ngx_hosts, host_allowed_in_phase, ngx_host_catalog,
+    ngx_host_manifest, production_runtime_host_names,
 };
 use vm::{HostTypeSchema, Program, Vm};
 
@@ -196,7 +196,11 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
                 } else {
                     assert_eq!(entry.sync, HostSyncKind::Sync);
                 }
-                assert_eq!(entry.capabilities, &[HostCapability::ResponseWrite]);
+                if entry.name == NGX_STATUS_GET_NAME || entry.name == NGX_HEADER_GET_NAME {
+                    assert_eq!(entry.capabilities, &[HostCapability::ResponseRead]);
+                } else {
+                    assert_eq!(entry.capabilities, &[HostCapability::ResponseWrite]);
+                }
             }
             HostFamily::Control => {
                 assert_eq!(entry.sync, HostSyncKind::Sync);

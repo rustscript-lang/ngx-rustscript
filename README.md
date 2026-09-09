@@ -1,8 +1,9 @@
 # ngx-rustscript
 
-NGINX dynamic HTTP module that hosts RustScript (`pd-vm`) at the access
-phase. Location directive `access_by_rss_file <path>` compiles the script
-once at configuration time.
+NGINX dynamic HTTP module that hosts RustScript (`pd-vm`) at the access,
+content, and log phases. Location directives `access_by_rss_file <path>`,
+`content_by_rss_file <path>`, and `log_by_rss_file <path>` compile the
+script once at configuration time.
 
 Import-free scripts run synchronously to `Halted` on a worker-local VM
 pool. Scripts that import `ngx::sleep`, `ngx::sleep_ms`,
@@ -11,7 +12,9 @@ bind a request-local VM, return `NGX_AGAIN` while a
 generic host future is pending, and resume the same VM from the eventfd
 callback. Client disconnect during a wait finalizes the request as HTTP
 499. Graceful master shutdown cancels in-flight host futures instead of
-waiting them out.
+waiting them out. `log_by_rss_file` is synchronous and fail-closed: it
+runs after the response is complete, never waits, and logs errors
+without mutating the already-sent response.
 
 ## Requirements
 
@@ -147,6 +150,9 @@ http {
         location /t {
             access_by_rss_file /absolute/path/to/script.rss;
         }
+        location /logged/ {
+            log_by_rss_file /absolute/path/to/log.rss;
+        }
         location /plain/ {
         }
     }
@@ -154,6 +160,11 @@ http {
 ```
 
 `access_by_rss_file` is location-only and takes exactly one argument.
+`content_by_rss_file` and `log_by_rss_file` are independent location-only
+slots with the same one-argument shape. Duplicate directives in the same
+location are rejected per slot. Unset nested locations inherit each
+parent slot independently; an explicit child directive overrides that
+slot only.
 `rss_shared_dict <name> <size>` is HTTP-main only and takes exactly two
 arguments. Relative paths resolve with NGINX `ngx_conf_full_name` against the conf
 prefix (the directory of the config file). Absolute paths are unchanged.
@@ -167,6 +178,27 @@ modules fail compile or import check. Duplicate directives in the same
 location are rejected. Unset nested locations inherit the parent
 program; an explicit child directive overrides. Unconfigured locations
 keep the original access-phase decline.
+
+`log_by_rss_file` compiles under the Log phase against a closed
+positive allowlist keyed by family, capability, and import name.
+Accepted hosts are codec (OpenResty documents `ngx.escape_uri` and
+the other codec APIs for `log_by_lua*`), time, meta, log, constants,
+request reads, `ngx.ctx`, shared-dict, and response getters
+(`ngx::status::get`, `ngx::header::get`). OpenResty's `ngx.status` /
+`ngx.header.HEADER` context tables include `log_by_lua*` for both
+read and write; this module permits getters only. Sleep, UDP/TCP
+cosocket, output, control (`ngx::exit` / `ngx::redirect`), request
+writes, and response setters are rejected at `nginx -t`. A future
+family or capability is rejected until it is explicitly added.
+
+The handler runs when NGINX invokes the log phase for that request
+(current `r->loc_conf` after internal redirect / `error_page`).
+Subrequests require core `log_subrequest on` on the subrequest
+location (`ngx_http_finalize_request` in NGINX 1.30.4); otherwise
+NGINX skips the subrequest log phase. `Waiting` produces the exact
+`log handler cannot wait` error, drops the VM, and never arms
+eventfd, a timer, or `r->main->count`. Runtime errors and panics are
+logged and never change the already-sent response.
 
 Prove load with an isolated prefix:
 

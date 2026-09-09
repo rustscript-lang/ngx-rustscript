@@ -9,6 +9,7 @@ pub mod async_bridge;
 pub mod config;
 pub mod content;
 pub mod host;
+pub mod log;
 pub mod notify;
 pub mod phase;
 pub mod read_close;
@@ -33,9 +34,13 @@ impl HttpModule for Module {
     unsafe extern "C" fn postconfiguration(cf: *mut ngx_conf_t) -> ngx_int_t {
         // SAFETY: NGINX always calls postconfiguration with a live `ngx_conf_t`.
         let cf = unsafe { &mut *cf };
-        http::add_phase_handler::<access::AccessHandler>(cf)
-            .map_or(Status::NGX_ERROR, |_| Status::NGX_OK)
-            .into()
+        if http::add_phase_handler::<access::AccessHandler>(cf).is_err() {
+            return Status::NGX_ERROR.into();
+        }
+        if http::add_phase_handler::<log::LogHandler>(cf).is_err() {
+            return Status::NGX_ERROR.into();
+        }
+        Status::NGX_OK.into()
     }
 
     unsafe extern "C" fn merge_loc_conf(

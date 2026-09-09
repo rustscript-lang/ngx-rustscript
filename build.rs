@@ -46,6 +46,19 @@ fn main() {
 
     println!("cargo::rerun-if-env-changed=NGINX_SOURCE_DIR");
     println!("cargo::rerun-if-env-changed=NGINX_BUILD_DIR");
+    println!("cargo::rerun-if-env-changed=NGX_RUSTSCRIPT_INTEGRATION_HOOKS");
+    println!("cargo::rustc-check-cfg=cfg(ngx_rustscript_integration_hooks)");
+    // Only the current compile-time opt-in enables hooks. The fingerprint is
+    // always emitted so a leftover build-script stdout cannot keep the cfg on
+    // after NGX_RUSTSCRIPT_INTEGRATION_HOOKS is unset or set to anything else.
+    let hooks_enabled = std::env::var("NGX_RUSTSCRIPT_INTEGRATION_HOOKS").as_deref() == Ok("1");
+    println!(
+        "cargo::rustc-env=NGX_RUSTSCRIPT_HOOKS_FINGERPRINT={}",
+        if hooks_enabled { "1" } else { "0" }
+    );
+    if hooks_enabled {
+        println!("cargo::rustc-cfg=ngx_rustscript_integration_hooks");
+    }
 
     compile_request_shim();
 

@@ -209,6 +209,7 @@ pub enum HostCapability {
     RequestRead,
     RequestWrite,
     RequestCtx,
+    ResponseRead,
     ResponseWrite,
     Control,
     SharedDict,
@@ -366,6 +367,7 @@ const CONSTANT_CAPABILITIES: &[HostCapability] = &[HostCapability::Constant];
 const REQUEST_READ_CAPABILITIES: &[HostCapability] = &[HostCapability::RequestRead];
 const REQUEST_WRITE_CAPABILITIES: &[HostCapability] = &[HostCapability::RequestWrite];
 const REQUEST_CTX_CAPABILITIES: &[HostCapability] = &[HostCapability::RequestCtx];
+const RESPONSE_READ_CAPABILITIES: &[HostCapability] = &[HostCapability::ResponseRead];
 const RESPONSE_WRITE_CAPABILITIES: &[HostCapability] = &[HostCapability::ResponseWrite];
 const CONTROL_CAPABILITIES: &[HostCapability] = &[HostCapability::Control];
 const SHARED_DICT_CAPABILITIES: &[HostCapability] = &[HostCapability::SharedDict];
@@ -1032,24 +1034,24 @@ const MANIFEST: &[HostManifestEntry] = &[
         PHASE_REQ_SET_HEADER,
     ),
     request_write_entry(NGX_VAR_SET_NAME, "ngx.var.VARIABLE", PHASE_VAR_GET),
-    response_entry(NGX_STATUS_GET_NAME, "ngx.status", PHASE_RESPONSE_META),
-    response_entry(NGX_STATUS_SET_NAME, "ngx.status", PHASE_RESPONSE_META),
-    response_entry(
+    response_read_entry(NGX_STATUS_GET_NAME, "ngx.status", PHASE_RESPONSE_META),
+    response_write_entry(NGX_STATUS_SET_NAME, "ngx.status", PHASE_RESPONSE_META),
+    response_read_entry(
         NGX_HEADER_GET_NAME,
         "ngx.header.HEADER",
         PHASE_RESPONSE_META,
     ),
-    response_entry(
+    response_write_entry(
         NGX_HEADER_SET_NAME,
         "ngx.header.HEADER",
         PHASE_RESPONSE_META,
     ),
-    response_entry(
+    response_write_entry(
         NGX_HEADER_SET_ALL_NAME,
         "ngx.header.HEADER",
         PHASE_RESPONSE_META,
     ),
-    response_entry(
+    response_write_entry(
         NGX_HEADER_CLEAR_NAME,
         "ngx.header.HEADER",
         PHASE_RESPONSE_META,
@@ -1257,9 +1259,9 @@ const MANIFEST: &[HostManifestEntry] = &[
         HostSyncKind::Sync,
         "ngx.socket.tcp",
     ),
-    response_entry(NGX_SEND_HEADERS_NAME, "ngx.send_headers", PHASE_OUTPUT),
-    response_entry(NGX_PRINT_NAME, "ngx.print", PHASE_OUTPUT),
-    response_entry(NGX_SAY_NAME, "ngx.say", PHASE_OUTPUT),
+    response_write_entry(NGX_SEND_HEADERS_NAME, "ngx.send_headers", PHASE_OUTPUT),
+    response_write_entry(NGX_PRINT_NAME, "ngx.print", PHASE_OUTPUT),
+    response_write_entry(NGX_SAY_NAME, "ngx.say", PHASE_OUTPUT),
     HostManifestEntry {
         name: NGX_FLUSH_NAME,
         family: HostFamily::Response,
@@ -1268,7 +1270,7 @@ const MANIFEST: &[HostManifestEntry] = &[
         capabilities: RESPONSE_WRITE_CAPABILITIES,
         openresty_name: "ngx.flush",
     },
-    response_entry(NGX_EOF_NAME, "ngx.eof", PHASE_OUTPUT),
+    response_write_entry(NGX_EOF_NAME, "ngx.eof", PHASE_OUTPUT),
 ];
 
 const fn codec_entry(
@@ -1376,7 +1378,22 @@ const fn request_write_entry(
     }
 }
 
-const fn response_entry(
+const fn response_read_entry(
+    name: &'static str,
+    openresty_name: &'static str,
+    phases: &'static [NgxPhase],
+) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::Response,
+        sync: HostSyncKind::Sync,
+        phases,
+        capabilities: RESPONSE_READ_CAPABILITIES,
+        openresty_name,
+    }
+}
+
+const fn response_write_entry(
     name: &'static str,
     openresty_name: &'static str,
     phases: &'static [NgxPhase],
@@ -2227,4 +2244,224 @@ pub fn host_allowed_in_phase(name: &str, phase: NgxPhase) -> bool {
 /// Look up a production manifest entry by import name.
 pub fn manifest_entry(name: &str) -> Option<&'static HostManifestEntry> {
     MANIFEST.iter().find(|entry| entry.name == name)
+}
+
+/// Closed positive `log_by_rss_file` allowlist.
+///
+/// A host is accepted only when every gate matches an explicitly approved
+/// family, capability, and name. Future families or capabilities fail the
+/// exhaustive `match` at compile time. Unknown names, async hosts, and hosts
+/// whose catalog phases omit Log are rejected even if they are Sync.
+pub fn host_validates_for_log(entry: &HostManifestEntry) -> bool {
+    log_allowlist_accepts(
+        entry.name,
+        entry.family,
+        entry.sync,
+        entry.phases,
+        entry.capabilities,
+    )
+}
+
+/// Same closed allowlist as [`host_validates_for_log`], exposed so tests can
+/// construct synthetic future Sync+Log hosts without going through MANIFEST.
+pub fn log_allowlist_accepts(
+    name: &str,
+    family: HostFamily,
+    sync: HostSyncKind,
+    phases: &[NgxPhase],
+    capabilities: &[HostCapability],
+) -> bool {
+    if sync != HostSyncKind::Sync {
+        return false;
+    }
+    if !phases.contains(&NgxPhase::Log) {
+        return false;
+    }
+    if !log_family_allowed(family) {
+        return false;
+    }
+    if !capabilities.iter().copied().all(log_capability_allowed) {
+        return false;
+    }
+    log_name_allowed(name)
+}
+
+fn log_family_allowed(family: HostFamily) -> bool {
+    match family {
+        HostFamily::Codec
+        | HostFamily::Time
+        | HostFamily::Meta
+        | HostFamily::Log
+        | HostFamily::Constant
+        | HostFamily::Request
+        | HostFamily::RequestCtx
+        | HostFamily::SharedDict
+        | HostFamily::Response => true,
+        HostFamily::Timer | HostFamily::Cosocket | HostFamily::Control => false,
+    }
+}
+
+fn log_capability_allowed(cap: HostCapability) -> bool {
+    match cap {
+        HostCapability::Codec
+        | HostCapability::Time
+        | HostCapability::Meta
+        | HostCapability::Log
+        | HostCapability::Constant
+        | HostCapability::RequestRead
+        | HostCapability::RequestCtx
+        | HostCapability::SharedDict
+        | HostCapability::ResponseRead => true,
+        HostCapability::Timer
+        | HostCapability::Cosocket
+        | HostCapability::Control
+        | HostCapability::RequestWrite
+        | HostCapability::ResponseWrite => false,
+    }
+}
+
+/// Explicitly approved import names. A new host in an already-allowed family
+/// still needs a review entry here before `log_by_rss_file` will compile it.
+pub const LOG_ALLOWED_NAMES: &[&str] = &[
+    NGX_ESCAPE_URI_NAME,
+    NGX_UNESCAPE_URI_NAME,
+    NGX_ENCODE_ARGS_NAME,
+    NGX_DECODE_ARGS_NAME,
+    NGX_ENCODE_BASE64_NAME,
+    NGX_DECODE_BASE64_NAME,
+    NGX_DECODE_BASE64MIME_NAME,
+    NGX_CRC32_SHORT_NAME,
+    NGX_CRC32_LONG_NAME,
+    NGX_HMAC_SHA1_NAME,
+    NGX_MD5_NAME,
+    NGX_MD5_BIN_NAME,
+    NGX_SHA1_BIN_NAME,
+    NGX_QUOTE_SQL_STR_NAME,
+    NGX_TODAY_NAME,
+    NGX_TIME_NAME,
+    NGX_NOW_NAME,
+    NGX_UPDATE_TIME_NAME,
+    NGX_LOCALTIME_NAME,
+    NGX_UTCTIME_NAME,
+    NGX_COOKIE_TIME_NAME,
+    NGX_HTTP_TIME_NAME,
+    NGX_PARSE_HTTP_TIME_NAME,
+    "ngx::get_phase",
+    "ngx::config::subsystem",
+    "ngx::config::debug",
+    "ngx::config::prefix",
+    "ngx::config::nginx_version",
+    "ngx::config::nginx_configure",
+    "ngx::config::ngx_rustscript_version",
+    "ngx::worker::exiting",
+    "ngx::worker::pid",
+    "ngx::worker::pids",
+    "ngx::worker::count",
+    "ngx::worker::id",
+    "ngx::log",
+    "ngx::core::ok",
+    "ngx::core::error",
+    "ngx::core::again",
+    "ngx::core::done",
+    "ngx::core::declined",
+    "ngx::core::null_value",
+    "ngx::http::get",
+    "ngx::http::head",
+    "ngx::http::put",
+    "ngx::http::post",
+    "ngx::http::delete",
+    "ngx::http::options",
+    "ngx::http::mkcol",
+    "ngx::http::copy",
+    "ngx::http::move",
+    "ngx::http::propfind",
+    "ngx::http::proppatch",
+    "ngx::http::lock",
+    "ngx::http::unlock",
+    "ngx::http::patch",
+    "ngx::http::trace",
+    "ngx::http::status_continue",
+    "ngx::http::status_switching_protocols",
+    "ngx::http::status_ok",
+    "ngx::http::status_created",
+    "ngx::http::status_accepted",
+    "ngx::http::status_no_content",
+    "ngx::http::status_partial_content",
+    "ngx::http::status_special_response",
+    "ngx::http::status_moved_permanently",
+    "ngx::http::status_moved_temporarily",
+    "ngx::http::status_see_other",
+    "ngx::http::status_not_modified",
+    "ngx::http::status_temporary_redirect",
+    "ngx::http::status_permanent_redirect",
+    "ngx::http::status_bad_request",
+    "ngx::http::status_unauthorized",
+    "ngx::http::status_payment_required",
+    "ngx::http::status_forbidden",
+    "ngx::http::status_not_found",
+    "ngx::http::status_not_allowed",
+    "ngx::http::status_not_acceptable",
+    "ngx::http::status_request_timeout",
+    "ngx::http::status_conflict",
+    "ngx::http::status_gone",
+    "ngx::http::status_upgrade_required",
+    "ngx::http::status_too_many_requests",
+    "ngx::http::status_illegal",
+    "ngx::http::status_close",
+    "ngx::http::status_internal_server_error",
+    "ngx::http::status_not_implemented",
+    "ngx::http::status_bad_gateway",
+    "ngx::http::status_service_unavailable",
+    "ngx::http::status_gateway_timeout",
+    "ngx::http::status_version_not_supported",
+    "ngx::http::status_insufficient_storage",
+    "ngx::log_level::stderr",
+    "ngx::log_level::emerg",
+    "ngx::log_level::alert",
+    "ngx::log_level::crit",
+    "ngx::log_level::error",
+    "ngx::log_level::warn",
+    "ngx::log_level::notice",
+    "ngx::log_level::info",
+    "ngx::log_level::debug",
+    NGX_REQ_GET_METHOD_NAME,
+    NGX_REQ_GET_HEADERS_NAME,
+    NGX_REQ_GET_URI_ARGS_NAME,
+    NGX_REQ_GET_POST_ARGS_NAME,
+    NGX_REQ_IS_INTERNAL_NAME,
+    NGX_REQ_START_TIME_NAME,
+    NGX_IS_SUBREQUEST_NAME,
+    NGX_VAR_GET_NAME,
+    NGX_STATUS_GET_NAME,
+    NGX_HEADER_GET_NAME,
+    NGX_CTX_GET_NAME,
+    NGX_CTX_SET_NAME,
+    NGX_CTX_DELETE_NAME,
+    NGX_CTX_CLEAR_NAME,
+    NGX_SHARED_DICT_NAME,
+    NGX_SHARED_GET_NAME,
+    NGX_SHARED_GET_STALE_NAME,
+    NGX_SHARED_SET_NAME,
+    NGX_SHARED_SAFE_SET_NAME,
+    NGX_SHARED_ADD_NAME,
+    NGX_SHARED_SAFE_ADD_NAME,
+    NGX_SHARED_REPLACE_NAME,
+    NGX_SHARED_DELETE_NAME,
+    NGX_SHARED_INCR_NAME,
+    NGX_SHARED_TTL_NAME,
+    NGX_SHARED_EXPIRE_NAME,
+    NGX_SHARED_CAPACITY_NAME,
+    NGX_SHARED_FREE_SPACE_NAME,
+    NGX_SHARED_LPUSH_NAME,
+    NGX_SHARED_RPUSH_NAME,
+    NGX_SHARED_LPOP_NAME,
+    NGX_SHARED_RPOP_NAME,
+    NGX_SHARED_LLEN_NAME,
+    NGX_SHARED_FLUSH_ALL_NAME,
+    NGX_SHARED_FLUSH_EXPIRED_NAME,
+    NGX_SHARED_GET_KEYS_NAME,
+];
+
+fn log_name_allowed(name: &str) -> bool {
+    LOG_ALLOWED_NAMES.contains(&name)
 }

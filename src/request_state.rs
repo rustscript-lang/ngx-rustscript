@@ -7,6 +7,8 @@
 
 use std::collections::HashMap;
 use std::ptr::NonNull;
+#[cfg(ngx_rustscript_integration_hooks)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use ngx::core::Status;
@@ -20,6 +22,54 @@ use crate::host::{
     with_vm_request_scope_full,
 };
 use crate::notify::{CompletionPermit, RequestIdentity};
+
+#[cfg(ngx_rustscript_integration_hooks)]
+static WAIT_EVENTFD_ARMS: AtomicU64 = AtomicU64::new(0);
+#[cfg(ngx_rustscript_integration_hooks)]
+static WAIT_COUNT_INCS: AtomicU64 = AtomicU64::new(0);
+#[cfg(ngx_rustscript_integration_hooks)]
+static WAIT_TIMER_ARMS: AtomicU64 = AtomicU64::new(0);
+
+/// Exact fail-closed error when a log-phase VM returns `Waiting`.
+pub const LOG_CANNOT_WAIT: &str = "log handler cannot wait";
+
+/// Process-wide wait-arm counters: (eventfd, main-count, timer).
+#[cfg(ngx_rustscript_integration_hooks)]
+pub fn wait_arm_snapshot() -> (u64, u64, u64) {
+    (
+        WAIT_EVENTFD_ARMS.load(Ordering::Relaxed),
+        WAIT_COUNT_INCS.load(Ordering::Relaxed),
+        WAIT_TIMER_ARMS.load(Ordering::Relaxed),
+    )
+}
+
+#[cfg(ngx_rustscript_integration_hooks)]
+pub fn reset_wait_arm_snapshot() {
+    WAIT_EVENTFD_ARMS.store(0, Ordering::Relaxed);
+    WAIT_COUNT_INCS.store(0, Ordering::Relaxed);
+    WAIT_TIMER_ARMS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(ngx_rustscript_integration_hooks)]
+pub fn record_wait_count_inc() {
+    WAIT_COUNT_INCS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(ngx_rustscript_integration_hooks)]
+#[allow(dead_code)]
+pub fn record_wait_timer_arm() {
+    WAIT_TIMER_ARMS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Map a VM result onto the log-phase synchronous fail-closed policy.
+pub fn fail_closed_log_status(status: Result<VmStatus, VmError>) -> Result<(), String> {
+    match status {
+        Ok(VmStatus::Halted) => Ok(()),
+        Ok(VmStatus::Waiting(_)) => Err(LOG_CANNOT_WAIT.to_string()),
+        Ok(VmStatus::Yielded) => Err("log handler cannot yield".to_string()),
+        Err(err) => Err(err.to_string()),
+    }
+}
 
 fn with_vm_entry<T>(
     identity: RequestIdentity,
@@ -323,6 +373,14 @@ impl AccessExec {
         )
     }
 
+    pub fn wait_permit_armed(&self) -> bool {
+        self.permit.is_some()
+    }
+
+    pub fn vm_is_live(&self) -> bool {
+        self.vm.is_some()
+    }
+
     fn finish_from_disposition(&mut self, from_error: bool) -> AccessStatus {
         self.last_status = Some(VmStatus::Halted);
         let status = match std::mem::replace(&mut self.disposition, RequestDisposition::Continue) {
@@ -401,11 +459,57 @@ impl AccessExec {
         }
     }
 
+    /// Run once on the worker main thread. Waiting/yield fail closed without
+    /// arming eventfd or retaining the request.
+    pub fn run_sync_fail_closed(&mut self) -> Result<(), String> {
+        let identity = self.identity;
+        let ctx = self.ctx_ptr();
+        let disp = std::ptr::addr_of_mut!(self.disposition);
+        let vm = match self.vm.as_mut() {
+            Some(vm) => vm,
+            None => {
+                self.state = ExecState::Failed;
+                return Err("missing VM".into());
+            }
+        };
+        match with_vm_entry(identity, self.phase, ctx, disp, || vm.run()) {
+            Ok(VmStatus::Halted) => {
+                // Log phase must not apply disposition as an HTTP outcome.
+                self.last_status = Some(VmStatus::Halted);
+                self.disposition = RequestDisposition::Continue;
+                self.state = ExecState::Halted;
+                self.final_status = Some(AccessStatus::Ok);
+                self.vm = None;
+                self.release_owned_ctx();
+                Ok(())
+            }
+            Ok(VmStatus::Waiting(_)) => {
+                self.state = ExecState::Failed;
+                let _ = self.cleanup();
+                Err(LOG_CANNOT_WAIT.to_string())
+            }
+            Ok(VmStatus::Yielded) => {
+                self.state = ExecState::Failed;
+                let _ = self.cleanup();
+                Err("log handler cannot yield".into())
+            }
+            Err(err) => {
+                let mapped = fail_closed_log_status(Err(err));
+                let _ = self.cleanup();
+                mapped
+            }
+        }
+    }
+
     fn arm_wait(
         &mut self,
         registry: &mut IdentityRegistry<u64>,
         waiter: &impl AsyncWait,
     ) -> Result<AccessStatus, AccessStatus> {
+        #[cfg(ngx_rustscript_integration_hooks)]
+        if self.phase == NgxPhase::Log {
+            WAIT_EVENTFD_ARMS.fetch_add(1, Ordering::Relaxed);
+        }
         let permit = waiter.reserve().map_err(|_| {
             self.state = ExecState::Failed;
             AccessStatus::Error500
