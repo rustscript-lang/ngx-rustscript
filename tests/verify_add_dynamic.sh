@@ -74,9 +74,21 @@ for stub in ngx_conf_full_name ngx_conf_log_error ngx_array_push ngx_log_error_c
   ngx_pool_cleanup_add ngx_palloc ngx_http_core_module ngx_http_core_run_phases ngx_get_connection \
   ngx_free_connection ngx_close_connection ngx_event_actions ngx_event_flags ngx_process \
   ngx_http_test_reading ngx_http_block_reading ngx_handle_read_event ngx_posted_events \
-  ngx_pid ngx_worker ngx_exiting ngx_cycle ngx_core_module ngx_processes ngx_http_get_variable; do
+  ngx_pid ngx_worker ngx_exiting ngx_cycle ngx_core_module ngx_processes ngx_http_get_variable \
+  ngx_rustscript_test_request_new ngx_rustscript_test_request_free ngx_rustscript_test_request_sizeof \
+  ngx_rustscript_test_request_set_internal ngx_rustscript_test_request_set_filter_finalize \
+  ngx_rustscript_test_request_set_error_page ngx_rustscript_test_request_set_header_sent \
+  ngx_rustscript_test_request_set_reading_body ngx_rustscript_test_request_set_discard_body; do
   if printf '%s\n' "$NM_OUT" | awk '{print $1}' | grep -qx "$stub"; then
     echo "add-dynamic module must not define test NGINX stub $stub" >&2
+    exit 1
+  fi
+done
+
+for shim in ngx_rustscript_request_is_internal ngx_rustscript_request_headers_sent \
+  ngx_rustscript_request_reading_body ngx_rustscript_request_discard_body; do
+  if ! printf '%s\n' "$NM_OUT" | awk '{print $1}' | grep -qx "$shim"; then
+    echo "add-dynamic module must define request shim $shim" >&2
     exit 1
   fi
 done

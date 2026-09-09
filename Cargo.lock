@@ -294,6 +294,7 @@ name = "ngx-rustscript"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "cc",
  "hmac",
  "libc",
  "md-5",

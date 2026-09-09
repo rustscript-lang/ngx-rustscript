@@ -35,5 +35,8 @@ default = ["export-modules"]
 # Required to emit `ngx_modules` when building a cdylib outside the NGINX buildsystem.
 export-modules = []
 
+[build-dependencies]
+cc = "1"
+
 [dev-dependencies]
 ngx-rustscript-nginx-test-stubs = { path = "tests/nginx_stubs" }

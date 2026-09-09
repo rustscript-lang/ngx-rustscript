@@ -562,8 +562,8 @@ fn flags_start_time_and_headers_sent_are_truthful() {
         other => panic!("expected start_time float, got {other:?}"),
     }
 
-    req.set_internal(1);
-    req.set_header_sent(1);
+    nginx_stubs::write_internal(ptr.cast(), true);
+    nginx_stubs::write_header_sent(ptr.cast(), true);
     assert_eq!(
         eval_in_request(ptr, "use ngx;\nngx::req::is_internal();\n").expect("internal"),
         Value::Bool(true)
@@ -1043,7 +1043,7 @@ fn get_post_args_file_backed_still_reading_and_corrupt_are_host_errors() {
     );
 
     live.body.temp_file = std::ptr::null_mut();
-    req.set_reading_body(1);
+    nginx_stubs::write_reading_body(ptr.cast(), true);
     let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
         .expect_err("still-reading body must error");
     assert!(
@@ -1051,7 +1051,7 @@ fn get_post_args_file_backed_still_reading_and_corrupt_are_host_errors() {
         "got {err}"
     );
 
-    req.set_reading_body(0);
+    nginx_stubs::write_reading_body(ptr.cast(), false);
     live._chains[0].buf = std::ptr::null_mut();
     let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
         .expect_err("corrupt body chain must error");

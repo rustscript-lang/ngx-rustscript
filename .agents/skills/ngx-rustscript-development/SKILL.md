@@ -18,6 +18,7 @@ description: Use when developing, debugging, reviewing, or testing ngx-rustscrip
 - The current pinned macro does not expose compiler catalog generation. Keep the separate `HostApiCatalog` declaration as minimal configuration-time import allowlist metadata; never use it to implement runtime dispatch.
 - Do not handwrite `HostFunction`, `HostArgsFunction`, `HostFunctionSchema`, argument decoding, or `CallOutcome::Yield` replay for ordinary hosts.
 - Inspect the exact pinned macro parser before adding attributes. Preserve the verified module re-exports required by generated code.
+- Do not read NGINX C bitfields through nginx-sys bindgen accessors unless the layout has been ABI-probed against the configured compiler. Bindgen bitfield offsets for `ngx_http_request_t` can disagree with live GCC/Clang (for example bindgen `internal()` is not C `r->internal`). Use tiny C accessor shims compiled with configured NGINX headers (`DEP_NGINX_INCLUDE` / `DEP_NGINX_CFLAGS`) for request bitfields such as `internal`, `header_sent`, `reading_body`, and `discard_body`.
 
 ## Release A ngx API surface
 

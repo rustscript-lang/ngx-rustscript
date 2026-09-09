@@ -46,8 +46,43 @@ fn main() {
     println!("cargo::rerun-if-env-changed=NGINX_SOURCE_DIR");
     println!("cargo::rerun-if-env-changed=NGINX_BUILD_DIR");
 
+    compile_request_shim();
+
     if cfg!(target_os = "macos") {
         println!("cargo::rustc-link-arg=-undefined");
         println!("cargo::rustc-link-arg=dynamic_lookup");
     }
+}
+
+fn compile_request_shim() {
+    println!("cargo::rerun-if-changed=src/nginx_request_shim.c");
+    println!("cargo::rerun-if-env-changed=DEP_NGINX_INCLUDE");
+    println!("cargo::rerun-if-env-changed=DEP_NGINX_CFLAGS");
+
+    let include = std::env::var_os("DEP_NGINX_INCLUDE").unwrap_or_else(|| {
+        panic!("DEP_NGINX_INCLUDE is required to compile src/nginx_request_shim.c")
+    });
+    if let Ok(include) = std::env::var("DEP_NGINX_INCLUDE") {
+        println!("cargo::rustc-env=DEP_NGINX_INCLUDE={include}");
+    }
+    if let Ok(cflags) = std::env::var("DEP_NGINX_CFLAGS") {
+        println!("cargo::rustc-env=DEP_NGINX_CFLAGS={cflags}");
+    } else {
+        println!("cargo::rustc-env=DEP_NGINX_CFLAGS=");
+    }
+
+    let mut build = cc::Build::new();
+    build
+        .file("src/nginx_request_shim.c")
+        .warnings(true)
+        .define("NGX_RUSTSCRIPT_NO_C_PUBLIC_ALIAS", None);
+    for path in std::env::split_paths(&include) {
+        build.include(path);
+    }
+    if let Ok(cflags) = std::env::var("DEP_NGINX_CFLAGS") {
+        for flag in cflags.split_whitespace() {
+            build.flag(flag);
+        }
+    }
+    build.compile("ngx_rustscript_request_shim");
 }

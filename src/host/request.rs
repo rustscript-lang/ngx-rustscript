@@ -1,6 +1,8 @@
 // Request-read hosts. Copy ngx_str/list bytes into owned VM values before
 // returning; never expose request, pool, or list pointers.
 
+use core::ffi::c_uint;
+
 use nginx_sys::{
     ngx_buf_t, ngx_chain_t, ngx_http_connection_t, ngx_http_request_body_t, ngx_http_request_t,
     ngx_list_part_t, ngx_list_t, ngx_str_t, ngx_table_elt_t, ngx_uint_t, NGX_HTTP_VERSION_10,
@@ -35,12 +37,46 @@ fn with_request<T>(f: impl FnOnce(&Request) -> VmResult<T>) -> VmResult<T> {
     with_current_request(identity, f).map_err(scope_err)?
 }
 
-// nginx-sys bindgen places `internal` at bit 84, but live official NGINX
-// 1.30.4 GCC stores C `r->internal` two bits later (bindgen bit 86, named
-// `filter_finalize`). error_page redirects set bits 86+87; index redirects
-// set 86. Stub tests call `set_internal(1)` which still writes bit 84.
-fn request_is_internal(raw: &ngx_http_request_t) -> bool {
-    raw.internal() != 0 || raw.filter_finalize() != 0
+unsafe extern "C" {
+    fn ngx_rustscript_c_request_is_internal(r: *const ngx_http_request_t) -> c_uint;
+    fn ngx_rustscript_c_request_headers_sent(r: *const ngx_http_request_t) -> c_uint;
+    fn ngx_rustscript_c_request_reading_body(r: *const ngx_http_request_t) -> c_uint;
+    fn ngx_rustscript_c_request_discard_body(r: *const ngx_http_request_t) -> c_uint;
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ngx_rustscript_request_is_internal(
+    r: *const ngx_http_request_t,
+) -> c_uint {
+    unsafe { ngx_rustscript_c_request_is_internal(r) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ngx_rustscript_request_headers_sent(
+    r: *const ngx_http_request_t,
+) -> c_uint {
+    unsafe { ngx_rustscript_c_request_headers_sent(r) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ngx_rustscript_request_reading_body(
+    r: *const ngx_http_request_t,
+) -> c_uint {
+    unsafe { ngx_rustscript_c_request_reading_body(r) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ngx_rustscript_request_discard_body(
+    r: *const ngx_http_request_t,
+) -> c_uint {
+    unsafe { ngx_rustscript_c_request_discard_body(r) }
+}
+
+fn request_flag(
+    raw: &ngx_http_request_t,
+    read: unsafe extern "C" fn(*const ngx_http_request_t) -> c_uint,
+) -> bool {
+    unsafe { read(raw) != 0 }
 }
 
 fn bytes_as_string(bytes: Vec<u8>) -> String {
@@ -711,10 +747,10 @@ pub fn get_post_args(max_args: &Value) -> VmResult<CallOutcome> {
                 "requires the request body to be read first (Task 10)",
             ));
         }
-        if raw.reading_body() != 0 {
+        if request_flag(raw, ngx_rustscript_request_reading_body) {
             return Err(post_args_error("request body is still being read (Task 10)"));
         }
-        if raw.discard_body() != 0 {
+        if request_flag(raw, ngx_rustscript_request_discard_body) {
             return Err(post_args_error("discarded request body is deferred to Task 10"));
         }
         // SAFETY: request_body is non-null after the unread check.
@@ -728,7 +764,12 @@ pub fn get_post_args(max_args: &Value) -> VmResult<CallOutcome> {
 /// True when NGINX marked the request internal.
 #[pd_host_function(name = "ngx::req::is_internal")]
 pub fn is_internal() -> VmResult<CallOutcome> {
-    with_request(|request| ret(request_is_internal(request.as_ref())))
+    with_request(|request| {
+        ret(request_flag(
+            request.as_ref(),
+            ngx_rustscript_request_is_internal,
+        ))
+    })
 }
 
 /// Request start time as seconds + milliseconds / 1000.
@@ -758,5 +799,10 @@ pub fn is_subrequest() -> VmResult<CallOutcome> {
 /// True when NGINX has already sent response headers.
 #[pd_host_function(name = "ngx::headers_sent")]
 pub fn headers_sent() -> VmResult<CallOutcome> {
-    with_request(|request| ret(request.as_ref().header_sent() != 0))
+    with_request(|request| {
+        ret(request_flag(
+            request.as_ref(),
+            ngx_rustscript_request_headers_sent,
+        ))
+    })
 }

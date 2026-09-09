@@ -42,6 +42,27 @@ pub const FORBIDDEN_DEFINED_NGINX_STUBS: &[&str] = &[
     "ngx_http_get_variable",
 ];
 
+/// Production cdylib/add-dynamic module must define these C ABI shims.
+pub const REQUIRED_DEFINED_REQUEST_SHIMS: &[&str] = &[
+    "ngx_rustscript_request_is_internal",
+    "ngx_rustscript_request_headers_sent",
+    "ngx_rustscript_request_reading_body",
+    "ngx_rustscript_request_discard_body",
+];
+
+/// Test-only C setters must never appear in production artifacts.
+pub const FORBIDDEN_DEFINED_REQUEST_TEST_SETTERS: &[&str] = &[
+    "ngx_rustscript_test_request_new",
+    "ngx_rustscript_test_request_free",
+    "ngx_rustscript_test_request_sizeof",
+    "ngx_rustscript_test_request_set_internal",
+    "ngx_rustscript_test_request_set_filter_finalize",
+    "ngx_rustscript_test_request_set_error_page",
+    "ngx_rustscript_test_request_set_header_sent",
+    "ngx_rustscript_test_request_set_reading_body",
+    "ngx_rustscript_test_request_set_discard_body",
+];
+
 pub fn resolve_module_candidate(
     explicit_module: Option<&Path>,
     cargo_target_dir: Option<&Path>,
@@ -118,11 +139,47 @@ pub fn reject_defined_nginx_stubs(path: &Path) -> Result<(), ModuleArtifactError
     if let Some(stub) = FORBIDDEN_DEFINED_NGINX_STUBS
         .iter()
         .copied()
+        .chain(FORBIDDEN_DEFINED_REQUEST_TEST_SETTERS.iter().copied())
         .find(|name| symbols.iter().any(|symbol| symbol == name))
     {
         return Err(ModuleArtifactError::DefinedStub {
             artifact: path.to_path_buf(),
             stub: stub.to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub enum MissingShimError {
+    Missing { artifact: PathBuf, shim: String },
+}
+
+impl fmt::Display for MissingShimError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing { artifact, shim } => write!(
+                f,
+                "module cdylib {} is missing required request shim {shim}",
+                artifact.display()
+            ),
+        }
+    }
+}
+
+pub fn require_defined_request_shims(path: &Path) -> Result<(), MissingShimError> {
+    let symbols = defined_dynamic_symbols(path).map_err(|_| MissingShimError::Missing {
+        artifact: path.to_path_buf(),
+        shim: REQUIRED_DEFINED_REQUEST_SHIMS[0].to_string(),
+    })?;
+    if let Some(shim) = REQUIRED_DEFINED_REQUEST_SHIMS
+        .iter()
+        .copied()
+        .find(|name| !symbols.iter().any(|symbol| symbol == name))
+    {
+        return Err(MissingShimError::Missing {
+            artifact: path.to_path_buf(),
+            shim: shim.to_string(),
         });
     }
     Ok(())
@@ -142,6 +199,7 @@ pub fn module_cdylib() -> PathBuf {
         )
     });
     reject_defined_nginx_stubs(&path).unwrap_or_else(|err| panic!("{err}"));
+    require_defined_request_shims(&path).unwrap_or_else(|err| panic!("{err}"));
     path
 }
 
@@ -179,4 +237,11 @@ fn explicit_module_path_overrides_cargo_target_dir() {
 fn production_cdylib_does_not_define_test_nginx_stubs() {
     let module = module_cdylib();
     reject_defined_nginx_stubs(&module).expect("production cdylib must not export test C stubs");
+}
+
+#[test]
+fn production_cdylib_defines_request_bitfield_shims() {
+    let module = module_cdylib();
+    require_defined_request_shims(&module)
+        .expect("production cdylib must export request bitfield shims");
 }
