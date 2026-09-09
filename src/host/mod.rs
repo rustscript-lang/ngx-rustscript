@@ -32,9 +32,10 @@ pub use context::{
     AllowedOps, RequestDisposition, ScopeError, VmEntryObservation, capture_vm_entries,
     current_allowed_ops, current_identity, current_phase, current_request_live, is_active,
     with_current_ctx, with_current_ctx_mut, with_current_disposition_mut, with_current_request,
-    with_current_request_mut, with_current_request_mut_ops, with_request_scope,
-    with_request_scope_ctx, with_request_scope_full, with_vm_request_scope,
-    with_vm_request_scope_ctx, with_vm_request_scope_full,
+    with_current_request_and_disposition_mut, with_current_request_mut,
+    with_current_request_mut_ops, with_request_scope, with_request_scope_ctx,
+    with_request_scope_full, with_vm_request_scope, with_vm_request_scope_ctx,
+    with_vm_request_scope_full,
 };
 #[cfg(test)]
 pub(crate) use layout::helpers::request_ctx::live_owned_entry_count;
@@ -63,9 +64,12 @@ pub fn notify_cached_clock_event_boundary() {
 
 /// VM-stop sentinel used by `ngx::exit` / `ngx::redirect`.
 ///
-/// AccessExec consumes [`RequestDisposition`] only when the VM stopped with
-/// this exact host error. Ordinary `HostError` text cannot forge a
-/// disposition, including user-supplied strings that happen to mention control.
+/// The pinned VM has no control-flow error variant, so AccessExec uses this
+/// private HostError text plus a request-owned non-Continue disposition.
+/// AccessExec consumes the sentinel only when `disposition != Continue`.
+/// An arbitrary HostError with identical or user-shaped text is treated as a
+/// normal host failure (500) unless that disposition is already set.
+/// Ordinary HostError cannot forge a disposition.
 pub(crate) const CONTROL_STOP_MESSAGE: &str = "\u{1}ngx::control-stop";
 
 pub(crate) fn control_stop_error() -> VmError {
@@ -790,5 +794,20 @@ mod tests {
         assert!(catalog.function("ngx::fail").is_none());
         assert!(catalog.function("ngx::ready").is_none());
         assert!(catalog.function(NGX_NOW_NAME).is_some());
+    }
+
+    #[test]
+    fn control_stop_sentinel_requires_non_continue_disposition() {
+        let err = control_stop_error();
+        assert!(is_control_stop(&err));
+        let forged = VmError::HostError(CONTROL_STOP_MESSAGE.to_string());
+        assert!(is_control_stop(&forged));
+        let shaped = VmError::HostError("ngx::control-stop".into());
+        assert!(!is_control_stop(&shaped));
+        assert!(!is_control_stop(&VmError::HostError("boom".into())));
+        let continue_disp = RequestDisposition::Continue;
+        assert!(!(is_control_stop(&err) && continue_disp != RequestDisposition::Continue));
+        let finalize = RequestDisposition::Finalize(403);
+        assert!(is_control_stop(&err) && finalize != RequestDisposition::Continue);
     }
 }

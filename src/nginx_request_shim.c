@@ -266,6 +266,308 @@ ngx_int_t ngx_rustscript_c_send_last_response(ngx_http_request_t *r, ngx_int_t s
     return ngx_http_send_special(r, NGX_HTTP_LAST);
 }
 
+ngx_int_t ngx_rustscript_c_resp_status(const ngx_http_request_t *r)
+{
+    if (r == NULL) {
+        return 0;
+    }
+    if (r->err_status) {
+        return (ngx_int_t) r->err_status;
+    }
+    if (r->headers_out.status) {
+        return (ngx_int_t) r->headers_out.status;
+    }
+    if (r->http_version == NGX_HTTP_VERSION_9) {
+        return 9;
+    }
+    return 0;
+}
+
+ngx_int_t ngx_rustscript_c_parse_content_length(const u_char *data, size_t len, off_t *out)
+{
+    off_t n;
+
+    if (out == NULL) {
+        return NGX_ERROR;
+    }
+    if (data == NULL || len == 0) {
+        return NGX_ERROR;
+    }
+    n = ngx_atoof((u_char *) data, len);
+    if (n == NGX_ERROR) {
+        return NGX_ERROR;
+    }
+    *out = n;
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_rustscript_validate_host_copy(ngx_str_t *host, ngx_pool_t *pool, ngx_uint_t alloc)
+{
+    u_char  *h, ch;
+    size_t   i, dot_pos, host_len;
+    enum {
+        sw_usual = 0,
+        sw_literal,
+        sw_rest
+    } state;
+
+    if (host == NULL || host->data == NULL || host->len == 0) {
+        return NGX_DECLINED;
+    }
+
+    dot_pos = host->len;
+    host_len = host->len;
+
+    h = host->data;
+
+    state = sw_usual;
+
+    for (i = 0; i < host->len; i++) {
+        ch = h[i];
+
+        if (ch == '.') {
+            if (dot_pos == i - 1) {
+                return NGX_DECLINED;
+            }
+            dot_pos = i;
+        }
+
+        switch (state) {
+        case sw_usual:
+            if (alloc == 0) {
+                if (ch >= 'A' && ch <= 'Z') {
+                    alloc = 1;
+                }
+            }
+            if (ch == ':') {
+                host_len = i;
+                state = sw_rest;
+            } else if (ch == '[') {
+                state = sw_literal;
+            }
+            break;
+
+        case sw_literal:
+            if (ch >= 'A' && ch <= 'Z') {
+                alloc = 1;
+            }
+            if (ch == ']') {
+                host_len = i + 1;
+                state = sw_rest;
+            }
+            break;
+
+        case sw_rest:
+            if (ch >= 'A' && ch <= 'Z') {
+                alloc = 1;
+            }
+            break;
+        }
+
+        if (ngx_path_separator(ch) || ch == '\0') {
+            return NGX_DECLINED;
+        }
+    }
+
+    if (dot_pos == host_len - 1) {
+        host_len--;
+    }
+
+    if (host_len == 0) {
+        return NGX_DECLINED;
+    }
+
+    host->len = host_len;
+
+    if (alloc) {
+        if (pool == NULL) {
+            return NGX_ERROR;
+        }
+        host->data = ngx_pnalloc(pool, host_len);
+        if (host->data == NULL) {
+            return NGX_ERROR;
+        }
+        ngx_strlow(host->data, h, host_len);
+    }
+
+    return NGX_OK;
+}
+
+ngx_int_t ngx_rustscript_c_validate_host(ngx_pool_t *pool, u_char *data, size_t len,
+    ngx_str_t *server_out)
+{
+    ngx_str_t host;
+    ngx_int_t rc;
+
+    if (data == NULL || len == 0 || server_out == NULL) {
+        return NGX_ERROR;
+    }
+    host.data = data;
+    host.len = len;
+    rc = ngx_rustscript_validate_host_copy(&host, pool, 0);
+    if (rc != NGX_OK) {
+        return NGX_ERROR;
+    }
+    *server_out = host;
+    return NGX_OK;
+}
+
+void ngx_rustscript_c_invalidate_cached_host(ngx_http_request_t *r)
+{
+    ngx_http_core_main_conf_t *cmcf;
+    ngx_http_variable_t       *v;
+    ngx_uint_t                 hash;
+    u_char                     low[sizeof("host") - 1];
+
+    if (r == NULL || r->variables == NULL) {
+        return;
+    }
+    cmcf = ngx_http_get_module_main_conf(r, ngx_http_core_module);
+    if (cmcf == NULL || cmcf->variables.elts == NULL) {
+        return;
+    }
+    hash = ngx_hash_strlow(low, (u_char *) "host", sizeof(low));
+    v = ngx_hash_find(&cmcf->variables_hash, hash, low, sizeof(low));
+    if (v == NULL || !(v->flags & NGX_HTTP_VAR_INDEXED)) {
+        return;
+    }
+    if (v->index >= cmcf->variables.nelts) {
+        return;
+    }
+    r->variables[v->index].valid = 0;
+    r->variables[v->index].not_found = 0;
+}
+
+static u_char *
+ngx_rustscript_substr(u_char *s, size_t len, const char *needle, size_t nlen)
+{
+    size_t i;
+
+    if (s == NULL || needle == NULL || nlen == 0 || len < nlen) {
+        return NULL;
+    }
+    for (i = 0; i + nlen <= len; i++) {
+        if (memcmp(s + i, needle, nlen) == 0) {
+            return s + i;
+        }
+    }
+    return NULL;
+}
+
+void ngx_rustscript_c_headers_in_apply_user_agent(ngx_http_request_t *r, ngx_table_elt_t *h)
+{
+    u_char   *user_agent, *msie;
+    size_t    ua_len;
+    unsigned  msie_f = 0, msie6 = 0, opera = 0, gecko = 0, chrome = 0, safari = 0, konqueror = 0;
+
+    if (r == NULL) {
+        return;
+    }
+
+    r->headers_in.user_agent = h;
+
+    if (h != NULL && h->value.data != NULL && h->value.len > 0) {
+        user_agent = h->value.data;
+        ua_len = h->value.len;
+
+        msie = ngx_rustscript_substr(user_agent, ua_len, "MSIE ", 5);
+        if (msie && msie + 7 < user_agent + ua_len) {
+            msie_f = 1;
+            if (*(msie + 6) == '.') {
+                if (*(msie + 5) == '6') {
+                    msie6 = 1;
+                    if (ngx_rustscript_substr(msie + 8,
+                            (size_t) ((user_agent + ua_len) - (msie + 8)),
+                            "SV1", 3) != NULL)
+                    {
+                        msie6 = 0;
+                    }
+                } else if (*(msie + 5) < '6') {
+                    msie6 = 1;
+                }
+            }
+        }
+
+        if (ngx_rustscript_substr(user_agent, ua_len, "Opera", 5) != NULL) {
+            opera = 1;
+            msie_f = 0;
+            msie6 = 0;
+        }
+
+        if (!msie_f && !opera) {
+            if (ngx_rustscript_substr(user_agent, ua_len, "Gecko/", 6) != NULL) {
+                gecko = 1;
+            } else if (ngx_rustscript_substr(user_agent, ua_len, "Chrome/", 7) != NULL) {
+                chrome = 1;
+                safari = 1;
+            } else if (ngx_rustscript_substr(user_agent, ua_len, "Safari/", 7) != NULL
+                       && ngx_rustscript_substr(user_agent, ua_len, "Mac OS X", 8) != NULL)
+            {
+                safari = 1;
+            } else if (ngx_rustscript_substr(user_agent, ua_len, "Konqueror", 9) != NULL) {
+                konqueror = 1;
+            }
+        }
+    }
+
+    r->headers_in.msie = msie_f;
+    r->headers_in.msie6 = msie6;
+    r->headers_in.opera = opera;
+    r->headers_in.gecko = gecko;
+    r->headers_in.chrome = chrome;
+    r->headers_in.safari = safari;
+    r->headers_in.konqueror = konqueror;
+}
+
+static int
+ngx_rustscript_ci_substr(const u_char *s, size_t len, const char *needle, size_t nlen)
+{
+    size_t i, j;
+
+    if (s == NULL || needle == NULL || nlen == 0 || len < nlen) {
+        return 0;
+    }
+    for (i = 0; i + nlen <= len; i++) {
+        for (j = 0; j < nlen; j++) {
+            u_char a = s[i + j];
+            u_char b = (u_char) needle[j];
+            if (a >= 'A' && a <= 'Z') {
+                a |= 0x20;
+            }
+            if (b >= 'A' && b <= 'Z') {
+                b |= 0x20;
+            }
+            if (a != b) {
+                break;
+            }
+        }
+        if (j == nlen) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void ngx_rustscript_c_headers_in_apply_connection(ngx_http_request_t *r, ngx_table_elt_t *h)
+{
+    if (r == NULL) {
+        return;
+    }
+    r->headers_in.connection = h;
+    r->headers_in.connection_type = 0;
+    if (h == NULL || h->value.data == NULL || h->value.len == 0) {
+        return;
+    }
+    if (ngx_rustscript_ci_substr(h->value.data, h->value.len, "close", 5)) {
+        r->headers_in.connection_type = NGX_HTTP_CONNECTION_CLOSE;
+        return;
+    }
+    if (ngx_rustscript_ci_substr(h->value.data, h->value.len, "keep-alive", 10)) {
+        r->headers_in.connection_type = NGX_HTTP_CONNECTION_KEEP_ALIVE;
+    }
+}
+
 #ifndef NGX_RUSTSCRIPT_NO_C_PUBLIC_ALIAS
 unsigned int ngx_rustscript_request_is_internal(const ngx_http_request_t *r)
 {

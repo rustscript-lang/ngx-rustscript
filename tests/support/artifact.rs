@@ -70,6 +70,10 @@ pub const FORBIDDEN_DEFINED_REQUEST_TEST_SETTERS: &[&str] = &[
     "ngx_rustscript_test_request_set_header_sent",
     "ngx_rustscript_test_request_set_reading_body",
     "ngx_rustscript_test_request_set_discard_body",
+    "ngx_rustscript_stub_alloc_fail_after",
+    "ngx_rustscript_stub_alloc_reset",
+    "ngx_rustscript_test_headers_in_msie",
+    "ngx_rustscript_test_install_variable",
 ];
 
 pub fn resolve_module_candidate(

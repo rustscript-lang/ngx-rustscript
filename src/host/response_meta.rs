@@ -14,7 +14,8 @@ use super::super::VmResult;
 use super::{CallOutcome, IntoHostCallOutcome};
 use crate::host::{
     control_stop_error, current_identity, with_current_disposition_mut,
-    with_current_request_mut_ops, AllowedOps, RequestDisposition, ScopeError,
+    with_current_request_and_disposition_mut, with_current_request_mut_ops, AllowedOps,
+    RequestDisposition, ScopeError,
 };
 
 const MAX_COPY_BYTES: usize = 65_536;
@@ -34,15 +35,11 @@ fn with_response<T>(f: impl FnOnce(&mut Request) -> VmResult<T>) -> VmResult<T> 
     with_current_request_mut_ops(identity, AllowedOps::RESPONSE_WRITE, f).map_err(scope_err)?
 }
 
-fn with_control_request<T>(f: impl FnOnce(&mut Request) -> VmResult<T>) -> VmResult<T> {
-    let identity = current_identity().map_err(scope_err)?;
-    with_current_request_mut_ops(identity, AllowedOps::CONTROL, f).map_err(scope_err)?
-}
-
 unsafe extern "C" {
     fn ngx_rustscript_c_request_headers_sent(r: *const ngx_http_request_t) -> c_uint;
     fn ngx_rustscript_c_headers_out_reset_specials(r: *mut ngx_http_request_t);
     fn ngx_rustscript_c_parse_http_time(data: *const u8, len: usize) -> i64;
+    fn ngx_rustscript_c_resp_status(r: *const ngx_http_request_t) -> nginx_sys::ngx_int_t;
 }
 
 fn headers_sent(raw: &ngx_http_request_t) -> bool {
@@ -192,6 +189,23 @@ fn parse_header_values(value: &Value) -> VmResult<Option<Vec<String>>> {
             "header value expects string, array, or null".into(),
         )),
     }
+}
+
+fn validate_header_list(list: &ngx_list_t) -> VmResult<()> {
+    let mut part = std::ptr::addr_of!(list.part);
+    let mut seen = 0usize;
+    while !part.is_null() {
+        seen += 1;
+        if seen > MAX_LIST_PARTS {
+            return Err(VmError::HostError("malformed header list".into()));
+        }
+        let p = unsafe { &*part };
+        if p.nelts > 0 && p.elts.is_null() {
+            return Err(VmError::HostError("malformed header list".into()));
+        }
+        part = p.next;
+    }
+    Ok(())
 }
 
 fn for_each_header_mut(
@@ -433,6 +447,7 @@ fn set_or_clear_response_header(
 ) -> VmResult<()> {
     validate_header_name(name)?;
     reject_if_headers_sent(raw)?;
+    validate_header_list(&raw.headers_out.headers)?;
     let Some(values) = values.filter(|values| !values.is_empty()) else {
         clear_matching_headers_except(&mut raw.headers_out.headers, name, &[])?;
         apply_response_specials(raw, name, std::ptr::null_mut());
@@ -544,10 +559,14 @@ fn allowed_redirect_status(status: i64) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
-/// Current `headers_out.status`. Unset is `0`.
+/// Current response status. Prefers `err_status`, then `headers_out.status`,
+/// then HTTP/0.9 maps to `9`. Unset HTTP/1.x is `0`.
 #[pd_host_function(name = "ngx::status::get")]
 pub fn status_get() -> VmResult<CallOutcome> {
-    with_response(|request| ret(request.as_ref().headers_out.status as i64))
+    with_response(|request| {
+        let status = unsafe { ngx_rustscript_c_resp_status(request.as_ref()) };
+        ret(status as i64)
+    })
 }
 
 /// Set `headers_out.status`. Rejected after headers are sent.
@@ -604,6 +623,7 @@ pub fn header_set_all(headers: &VmMap) -> VmResult<CallOutcome> {
     with_response(|request| {
         let raw = request.as_mut();
         reject_if_headers_sent(raw)?;
+        validate_header_list(&raw.headers_out.headers)?;
         let old = collect_active_headers(&mut raw.headers_out.headers)?;
         let mut added = Vec::new();
         let mut specials = Vec::new();
@@ -691,15 +711,21 @@ pub fn redirect(uri: String, status: &Value) -> VmResult<CallOutcome> {
             ));
         }
     };
-    with_control_request(|request| {
+    let identity = current_identity().map_err(scope_err)?;
+    with_current_request_and_disposition_mut(identity, |request, disp| {
+        if *disp != RequestDisposition::Continue {
+            return Ok::<(), VmError>(());
+        }
         let raw = request.as_mut();
         reject_if_headers_sent(raw)?;
         set_or_clear_response_header(raw, "Location", Some(vec![uri.clone()]))?;
         raw.headers_out.status = code as ngx_uint_t;
+        *disp = RequestDisposition::ExternalRedirect {
+            uri: uri.clone(),
+            status: code as i32,
+        };
         Ok(())
-    })?;
-    stop_with_disposition(RequestDisposition::ExternalRedirect {
-        uri,
-        status: code as i32,
     })
+    .map_err(scope_err)??;
+    Err(control_stop_error())
 }

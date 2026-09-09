@@ -322,11 +322,17 @@ fn finish_from_raw(raw: *mut ngx_http_request_t) -> Status {
         );
     }
     if let AccessStatus::Finalize(code) = status {
-        unsafe {
-            let _ = ngx_rustscript_c_send_last_response(raw, code as ngx_int_t);
-        }
+        return apply_finalize_send(raw, code);
     }
     status.as_nginx()
+}
+
+fn apply_finalize_send(raw: *mut ngx_http_request_t, code: i32) -> Status {
+    let rc = unsafe { ngx_rustscript_c_send_last_response(raw, code as ngx_int_t) };
+    if rc == Status::NGX_ERROR.0 || rc > Status::NGX_OK.0 {
+        return Status(rc);
+    }
+    AccessStatus::Finalize(code).as_nginx()
 }
 
 fn next_request_id() -> u64 {

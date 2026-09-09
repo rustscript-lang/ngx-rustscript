@@ -264,7 +264,10 @@ fn exec_import_is_rejected_at_config_time() {
 
 #[test]
 fn set_method_updates_numeric_and_canonical_name() {
+    nginx_stubs::stub_alloc_reset();
+    nginx_stubs::stub_alloc_fail_after(8);
     let mut req = dummy_request();
+    req.pool = std::ptr::dangling_mut();
     let mut get = *b"GET";
     req.method = NGX_HTTP_GET as ngx_uint_t;
     req.method_name = ngx_str(&mut get);
@@ -280,6 +283,7 @@ fn set_method_updates_numeric_and_canonical_name() {
         "POST"
     );
     assert_eq!(req.method, NGX_HTTP_POST as ngx_uint_t);
+    nginx_stubs::stub_alloc_reset();
 }
 
 #[test]

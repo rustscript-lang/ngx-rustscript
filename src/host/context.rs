@@ -596,16 +596,39 @@ fn verified_disposition_frame(expected: RequestIdentity) -> Result<ScopeFrame, S
 
 /// Run `f` with the request-owned disposition after verifying `expected`.
 ///
-/// The HRTB keeps the mutable borrow inside `f`. Ordinary HostError cannot
-/// obtain this pointer.
+/// Acquires the exclusive REQUEST_BORROW guard so this cannot alias a
+/// nested `&mut Request` or a second disposition borrow. The HRTB keeps the
+/// mutable borrow inside `f`. Ordinary HostError cannot obtain this pointer.
 pub fn with_current_disposition_mut<R>(
     expected: RequestIdentity,
     f: impl for<'a> FnOnce(&'a mut RequestDisposition) -> R,
 ) -> Result<R, ScopeError> {
     let frame = verified_disposition_frame(expected)?;
+    let _borrow = acquire_exclusive()?;
     // SAFETY: worker main thread, identity/generation matched, pointer came
-    // from AccessExec via [`RequestExecutionScope::enter`].
+    // from AccessExec via [`RequestExecutionScope::enter`]. Exclusive because
+    // [`acquire_exclusive`] rejected any overlapping request borrow.
     Ok(f(unsafe { &mut *frame.disposition }))
+}
+
+/// Generation-safe exclusive helper that yields request + disposition together.
+///
+/// Used by `ngx::redirect` so Location/status/disposition mutate in one
+/// borrow that cannot be nested with another request accessor.
+pub fn with_current_request_and_disposition_mut<R>(
+    expected: RequestIdentity,
+    f: impl for<'a> FnOnce(&'a mut Request, &'a mut RequestDisposition) -> R,
+) -> Result<R, ScopeError> {
+    let frame = verified_frame(expected)?;
+    if !frame.allowed.contains(AllowedOps::CONTROL) {
+        return Err(ScopeError::OpsNotAllowed);
+    }
+    if frame.disposition.is_null() {
+        return Err(ScopeError::NullDisposition);
+    }
+    let _borrow = acquire_exclusive()?;
+    let request = unsafe { Request::from_ngx_http_request(frame.request) };
+    Ok(f(request, unsafe { &mut *frame.disposition }))
 }
 
 macro_rules! assert_not_impl_any {

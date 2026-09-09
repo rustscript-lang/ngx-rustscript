@@ -84,6 +84,37 @@ ngx_int_t ngx_http_send_special(ngx_http_request_t *r, ngx_uint_t flags)
     return NGX_OK;
 }
 
+off_t ngx_atoof(u_char *line, size_t n)
+{
+    off_t value = 0;
+
+    if (n == 0) {
+        return NGX_ERROR;
+    }
+    for (; n--; line++) {
+        if (*line < '0' || *line > '9') {
+            return NGX_ERROR;
+        }
+        value = value * 10 + (*line - '0');
+    }
+    return value;
+}
+
+void ngx_strlow(u_char *dst, u_char *src, size_t n)
+{
+    while (n) {
+        *dst = ngx_tolower(*src);
+        dst++;
+        src++;
+        n--;
+    }
+}
+
+ngx_int_t ngx_rustscript_c_resp_status(const ngx_http_request_t *r);
+void ngx_rustscript_c_headers_in_apply_user_agent(ngx_http_request_t *r, ngx_table_elt_t *h);
+ngx_int_t ngx_rustscript_c_validate_host(ngx_pool_t *pool, u_char *data, size_t len, ngx_str_t *out);
+ngx_int_t ngx_rustscript_c_parse_content_length(const u_char *data, size_t len, off_t *out);
+
 int main(void)
 {
     ngx_http_request_t r;
@@ -182,6 +213,59 @@ int main(void)
     }
     if (!r.filter_finalize) {
         fail("set_uri_flags must not clobber adjacent filter_finalize");
+    }
+
+    r.err_status = 500;
+    r.headers_out.status = 200;
+    r.http_version = NGX_HTTP_VERSION_11;
+    if (ngx_rustscript_c_resp_status(&r) != 500) {
+        fail("resp_status must prefer err_status");
+    }
+    r.err_status = 0;
+    if (ngx_rustscript_c_resp_status(&r) != 200) {
+        fail("resp_status must use headers_out.status");
+    }
+    r.headers_out.status = 0;
+    r.http_version = NGX_HTTP_VERSION_9;
+    if (ngx_rustscript_c_resp_status(&r) != 9) {
+        fail("HTTP/0.9 must map to 9");
+    }
+
+    {
+        ngx_table_elt_t ua;
+        u_char value[] = "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)";
+        memset(&ua, 0, sizeof(ua));
+        ua.value.data = value;
+        ua.value.len = sizeof(value) - 1;
+        r.headers_in.opera = 1;
+        ngx_rustscript_c_headers_in_apply_user_agent(&r, &ua);
+        if (!r.headers_in.msie || !r.headers_in.msie6) {
+            fail("UA shim must set msie/msie6");
+        }
+        if (r.headers_in.opera) {
+            fail("MSIE UA must clear opera");
+        }
+        ngx_rustscript_c_headers_in_apply_user_agent(&r, NULL);
+        if (r.headers_in.msie || r.headers_in.msie6) {
+            fail("NULL UA must clear flags");
+        }
+    }
+
+    if (ngx_rustscript_c_validate_host(NULL, NULL, 0, NULL) != NGX_ERROR) {
+        fail("NULL host must be invalid");
+    }
+    {
+        off_t n = 7;
+        if (ngx_rustscript_c_parse_content_length((u_char *)"abc", 3, &n) != NGX_ERROR
+            || n != 7)
+        {
+            fail("invalid Content-Length must not write out");
+        }
+        if (ngx_rustscript_c_parse_content_length((u_char *)"42", 2, &n) != NGX_OK
+            || n != 42)
+        {
+            fail("valid Content-Length must parse");
+        }
     }
 
     puts("ok");

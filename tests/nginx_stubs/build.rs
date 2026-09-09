@@ -46,7 +46,10 @@ fn nginx_include_paths() -> Vec<PathBuf> {
 
 fn parse_makefile_includes(makefile: &Path) -> Vec<PathBuf> {
     let contents = std::fs::read_to_string(makefile).unwrap_or_else(|err| {
-        panic!("unable to read NGINX makefile {}: {err}", makefile.display())
+        panic!(
+            "unable to read NGINX makefile {}: {err}",
+            makefile.display()
+        )
     });
     let mut includes = Vec::new();
     let mut line = String::new();

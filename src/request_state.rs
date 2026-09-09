@@ -288,7 +288,7 @@ impl AccessExec {
     }
 
     fn finish_from_vm_error(&mut self, err: VmError) -> AccessStatus {
-        if is_control_stop(&err) {
+        if is_control_stop(&err) && self.disposition != RequestDisposition::Continue {
             self.finish_from_disposition(false)
         } else {
             self.disposition = RequestDisposition::Continue;

@@ -61,6 +61,7 @@ argument.
 | Response metadata | 6 | sync |
 | Control | 2 | sync |
 | Constants | 65 | sync |
+| of which HTTP status | 35 | sync |
 | **Production total** | **132** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
@@ -319,7 +320,7 @@ strings).
 | `ngx.HTTP_PATCH` | `ngx::http::patch() -> int` |
 | `ngx.HTTP_TRACE` | `ngx::http::trace() -> int` |
 
-### HTTP status (`PHASE_CORE_CONST`)
+### HTTP status (`PHASE_CORE_CONST`) — 35 constants
 
 | OpenResty API | RustScript callable | Notes |
 | --- | --- | --- |
@@ -393,11 +394,11 @@ or list pointers. They require a live request scope.
 | `ngx.req.start_time` | `ngx::req::start_time() -> float` | supported | `PHASE_REQ_FLAGS` | none | `start_sec + start_msec/1000`. | `tests/ngx_request_read.rs` |
 | `ngx.is_subrequest` | `ngx::is_subrequest() -> bool` | supported | `PHASE_REQ_FLAGS` | none | `r != r->main`. Live false-path on main requests (`REQ_SUB=false`). `ngx_http_core_access_phase` skips all access handlers when `r != r->main`, so SSI/mirror/auth_request subrequests cannot run `access_by_rss_file`. True is stub-covered; SSI include still returns `sub-ok` as evidence the subrequest ran. | `tests/ngx_request_read.rs` |
 | `ngx.headers_sent` | `ngx::headers_sent() -> bool` | supported | `PHASE_HEADERS_SENT` | none | Live C `r->header_sent` via `ngx_rustscript_request_headers_sent`. Access-phase scripts observe `false`. | `tests/ngx_request_read.rs`, `tests/ngx_request_abi.rs` |
-| `ngx.var.VARIABLE` | `ngx::var::get(name: string) -> optional<string>` | adapted | `PHASE_VAR_GET` | 256-byte name; 65536-byte value | Indexed lookup with `ngx_hash_strlow`. Missing is `null`; present empty is `""`. Rejects empty/NUL names. | `tests/ngx_request_read.rs` (`var_get_*`) |
-| `ngx.req.set_method` | `ngx::req::set_method(method_id: int) -> null` | adapted | `PHASE_REQ_SET_METHOD` | OpenResty method IDs only | Updates numeric `r->method` and canonical static `method_name`. Unsupported IDs fail before mutation. | `tests/ngx_request_mutation.rs` |
+| `ngx.var.VARIABLE` | `ngx::var::get(name: string) -> optional<string>` | adapted | `PHASE_VAR_GET` | 1024-byte name; 65536-byte value | Indexed lookup with `ngx_hash_strlow`. Missing is `null`; present empty is `""`. Rejects empty/NUL names. | `tests/ngx_request_read.rs` (`var_get_*`) |
+| `ngx.req.set_method` | `ngx::req::set_method(method_id: int) -> null` | adapted | `PHASE_REQ_SET_METHOD` | OpenResty method IDs only | Pool-owned canonical `method_name` is allocated successfully before numeric/text fields change. Allocation failure leaves method untouched. Unsupported IDs fail before mutation. | `tests/ngx_request_mutation.rs`, `tests/ngx_task7_hardening.rs` |
 | `ngx.req.set_uri` | `ngx::req::set_uri(uri: string, jump: unknown) -> null` | adapted | `PHASE_REQ_SET_URI` | 65536-byte URI | `jump` `null`/`false` rewrites `r->uri`, sets `internal`, clears `valid_unparsed_uri`/`valid_location`/`uri_changed`, and calls `ngx_http_set_exten` via the C shim. `jump=true` is rejected **before** mutation. Empty/unsafe bytes (0x00-0x08, 0x0A-0x1F, 0x7F) fail first. | `tests/ngx_request_mutation.rs` |
 | `ngx.req.set_uri_args` | `ngx::req::set_uri_args(args: unknown) -> null` | adapted | `PHASE_REQ_SET_URI` | 65536-byte encoded args | String: escape 0x00-0x20 and 0x7F as `%XX`. Map: reuse `encode_args`. Pool-owned `r->args`; `valid_unparsed_uri=0`. | `tests/ngx_request_mutation.rs` |
-| `ngx.req.set_header` | `ngx::req::set_header(name: string, value: unknown) -> null` | adapted | `PHASE_REQ_SET_HEADER` | 256-byte token name; 8192-byte value | `null` clears. String/array values. Token + no CRLF/NUL. Hash-zero then push. Dedicated Host/Content-Length/Content-Type/User-Agent/Connection/Cookie/Referer stay consistent. | `tests/ngx_request_mutation.rs` |
+| `ngx.req.set_header` | `ngx::req::set_header(name: string, value: unknown) -> null` | adapted | `PHASE_REQ_SET_HEADER` | 256-byte token name; 8192-byte value | `null` clears. String/array values. Token + no CRLF/NUL. Validates the list, then Host (`ngx_http_lua_validate_host` port-aware, updates `headers_in.server`, invalidates cached `$host`), Content-Length (`ngx_atoof` before mutation; every value must be a decimal; dedicated `n` uses the first), User-Agent browser flags, and Connection (`close` substring first, then `keep-alive`). Hash-zero then push. Dedicated Host/Content-Length/Content-Type/User-Agent/Connection/Cookie/Referer stay consistent. Allocation/list-push failure rolls back added entries. | `tests/ngx_request_mutation.rs`, `tests/ngx_task7_hardening.rs` |
 | `ngx.req.clear_header` | `ngx::req::clear_header(name: string) -> null` | adapted | `PHASE_REQ_SET_HEADER` | same name policy | Hash-zero matching list entries and reset dedicated fields (`content_length_n=-1`, `connection_type=0`). | `tests/ngx_request_mutation.rs` |
 | `ngx.var.VARIABLE` write | `ngx::var::set(name: string, value: unknown) -> null` | adapted | `PHASE_VAR_GET` | 1024-byte name; 65536-byte value | Indexed/set_handler write via C shim. Honors CHANGEABLE. `null` → `not_found`. Empty string is present empty. Read-only and unknown names fail. | `tests/ngx_request_mutation.rs` |
 
@@ -407,7 +408,7 @@ or list pointers. They require a live request scope.
 
 | OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ngx.status` | `ngx::status::get() -> int` | adapted | `PHASE_RESPONSE_META` | none | `headers_out.status`; unset is `0`. | `tests/ngx_request_mutation.rs` |
+| `ngx.status` | `ngx::status::get() -> int` | adapted | `PHASE_RESPONSE_META` | none | Prefers `err_status`, then `headers_out.status`, then HTTP/0.9 maps to `9`. Unset HTTP/1.x is `0`. | `tests/ngx_request_mutation.rs`, `tests/ngx_task7_hardening.rs` |
 | `ngx.status` | `ngx::status::set(status: int) -> null` | adapted | `PHASE_RESPONSE_META` | 0-999 | Rejected after headers sent. | `tests/ngx_request_mutation.rs` |
 | `ngx.header.HEADER` | `ngx::header::get(name: string) -> unknown` | adapted | `PHASE_RESPONSE_META` | 256-byte token | Missing `null`; one string; duplicates array. Owned copies. Content-Type/Content-Length prefer dedicated fields. | `tests/ngx_request_mutation.rs` |
 | `ngx.header.HEADER` | `ngx::header::set(name: string, value: unknown) -> null` | adapted | `PHASE_RESPONSE_META` | 8192-byte value | `null` clears. Injection (CRLF/NUL/non-token) rejected. Relative Location does not set the dedicated pointer. New list slots are allocated before old matching names are deactivated. | `tests/ngx_request_mutation.rs` |
@@ -421,7 +422,7 @@ Hosts set request-owned `RequestDisposition` then stop the VM. AccessExec consum
 | OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
 | `ngx.exit` | `ngx::exit(status: int) -> null` | adapted | `PHASE_EXIT` | 0, -1, -5, 100-599 | Stops VM immediately. `0` continues the access phase (`NGX_OK`). `-5` is `NGX_DECLINED`. HTTP 201/204 and `>=300` finalize via the access return. HTTP 200-299 except 201/204 send an empty response then return (NGINX does not special-case 200). `NGX_AGAIN`/`NGX_DONE` rejected. | `tests/ngx_control_flow.rs` |
-| `ngx.redirect` | `ngx::redirect(uri: string, status: unknown) -> null` | adapted | `PHASE_REDIRECT` | 65536-byte URI; 301/302/303/307/308 | `status` `null` defaults to 302. Writes Location then disposition. Unsafe URI rejected. | `tests/ngx_control_flow.rs` |
+| `ngx.redirect` | `ngx::redirect(uri: string, status: unknown) -> null` | adapted | `PHASE_REDIRECT` | 65536-byte URI; 301/302/303/307/308 | `status` `null` defaults to 302. Validates scope, Continue disposition, headers-not-sent, URI, and status before mutating Location/status/disposition together. First wins. | `tests/ngx_control_flow.rs`, `tests/ngx_task7_hardening.rs` |
 
 `ngx.exec` is **not** a production host. Import is rejected at config time. `set_uri(jump=true)` is a runtime rejection before mutation.
 

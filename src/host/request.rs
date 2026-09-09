@@ -5,8 +5,9 @@ use core::ffi::c_uint;
 
 use nginx_sys::{
     ngx_buf_t, ngx_chain_t, ngx_http_connection_t, ngx_http_request_body_t, ngx_http_request_t,
-    ngx_list_part_t, ngx_list_push, ngx_list_t, ngx_palloc, ngx_pool_t, ngx_str_t, ngx_table_elt_t,
-    ngx_uint_t, NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD, NGX_HTTP_LOCK,
+    ngx_int_t, ngx_list_part_t, ngx_list_push, ngx_list_t, ngx_palloc, ngx_pool_t, ngx_str_t,
+    ngx_table_elt_t, ngx_uint_t, off_t, NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD,
+    NGX_HTTP_LOCK,
     NGX_HTTP_MKCOL, NGX_HTTP_MOVE, NGX_HTTP_OPTIONS, NGX_HTTP_PATCH, NGX_HTTP_POST,
     NGX_HTTP_PROPFIND, NGX_HTTP_PROPPATCH, NGX_HTTP_PUT, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK,
     NGX_HTTP_VERSION_10, NGX_HTTP_VERSION_11, NGX_HTTP_VERSION_20, NGX_HTTP_VERSION_30,
@@ -62,7 +63,26 @@ unsafe extern "C" {
     );
     fn ngx_rustscript_c_request_set_valid_unparsed_uri(r: *mut ngx_http_request_t, value: c_uint);
     fn ngx_rustscript_c_request_set_exten(r: *mut ngx_http_request_t);
-    fn ngx_rustscript_c_request_set_connection_type(r: *mut ngx_http_request_t, value: c_uint);
+    fn ngx_rustscript_c_validate_host(
+        pool: *mut ngx_pool_t,
+        data: *mut u8,
+        len: usize,
+        server_out: *mut ngx_str_t,
+    ) -> ngx_int_t;
+    fn ngx_rustscript_c_invalidate_cached_host(r: *mut ngx_http_request_t);
+    fn ngx_rustscript_c_headers_in_apply_user_agent(
+        r: *mut ngx_http_request_t,
+        h: *mut ngx_table_elt_t,
+    );
+    fn ngx_rustscript_c_headers_in_apply_connection(
+        r: *mut ngx_http_request_t,
+        h: *mut ngx_table_elt_t,
+    );
+    fn ngx_rustscript_c_parse_content_length(
+        data: *const u8,
+        len: usize,
+        out: *mut off_t,
+    ) -> ngx_int_t;
 }
 
 #[unsafe(no_mangle)]
@@ -1092,60 +1112,52 @@ fn validate_header_name(name: &str) -> VmResult<()> {
     Ok(())
 }
 
-fn apply_request_specials(raw: &mut ngx_http_request_t, name: &str, header: *mut ngx_table_elt_t) {
+fn apply_request_specials(
+    raw: &mut ngx_http_request_t,
+    name: &str,
+    header: *mut ngx_table_elt_t,
+    host_server: Option<(ngx_str_t, bool)>,
+) {
     match name.to_ascii_lowercase().as_str() {
         "host" => {
             raw.headers_in.host = header;
-            if !header.is_null() {
-                raw.headers_in.server = unsafe { (*header).value };
-            } else {
+            if header.is_null() {
                 raw.headers_in.server = ngx_str_t {
                     len: 0,
                     data: std::ptr::null_mut(),
                 };
-            }
-        }
-        "connection" => {
-            raw.headers_in.connection = header;
-            let connection_type = if header.is_null() {
-                0
-            } else {
-                let value = unsafe { (*header).value };
-                let bytes = if value.data.is_null() || value.len == 0 {
-                    &[][..]
+            } else if let Some((server, allocated)) = host_server {
+                if allocated {
+                    raw.headers_in.server = server;
                 } else {
-                    unsafe { std::slice::from_raw_parts(value.data, value.len) }
-                };
-                if bytes.eq_ignore_ascii_case(b"close") {
-                    raw.headers_in.keep_alive_n = -1;
-                    1
-                } else if bytes.eq_ignore_ascii_case(b"keep-alive") {
-                    2
-                } else {
-                    0
+                    raw.headers_in.server = ngx_str_t {
+                        len: server.len,
+                        data: unsafe { (*header).value.data },
+                    };
                 }
-            };
+            }
             unsafe {
-                ngx_rustscript_c_request_set_connection_type(raw, connection_type);
+                ngx_rustscript_c_invalidate_cached_host(raw);
             }
         }
-        "user-agent" => raw.headers_in.user_agent = header,
+        "connection" => unsafe {
+            ngx_rustscript_c_headers_in_apply_connection(raw, header);
+        },
+        "user-agent" => unsafe {
+            ngx_rustscript_c_headers_in_apply_user_agent(raw, header);
+        },
         "content-length" => {
             raw.headers_in.content_length = header;
-            raw.headers_in.content_length_n = if header.is_null() {
-                -1
+            if header.is_null() {
+                raw.headers_in.content_length_n = -1;
             } else {
                 let value = unsafe { (*header).value };
-                let bytes = if value.data.is_null() {
-                    &[][..]
-                } else {
-                    unsafe { std::slice::from_raw_parts(value.data, value.len) }
+                let mut n: off_t = -1;
+                let rc = unsafe {
+                    ngx_rustscript_c_parse_content_length(value.data, value.len, &mut n)
                 };
-                std::str::from_utf8(bytes)
-                    .ok()
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(-1)
-            };
+                raw.headers_in.content_length_n = if rc == 0 { n } else { -1 };
+            }
         }
         "content-type" => raw.headers_in.content_type = header,
         "cookie" => raw.headers_in.cookie = header,
@@ -1154,17 +1166,80 @@ fn apply_request_specials(raw: &mut ngx_http_request_t, name: &str, header: *mut
     }
 }
 
+fn prevalidate_request_specials(
+    raw: &ngx_http_request_t,
+    name: &str,
+    values: &[String],
+) -> VmResult<Option<(ngx_str_t, bool)>> {
+    match name.to_ascii_lowercase().as_str() {
+        "host" => {
+            let mut first = None;
+            for (i, value) in values.iter().enumerate() {
+                let mut server = ngx_str_t {
+                    len: 0,
+                    data: std::ptr::null_mut(),
+                };
+                let rust_ptr = value.as_ptr().cast_mut();
+                let rc = unsafe {
+                    ngx_rustscript_c_validate_host(raw.pool, rust_ptr, value.len(), &mut server)
+                };
+                if rc != 0 {
+                    return Err(VmError::HostError("invalid Host header".into()));
+                }
+                if i == 0 {
+                    let allocated =
+                        !server.data.is_null() && !std::ptr::eq(server.data, rust_ptr);
+                    first = Some((server, allocated));
+                }
+            }
+            Ok(first)
+        }
+        "content-length" => {
+            for value in values {
+                let mut n: off_t = 0;
+                let rc = unsafe {
+                    ngx_rustscript_c_parse_content_length(value.as_ptr(), value.len(), &mut n)
+                };
+                if rc != 0 {
+                    return Err(VmError::HostError("invalid Content-Length".into()));
+                }
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn validate_header_list(list: &ngx_list_t) -> VmResult<()> {
+    let mut part = std::ptr::addr_of!(list.part);
+    let mut seen = 0usize;
+    while !part.is_null() {
+        seen += 1;
+        if seen > MAX_LIST_PARTS {
+            return Err(VmError::HostError("malformed header list".into()));
+        }
+        let p = unsafe { &*part };
+        if p.nelts > 0 && p.elts.is_null() {
+            return Err(VmError::HostError("malformed header list".into()));
+        }
+        part = p.next;
+    }
+    Ok(())
+}
+
 fn set_or_clear_request_header(
     raw: &mut ngx_http_request_t,
     name: &str,
     values: Option<Vec<String>>,
 ) -> VmResult<()> {
     validate_header_name(name)?;
+    validate_header_list(&raw.headers_in.headers)?;
     let Some(values) = values.filter(|values| !values.is_empty()) else {
         clear_matching_headers_except(&mut raw.headers_in.headers, name, &[])?;
-        apply_request_specials(raw, name, std::ptr::null_mut());
+        apply_request_specials(raw, name, std::ptr::null_mut(), None);
         return Ok(());
     };
+    let host_server = prevalidate_request_specials(raw, name, &values)?;
     let pool = raw.pool;
     let list = &mut raw.headers_in.headers as *mut ngx_list_t;
     let mut added = Vec::new();
@@ -1198,7 +1273,7 @@ fn set_or_clear_request_header(
         }
     }
     clear_matching_headers_except(&mut raw.headers_in.headers, name, &added)?;
-    apply_request_specials(raw, name, first);
+    apply_request_specials(raw, name, first, host_server);
     Ok(())
 }
 
@@ -1210,10 +1285,11 @@ pub fn set_method(method_id: i64) -> VmResult<CallOutcome> {
     })?;
     with_request_write(|request| {
         let raw = request.as_mut();
+        let data = pool_copy(raw.pool, name, false)?;
         raw.method = id;
         raw.method_name = ngx_str_t {
             len: name.len(),
-            data: name.as_ptr().cast_mut(),
+            data,
         };
         ret(())
     })

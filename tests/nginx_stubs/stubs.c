@@ -116,12 +116,8 @@ void *ngx_pool_cleanup_add(void *p, size_t size)
     return NULL;
 }
 
-void *ngx_palloc(void *pool, size_t size)
-{
-    (void)pool;
-    (void)size;
-    return NULL;
-}
+/* ngx_palloc / ngx_pnalloc / ngx_list_push live in request_abi.c so they can
+ * use official NGINX list/pool layouts and a test-only fail-after-N allocator. */
 
 /* Zeroed inert object. Tests must not treat this as a live NGINX module. */
 __attribute__((aligned(16))) unsigned char ngx_http_core_module[4096];
@@ -229,21 +225,13 @@ ngx_http_variable_value_t *ngx_http_get_variable(void *r, ngx_str_t *name, ngx_u
     return NULL;
 }
 
-void *ngx_pnalloc(void *pool, size_t size)
-{
-    (void)pool;
-    (void)size;
-    return NULL;
-}
-
-void *ngx_list_push(void *list)
-{
-    (void)list;
-    return NULL;
-}
+void *(*ngx_rustscript_stub_hash_find_hook)(void *hash, ngx_uint_t key, unsigned char *name, size_t len);
 
 void *ngx_hash_find(void *hash, ngx_uint_t key, unsigned char *name, size_t len)
 {
+    if (ngx_rustscript_stub_hash_find_hook != NULL) {
+        return ngx_rustscript_stub_hash_find_hook(hash, key, name, len);
+    }
     (void)hash;
     (void)key;
     (void)name;
@@ -279,15 +267,4 @@ time_t ngx_parse_http_time(unsigned char *value, size_t len)
     return (time_t)-1;
 }
 
-ngx_int_t ngx_http_send_header(void *r)
-{
-    (void)r;
-    return 0;
-}
-
-ngx_int_t ngx_http_send_special(void *r, unsigned int flags)
-{
-    (void)r;
-    (void)flags;
-    return 0;
-}
+/* ngx_http_send_header / ngx_http_send_special live in request_abi.c. */
