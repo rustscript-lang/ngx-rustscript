@@ -157,8 +157,9 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
             HostFamily::Request => {
                 assert_eq!(entry.sync, HostSyncKind::Sync);
                 assert!(
-                    entry.capabilities.contains(&HostCapability::RequestRead),
-                    "{} request hosts require RequestRead",
+                    entry.capabilities.contains(&HostCapability::RequestRead)
+                        || entry.capabilities.contains(&HostCapability::RequestWrite),
+                    "{} request hosts require RequestRead or RequestWrite",
                     entry.name
                 );
             }
@@ -166,6 +167,14 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
                 assert_eq!(entry.sync, HostSyncKind::Sync);
                 assert_eq!(entry.capabilities, &[HostCapability::RequestCtx]);
                 assert_eq!(entry.openresty_name, "ngx.ctx");
+            }
+            HostFamily::Response => {
+                assert_eq!(entry.sync, HostSyncKind::Sync);
+                assert_eq!(entry.capabilities, &[HostCapability::ResponseWrite]);
+            }
+            HostFamily::Control => {
+                assert_eq!(entry.sync, HostSyncKind::Sync);
+                assert_eq!(entry.capabilities, &[HostCapability::Control]);
             }
         }
     }

@@ -233,6 +233,28 @@ def runtime_conf(module, prefix, port):
             location("/ctx-iso-b/", fixture("ctx_iso.rss")),
             location("/ctx-sync/", fixture("ctx_sync.rss")),
             location("/ctx-persist/", fixture("ctx_persist.rss")),
+            location("/task7-exit/", fixture("task7_exit403.rss")),
+            location("/task7-redirect/", fixture("task7_redirect.rss")),
+            location("/task7-sleep-exit/", fixture("task7_exit_sleep.rss")),
+            """
+        location /task7-mut/ {
+            set $writable "";
+            access_by_rss_file %s;
+        }
+        location /task7-iso-a/ {
+            set $writable "";
+            access_by_rss_file %s;
+        }
+        location /task7-iso-b/ {
+            set $writable "";
+            access_by_rss_file %s;
+        }
+"""
+            % (
+                quote_nginx_path(fixture("task7_mutation.rss")),
+                quote_nginx_path(fixture("task7_iso.rss")),
+                quote_nginx_path(fixture("task7_iso.rss")),
+            ),
             """
         location /plain/ {
         }
@@ -448,7 +470,16 @@ def run_invalid_fixtures(nginx, prefix, module):
         ["invalid number of arguments"],
         "arity-extra",
     )
-    return ("missing", "syntax", "import", "arity")
+    expect_t_fail(
+        nginx,
+        prefix,
+        module,
+        location("/", fixture("exec.rss")),
+        [],
+        "exec",
+        any_needles=["ngx::exec", "unsupported import"],
+    )
+    return ("missing", "syntax", "import", "arity", "exec")
 
 
 def spawn_nginx(nginx, prefix, handles):
@@ -551,6 +582,8 @@ def run_acceptance(nginx, module):
         write_index(prefix, "ctx-iso-b/index.html", "ctx-iso-b\n")
         write_index(prefix, "ctx-sync/index.html", "ctx-sync\n")
         write_index(prefix, "ctx-persist/index.html", "ctx-persist\n")
+        write_index(prefix, "task7-iso-a/index.html", "task7-iso-a\n")
+        write_index(prefix, "task7-iso-b/index.html", "task7-iso-b\n")
 
         write_text(
             os.path.join(prefix, "conf", "nginx.conf"),
@@ -943,6 +976,160 @@ def run_acceptance(nginx, module):
         summary["ctx"] = "sync=ok persist=ok"
         summary["concurrent"] = "12/12 mapped plain=200/plain isolation=ok"
 
+        status, body, raw = http_get(port, "/task7-exit/", timeout=8.0)
+        if status != 403:
+            raise CheckError(
+                f"task7-exit expected 403, got {status}",
+                dump_owned(prefix, proc, raw),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        if "TASK7_EXIT_MARKER" in error_text:
+            raise CheckError(
+                "task7-exit must not execute statements after ngx::exit",
+                dump_owned(prefix, proc, error_text),
+            )
+
+        status, body, raw = http_get(port, "/task7-redirect/", timeout=8.0)
+        if status != 302:
+            raise CheckError(
+                f"task7-redirect expected 302, got {status}",
+                dump_owned(prefix, proc, raw),
+            )
+        if "http://example.test/x" not in raw:
+            raise CheckError(
+                "task7-redirect must set Location",
+                dump_owned(prefix, proc, raw),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        if "TASK7_REDIR_MARKER" in error_text:
+            raise CheckError(
+                "task7-redirect must not execute statements after ngx::redirect",
+                dump_owned(prefix, proc, error_text),
+            )
+
+        status, body, raw = http_get(port, "/task7-sleep-exit/", timeout=8.0)
+        if status != 401:
+            raise CheckError(
+                f"task7-sleep-exit expected 401, got {status}",
+                dump_owned(prefix, proc, raw),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        if "TASK7_SLEEP_EXIT_MARKER" in error_text:
+            raise CheckError(
+                "task7-sleep-exit must not execute statements after ngx::exit",
+                dump_owned(prefix, proc, error_text),
+            )
+
+        status, body, raw = http_get(port, "/task7-mut/", timeout=8.0)
+        if status != 201:
+            raise CheckError(
+                f"task7-mut expected 201, got {status}",
+                dump_owned(prefix, proc, raw),
+            )
+        if "x-resp: ok" not in raw.lower():
+            raise CheckError(
+                "task7-mut must send response header X-Resp: ok",
+                dump_owned(prefix, proc, raw),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        state_lines = [
+            line
+            for line in error_text.splitlines()
+            if "TASK7_MUT_STATE" in line
+        ]
+        if not state_lines:
+            raise CheckError(
+                "task7-mut must log TASK7_MUT_STATE from post-mutation reads",
+                dump_owned(prefix, proc, error_text),
+            )
+        state = "\n".join(state_lines)
+        missing = [
+            name
+            for name, needle in (
+                ("method", "method=POST"),
+                ("uri", "uri=%2Fmutated"),
+                ("args", "args=k%3Dv"),
+                ("host", "host=mut.example"),
+                ("var", "var=from-rss"),
+                ("status", "status=201"),
+                ("resp", "resp=ok"),
+            )
+            if needle not in state
+        ]
+        if missing:
+            raise CheckError(
+                f"task7-mut missing TASK7_MUT_STATE fields {missing}",
+                dump_owned(prefix, proc, state),
+            )
+        if "TASK7_MUT_MARKER" in error_text:
+            raise CheckError(
+                "task7-mut must not execute statements after ngx::exit",
+                dump_owned(prefix, proc, error_text),
+            )
+
+        iso_barrier = threading.Barrier(2, timeout=5.0)
+        iso_errors = []
+        iso_lock = threading.Lock()
+
+        def task7_iso_one(path, token):
+            try:
+                iso_barrier.wait()
+                status, body, raw = http_get(port, path, timeout=8.0)
+                if status != 200:
+                    with iso_lock:
+                        iso_errors.append((path, status, raw))
+            except Exception as exc:
+                with iso_lock:
+                    iso_errors.append((path, "exc", str(exc)))
+
+        iso_threads = [
+            threading.Thread(target=task7_iso_one, args=("/task7-iso-a/?id=alpha", "alpha")),
+            threading.Thread(target=task7_iso_one, args=("/task7-iso-b/?id=beta", "beta")),
+        ]
+        for thread in iso_threads:
+            thread.start()
+        for thread in iso_threads:
+            thread.join(timeout=10.0)
+        if iso_errors:
+            raise CheckError(
+                f"task7 isolation requests failed: {iso_errors[:2]}",
+                dump_owned(prefix, proc),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        iso_a_lines = [
+            line
+            for line in error_text.splitlines()
+            if "/task7-iso-a/?id=alpha" in line and "TASK7_ISO=" in line
+        ]
+        iso_b_lines = [
+            line
+            for line in error_text.splitlines()
+            if "/task7-iso-b/?id=beta" in line and "TASK7_ISO=" in line
+        ]
+        if not any("id=alpha" in line for line in iso_a_lines):
+            raise CheckError(
+                "task7-iso-a must log its own id",
+                dump_owned(prefix, proc, error_text),
+            )
+        if not any("id=beta" in line for line in iso_b_lines):
+            raise CheckError(
+                "task7-iso-b must log its own id",
+                dump_owned(prefix, proc, error_text),
+            )
+        if any("id=beta" in line for line in iso_a_lines):
+            raise CheckError(
+                "task7-iso-a logs must not contain beta id",
+                dump_owned(prefix, proc, "\n".join(iso_a_lines)),
+            )
+        if any("id=alpha" in line for line in iso_b_lines):
+            raise CheckError(
+                "task7-iso-b logs must not contain alpha id",
+                dump_owned(prefix, proc, "\n".join(iso_b_lines)),
+            )
+        summary["task7"] = (
+            "exit=403 redirect=302 sleep-exit=401 mutation=201 isolation=ok exec-config=rejected"
+        )
+
         # Disconnect during 30s sleep -> access log 499, then routes still work.
         disc = socket.create_connection(("127.0.0.1", port), timeout=3.0)
         try:
@@ -1060,6 +1247,7 @@ def format_summary(summary):
         f"nonblock: {summary['nonblock']}",
         f"continue: {summary['continue']}",
         f"concurrent: {summary['concurrent']}",
+        f"task7: {summary['task7']}",
         f"disconnect: {summary['disconnect']}",
         f"quit: {summary['quit']}",
     ]

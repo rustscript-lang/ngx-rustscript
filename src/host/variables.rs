@@ -1,13 +1,15 @@
 // `ngx.var` read adaptation. Lookup uses the public NGINX variable API.
 
-use nginx_sys::{ngx_http_get_variable, ngx_http_request_t, ngx_str_t, ngx_uint_t};
+use nginx_sys::{
+    ngx_http_get_variable, ngx_http_request_t, ngx_http_variable_value_t, ngx_str_t, ngx_uint_t,
+};
 use ngx::http::Request;
 use pd_host_function::pd_host_function;
 use vm::{Value, VmError};
 
 use super::super::VmResult;
 use super::{CallOutcome, IntoHostCallOutcome};
-use crate::host::{current_identity, with_current_request, ScopeError};
+use crate::host::{current_identity, with_current_request, with_current_request_mut, ScopeError};
 
 const MAX_VAR_NAME: usize = 1_024;
 const MAX_VAR_VALUE: usize = 65_536;
@@ -23,6 +25,23 @@ fn scope_err(err: ScopeError) -> VmError {
 fn with_request<T>(f: impl FnOnce(&Request) -> VmResult<T>) -> VmResult<T> {
     let identity = current_identity().map_err(scope_err)?;
     with_current_request(identity, f).map_err(scope_err)?
+}
+
+fn with_request_write<T>(f: impl FnOnce(&mut Request) -> VmResult<T>) -> VmResult<T> {
+    let identity = current_identity().map_err(scope_err)?;
+    with_current_request_mut(identity, f).map_err(scope_err)?
+}
+
+unsafe extern "C" {
+    fn ngx_rustscript_c_variable_set(
+        r: *mut ngx_http_request_t,
+        name: *mut u8,
+        name_len: usize,
+        value: *mut u8,
+        value_len: usize,
+        is_null: i32,
+    ) -> i32;
+    fn ngx_rustscript_c_variable_not_found(vv: *const ngx_http_variable_value_t) -> u32;
 }
 
 fn bytes_as_string(bytes: Vec<u8>) -> String {
@@ -76,10 +95,10 @@ pub fn get(name: &str) -> VmResult<CallOutcome> {
         if vv.is_null() {
             return ret(Value::Null);
         }
-        let vv = unsafe { &*vv };
-        if vv.not_found() != 0 {
+        if unsafe { ngx_rustscript_c_variable_not_found(vv) } != 0 {
             return ret(Value::Null);
         }
+        let vv = unsafe { &*vv };
         let len = vv.len() as usize;
         if vv.data.is_null() || len == 0 {
             return ret(String::new());
@@ -91,5 +110,73 @@ pub fn get(name: &str) -> VmResult<CallOutcome> {
         }
         let bytes = unsafe { std::slice::from_raw_parts(vv.data, len) }.to_vec();
         ret(bytes_as_string(bytes))
+    })
+}
+
+/// Set an NGINX variable. `null` clears (`not_found`); empty is a present empty string.
+#[pd_host_function(name = "ngx::var::set")]
+pub fn set(name: String, value: &Value) -> VmResult<CallOutcome> {
+    if name.is_empty() {
+        return Err(VmError::HostError(
+            "ngx::var::set variable name is empty".to_string(),
+        ));
+    }
+    if name.len() > MAX_VAR_NAME {
+        return Err(VmError::HostError(format!(
+            "ngx::var::set variable name exceeds {MAX_VAR_NAME} bytes"
+        )));
+    }
+    if name.as_bytes().contains(&0) {
+        return Err(VmError::HostError(
+            "ngx::var::set variable name contains NUL".to_string(),
+        ));
+    }
+    let (is_null, bytes) = match value {
+        Value::Null => (1, Vec::new()),
+        Value::String(text) => {
+            if text.len() > MAX_VAR_VALUE {
+                return Err(VmError::HostError(format!(
+                    "ngx::var::set value exceeds {MAX_VAR_VALUE} bytes"
+                )));
+            }
+            (0, text.as_bytes().to_vec())
+        }
+        _ => {
+            return Err(VmError::HostError(
+                "ngx::var::set value expects string or null".to_string(),
+            ));
+        }
+    };
+    let mut name_bytes = name.into_bytes();
+    with_request_write(|request| {
+        let r = request.as_mut() as *mut ngx_http_request_t;
+        let mut value_bytes = bytes;
+        let rc = unsafe {
+            ngx_rustscript_c_variable_set(
+                r,
+                name_bytes.as_mut_ptr(),
+                name_bytes.len(),
+                if is_null == 1 || value_bytes.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    value_bytes.as_mut_ptr()
+                },
+                value_bytes.len(),
+                is_null,
+            )
+        };
+        match rc {
+            0 => ret(()),
+            1 => Err(VmError::HostError(
+                "variable not found for writing".into(),
+            )),
+            2 => Err(VmError::HostError("variable not changeable".into())),
+            3 => Err(VmError::HostError(
+                "variable cannot be assigned".into(),
+            )),
+            4 => Err(VmError::HostError("out of memory".into())),
+            5 => Err(VmError::HostError("request pool is null".into())),
+            _ => Err(VmError::HostError("variable set failed".into())),
+        }
     })
 }

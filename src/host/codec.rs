@@ -278,7 +278,7 @@ pub fn encode_args(args: &VmMap) -> VmResult<CallOutcome> {
     ret(encode_args_map(args)?)
 }
 
-fn encode_args_map(args: &VmMap) -> VmResult<String> {
+pub(crate) fn encode_args_map(args: &VmMap) -> VmResult<String> {
     let mut pairs: Vec<(String, Option<String>)> = Vec::new();
     for (key, value) in args.iter() {
         let Value::String(key) = key else {

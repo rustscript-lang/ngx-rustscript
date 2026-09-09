@@ -40,6 +40,15 @@ pub const FORBIDDEN_DEFINED_NGINX_STUBS: &[&str] = &[
     "ngx_core_module",
     "ngx_processes",
     "ngx_http_get_variable",
+    "ngx_list_push",
+    "ngx_pnalloc",
+    "ngx_hash_find",
+    "ngx_hash_strlow",
+    "ngx_http_parse_time",
+    "ngx_parse_http_time",
+    "ngx_http_set_exten",
+    "ngx_http_send_header",
+    "ngx_http_send_special",
 ];
 
 /// Production cdylib/add-dynamic module must define these C ABI shims.

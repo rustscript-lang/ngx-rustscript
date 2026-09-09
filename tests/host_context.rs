@@ -175,19 +175,18 @@ fn null_request_pointer_is_rejected_after_identity_check() {
 }
 
 #[test]
-fn access_phase_allows_read_and_log_not_write() {
+fn access_phase_allows_read_write_log_and_control() {
     let mut req = DummyRequest::new();
     let identity = RequestIdentity::new(8, 80);
     enter_access(req.as_ptr(), identity, || {
         let allowed = current_allowed_ops().unwrap();
         assert!(allowed.contains(AllowedOps::REQUEST_READ));
+        assert!(allowed.contains(AllowedOps::REQUEST_WRITE));
+        assert!(allowed.contains(AllowedOps::RESPONSE_WRITE));
+        assert!(allowed.contains(AllowedOps::CONTROL));
         assert!(allowed.contains(AllowedOps::LOG));
-        assert!(!allowed.contains(AllowedOps::REQUEST_WRITE));
         assert!(with_current_request(identity, |_| ()).is_ok());
-        assert_eq!(
-            with_current_request_mut(identity, |_| ()),
-            Err(ScopeError::OpsNotAllowed)
-        );
+        assert!(with_current_request_mut(identity, |_| ()).is_ok());
     });
 }
 
@@ -332,7 +331,9 @@ fn assert_vm_entries_match(
         assert_eq!(entry.allowed, access_ops());
         assert_eq!(entry.request_live, request_live);
         assert!(entry.allowed.contains(AllowedOps::REQUEST_READ));
-        assert!(!entry.allowed.contains(AllowedOps::REQUEST_WRITE));
+        assert!(entry.allowed.contains(AllowedOps::REQUEST_WRITE));
+        assert!(entry.allowed.contains(AllowedOps::RESPONSE_WRITE));
+        assert!(entry.allowed.contains(AllowedOps::CONTROL));
     }
 }
 

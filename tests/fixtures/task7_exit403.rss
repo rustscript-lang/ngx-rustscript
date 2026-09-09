@@ -1,0 +1,3 @@
+use ngx;
+ngx::exit(403);
+ngx::log(ngx::log_level::notice(), "TASK7_EXIT_MARKER");

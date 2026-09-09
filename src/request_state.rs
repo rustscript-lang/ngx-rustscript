@@ -11,24 +11,27 @@ use std::task::{Context, Poll, Waker};
 use ngx::core::Status;
 use ngx::http::HTTPStatus;
 use tokio::runtime::Handle;
-use vm::{Program, Vm, VmStatus};
+use vm::{Program, Vm, VmError, VmStatus};
 
 use crate::async_bridge::NgxAsyncBridge;
 use crate::host::{
-    AllowedOps, NgxPhase, RequestLocalCtx, bind_ngx_hosts, with_vm_request_scope_ctx,
+    AllowedOps, NgxPhase, RequestDisposition, RequestLocalCtx, bind_ngx_hosts, is_control_stop,
+    with_vm_request_scope_full,
 };
 use crate::notify::{CompletionPermit, RequestIdentity};
 
 fn with_vm_entry<T>(
     identity: RequestIdentity,
     ctx: *mut RequestLocalCtx,
+    disposition: *mut RequestDisposition,
     f: impl FnOnce() -> T,
 ) -> T {
-    with_vm_request_scope_ctx(
+    with_vm_request_scope_full(
         identity,
         NgxPhase::Access,
         AllowedOps::for_phase(NgxPhase::Access),
         ctx,
+        disposition,
         f,
     )
 }
@@ -39,6 +42,7 @@ pub enum AccessStatus {
     Ok,
     Again,
     Error500,
+    Finalize(i32),
 }
 
 impl AccessStatus {
@@ -47,6 +51,10 @@ impl AccessStatus {
             Self::Ok => Status::NGX_OK,
             Self::Again => Status::NGX_AGAIN,
             Self::Error500 => HTTPStatus::INTERNAL_SERVER_ERROR.into(),
+            Self::Finalize(0) => Status::NGX_OK,
+            Self::Finalize(-1) => Status::NGX_ERROR,
+            Self::Finalize(-5) => Status::NGX_DECLINED,
+            Self::Finalize(code) => Status(code as nginx_sys::ngx_int_t),
         }
     }
 }
@@ -200,6 +208,8 @@ pub struct AccessExec {
     request_id: u64,
     identity: RequestIdentity,
     ctx: RequestLocalCtx,
+    disposition: RequestDisposition,
+    final_status: Option<AccessStatus>,
     state: ExecState,
     suspend_committed: bool,
     deferred: bool,
@@ -223,6 +233,8 @@ impl AccessExec {
             request_id,
             identity: RequestIdentity::new(generation, request_id),
             ctx: RequestLocalCtx::new(),
+            disposition: RequestDisposition::Continue,
+            final_status: None,
             state: ExecState::New,
             suspend_committed: false,
             deferred: false,
@@ -257,6 +269,33 @@ impl AccessExec {
         )
     }
 
+    fn finish_from_disposition(&mut self, from_error: bool) -> AccessStatus {
+        self.last_status = Some(VmStatus::Halted);
+        let status = match std::mem::replace(&mut self.disposition, RequestDisposition::Continue) {
+            RequestDisposition::Continue if from_error => AccessStatus::Error500,
+            RequestDisposition::Continue => AccessStatus::Ok,
+            RequestDisposition::Finalize(0) => AccessStatus::Ok,
+            RequestDisposition::Finalize(code) => AccessStatus::Finalize(code),
+            RequestDisposition::ExternalRedirect { status, .. } => AccessStatus::Finalize(status),
+        };
+        if matches!(status, AccessStatus::Error500) {
+            self.state = ExecState::Failed;
+        } else {
+            self.state = ExecState::Halted;
+        }
+        self.final_status = Some(status);
+        status
+    }
+
+    fn finish_from_vm_error(&mut self, err: VmError) -> AccessStatus {
+        if is_control_stop(&err) {
+            self.finish_from_disposition(false)
+        } else {
+            self.disposition = RequestDisposition::Continue;
+            self.finish_from_disposition(true)
+        }
+    }
+
     pub fn vm_status(&self) -> Option<VmStatus> {
         self.last_status
     }
@@ -271,7 +310,7 @@ impl AccessExec {
         waiter: &impl AsyncWait,
     ) -> AccessStatus {
         match self.state {
-            ExecState::Halted => AccessStatus::Ok,
+            ExecState::Halted => self.final_status.unwrap_or(AccessStatus::Ok),
             ExecState::Failed => AccessStatus::Error500,
             ExecState::Cancelled | ExecState::Suspended => AccessStatus::Again,
             ExecState::New => self.run_and_arm(registry, waiter),
@@ -292,12 +331,9 @@ impl AccessExec {
         };
         let identity = self.identity;
         let ctx = &mut self.ctx as *mut RequestLocalCtx;
-        match with_vm_entry(identity, ctx, || vm.run()) {
-            Ok(VmStatus::Halted) => {
-                self.last_status = Some(VmStatus::Halted);
-                self.state = ExecState::Halted;
-                AccessStatus::Ok
-            }
+        let disp = &mut self.disposition as *mut RequestDisposition;
+        match with_vm_entry(identity, ctx, disp, || vm.run()) {
+            Ok(VmStatus::Halted) => self.finish_from_disposition(false),
             Ok(VmStatus::Waiting(op_id)) => {
                 self.last_status = Some(VmStatus::Waiting(op_id));
                 self.arm_wait(registry, waiter)
@@ -307,10 +343,7 @@ impl AccessExec {
                 self.state = ExecState::Failed;
                 AccessStatus::Error500
             }
-            Err(_) => {
-                self.state = ExecState::Failed;
-                AccessStatus::Error500
-            }
+            Err(err) => self.finish_from_vm_error(err),
         }
     }
 
@@ -333,8 +366,9 @@ impl AccessExec {
         let waker = waiter.waker(self.identity);
         let mut cx = Context::from_waker(&waker);
         let identity = self.identity;
+        let disp = &mut self.disposition as *mut RequestDisposition;
         let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
-        match with_vm_entry(identity, std::ptr::null_mut(), || {
+        match with_vm_entry(identity, std::ptr::null_mut(), disp, || {
             vm.poll_waiting_host_op(&mut cx)
         }) {
             Poll::Pending => {
@@ -366,20 +400,25 @@ impl AccessExec {
     ) -> Result<AccessStatus, AccessStatus> {
         let identity = self.identity;
         let ctx = &mut self.ctx as *mut RequestLocalCtx;
+        let disp = &mut self.disposition as *mut RequestDisposition;
         let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
-        match with_vm_entry(identity, ctx, || vm.resume()) {
-            Ok(VmStatus::Halted) => {
-                self.last_status = Some(VmStatus::Halted);
-                self.state = ExecState::Halted;
-                Ok(AccessStatus::Ok)
-            }
+        match with_vm_entry(identity, ctx, disp, || vm.resume()) {
+            Ok(VmStatus::Halted) => Ok(self.finish_from_disposition(false)),
             Ok(VmStatus::Waiting(op_id)) => {
                 self.last_status = Some(VmStatus::Waiting(op_id));
                 self.arm_wait(registry, waiter)
             }
-            Ok(VmStatus::Yielded) | Err(_) => {
+            Ok(VmStatus::Yielded) => {
                 self.state = ExecState::Failed;
                 Err(AccessStatus::Error500)
+            }
+            Err(err) => {
+                let status = self.finish_from_vm_error(err);
+                if matches!(status, AccessStatus::Error500) {
+                    Err(status)
+                } else {
+                    Ok(status)
+                }
             }
         }
     }
@@ -432,7 +471,8 @@ impl AccessExec {
         };
         let waker = waiter.waker(identity);
         let mut cx = Context::from_waker(&waker);
-        match with_vm_entry(identity, std::ptr::null_mut(), || {
+        let disp = &mut self.disposition as *mut RequestDisposition;
+        match with_vm_entry(identity, std::ptr::null_mut(), disp, || {
             vm.poll_waiting_host_op(&mut cx)
         }) {
             Poll::Pending => ReadyEffect::Ignored,
@@ -440,7 +480,7 @@ impl AccessExec {
                 registry.remove_exact(self.identity, &self.request_id);
                 self.permit = None;
                 match self.resume_after_ready(registry, waiter) {
-                    Ok(AccessStatus::Ok) => ReadyEffect::Halted,
+                    Ok(AccessStatus::Ok) | Ok(AccessStatus::Finalize(_)) => ReadyEffect::Halted,
                     Ok(AccessStatus::Again) => ReadyEffect::WaitingAgain,
                     _ => ReadyEffect::Failed,
                 }

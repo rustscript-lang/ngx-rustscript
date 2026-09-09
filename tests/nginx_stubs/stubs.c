@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 
 typedef intptr_t ngx_int_t;
 typedef uintptr_t ngx_uint_t;
@@ -226,4 +227,67 @@ ngx_http_variable_value_t *ngx_http_get_variable(void *r, ngx_str_t *name, ngx_u
         return &vv;
     }
     return NULL;
+}
+
+void *ngx_pnalloc(void *pool, size_t size)
+{
+    (void)pool;
+    (void)size;
+    return NULL;
+}
+
+void *ngx_list_push(void *list)
+{
+    (void)list;
+    return NULL;
+}
+
+void *ngx_hash_find(void *hash, ngx_uint_t key, unsigned char *name, size_t len)
+{
+    (void)hash;
+    (void)key;
+    (void)name;
+    (void)len;
+    return NULL;
+}
+
+ngx_uint_t ngx_hash_strlow(unsigned char *dst, unsigned char *src, size_t n)
+{
+    ngx_uint_t key = 0;
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        unsigned char c = src[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = (unsigned char)(c | 0x20);
+        }
+        dst[i] = c;
+        key = key * 31 + c;
+    }
+    return key;
+}
+
+void ngx_http_set_exten(void *r)
+{
+    (void)r;
+}
+
+time_t ngx_parse_http_time(unsigned char *value, size_t len)
+{
+    (void)value;
+    (void)len;
+    return (time_t)-1;
+}
+
+ngx_int_t ngx_http_send_header(void *r)
+{
+    (void)r;
+    return 0;
+}
+
+ngx_int_t ngx_http_send_special(void *r, unsigned int flags)
+{
+    (void)r;
+    (void)flags;
+    return 0;
 }

@@ -32,6 +32,8 @@ impl AllowedOps {
     pub const REQUEST_WRITE: Self = Self { bits: 1 << 1 };
     pub const LOG: Self = Self { bits: 1 << 2 };
     pub const REQUEST_CTX: Self = Self { bits: 1 << 3 };
+    pub const RESPONSE_WRITE: Self = Self { bits: 1 << 4 };
+    pub const CONTROL: Self = Self { bits: 1 << 5 };
 
     pub const fn union(self, other: Self) -> Self {
         Self {
@@ -43,13 +45,15 @@ impl AllowedOps {
         self.bits & other.bits == other.bits
     }
 
-    /// Default host operations for a script phase. Access currently allows
-    /// request reads, request-local ctx, and logging; mutation APIs arrive later.
+    /// Default host operations for a script phase.
     pub fn for_phase(phase: NgxPhase) -> Self {
         match phase {
-            NgxPhase::Rewrite | NgxPhase::Access | NgxPhase::Content => {
-                Self::REQUEST_READ.union(Self::LOG).union(Self::REQUEST_CTX)
-            }
+            NgxPhase::Rewrite | NgxPhase::Access | NgxPhase::Content => Self::REQUEST_READ
+                .union(Self::REQUEST_WRITE)
+                .union(Self::LOG)
+                .union(Self::REQUEST_CTX)
+                .union(Self::RESPONSE_WRITE)
+                .union(Self::CONTROL),
             _ => Self::EMPTY,
         }
     }
@@ -68,6 +72,8 @@ pub enum ScopeError {
     NullRequest,
     /// The live scope has no request-local ctx map.
     NullCtx,
+    /// The live scope has no request-owned disposition slot.
+    NullDisposition,
     /// The live scope does not allow the requested read or write.
     OpsNotAllowed,
     /// Mutable request access is already active on this thread.
@@ -89,6 +95,9 @@ impl std::fmt::Display for ScopeError {
             }
             Self::NullRequest => write!(f, "ngx request execution scope has a null request"),
             Self::NullCtx => write!(f, "ngx ctx execution scope has no request-local context"),
+            Self::NullDisposition => {
+                write!(f, "ngx control host has no request-owned disposition")
+            }
             Self::OpsNotAllowed => {
                 write!(f, "ngx request host is not allowed by the current scope")
             }
@@ -101,10 +110,24 @@ impl std::fmt::Display for ScopeError {
 
 impl std::error::Error for ScopeError {}
 
+/// Request-owned control-flow outcome. Hosts mutate this slot; AccessExec
+/// consumes it. Ordinary HostError cannot forge a disposition.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum RequestDisposition {
+    #[default]
+    Continue,
+    Finalize(i32),
+    ExternalRedirect {
+        uri: String,
+        status: i32,
+    },
+}
+
 #[derive(Clone, Copy)]
 struct ScopeFrame {
     request: *mut ngx_http_request_t,
     ctx: *mut RequestLocalCtx,
+    disposition: *mut RequestDisposition,
     identity: RequestIdentity,
     phase: NgxPhase,
     allowed: AllowedOps,
@@ -143,6 +166,7 @@ impl RequestExecutionScope {
     pub(crate) fn enter(
         request: *mut ngx_http_request_t,
         ctx: *mut RequestLocalCtx,
+        disposition: *mut RequestDisposition,
         identity: RequestIdentity,
         phase: NgxPhase,
         allowed: AllowedOps,
@@ -152,6 +176,7 @@ impl RequestExecutionScope {
             stack.push(ScopeFrame {
                 request,
                 ctx,
+                disposition,
                 identity,
                 phase,
                 allowed,
@@ -173,6 +198,7 @@ impl RequestExecutionScope {
                 let _scope = Self::enter(
                     frame.request,
                     frame.ctx,
+                    frame.disposition,
                     frame.identity,
                     frame.phase,
                     frame.allowed,
@@ -188,13 +214,14 @@ impl RequestExecutionScope {
     /// Uses the outer request pointer only when that frame has the exact same
     /// generation-safe identity and a non-null pointer. A mismatched parent
     /// identity never authorizes its pointer under the VM identity. The ctx
-    /// pointer is taken from `ctx` when non-null, otherwise from a matching
-    /// outer frame.
+    /// and disposition pointers are taken from the arguments when non-null,
+    /// otherwise from a matching outer frame.
     pub(crate) fn enter_for_vm(
         identity: RequestIdentity,
         phase: NgxPhase,
         allowed: AllowedOps,
         ctx: *mut RequestLocalCtx,
+        disposition: *mut RequestDisposition,
     ) -> Self {
         let request = matching_outer_request(identity);
         let ctx = if ctx.is_null() {
@@ -202,8 +229,13 @@ impl RequestExecutionScope {
         } else {
             ctx
         };
+        let disposition = if disposition.is_null() {
+            matching_outer_disposition(identity)
+        } else {
+            disposition
+        };
         record_vm_entry(identity, phase, allowed, !request.is_null());
-        Self::enter(request, ctx, identity, phase, allowed)
+        Self::enter(request, ctx, disposition, identity, phase, allowed)
     }
 }
 
@@ -217,6 +249,15 @@ fn matching_outer_request(identity: RequestIdentity) -> *mut ngx_http_request_t 
 fn matching_outer_ctx(identity: RequestIdentity) -> *mut RequestLocalCtx {
     match current_frame() {
         Ok(frame) if frame.identity == identity && !frame.ctx.is_null() => frame.ctx,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+fn matching_outer_disposition(identity: RequestIdentity) -> *mut RequestDisposition {
+    match current_frame() {
+        Ok(frame) if frame.identity == identity && !frame.disposition.is_null() => {
+            frame.disposition
+        }
         _ => std::ptr::null_mut(),
     }
 }
@@ -241,7 +282,28 @@ pub fn with_request_scope_ctx<R>(
     allowed: AllowedOps,
     f: impl FnOnce() -> R,
 ) -> R {
-    let _scope = RequestExecutionScope::enter(request, ctx, identity, phase, allowed);
+    with_request_scope_full(
+        request,
+        ctx,
+        std::ptr::null_mut(),
+        identity,
+        phase,
+        allowed,
+        f,
+    )
+}
+
+/// Install a request scope with ctx and disposition pointers.
+pub fn with_request_scope_full<R>(
+    request: *mut ngx_http_request_t,
+    ctx: *mut RequestLocalCtx,
+    disposition: *mut RequestDisposition,
+    identity: RequestIdentity,
+    phase: NgxPhase,
+    allowed: AllowedOps,
+    f: impl FnOnce() -> R,
+) -> R {
+    let _scope = RequestExecutionScope::enter(request, ctx, disposition, identity, phase, allowed);
     f()
 }
 
@@ -263,7 +325,19 @@ pub fn with_vm_request_scope_ctx<R>(
     ctx: *mut RequestLocalCtx,
     f: impl FnOnce() -> R,
 ) -> R {
-    let _scope = RequestExecutionScope::enter_for_vm(identity, phase, allowed, ctx);
+    with_vm_request_scope_full(identity, phase, allowed, ctx, std::ptr::null_mut(), f)
+}
+
+/// VM entry that also installs a request-owned disposition slot.
+pub fn with_vm_request_scope_full<R>(
+    identity: RequestIdentity,
+    phase: NgxPhase,
+    allowed: AllowedOps,
+    ctx: *mut RequestLocalCtx,
+    disposition: *mut RequestDisposition,
+    f: impl FnOnce() -> R,
+) -> R {
+    let _scope = RequestExecutionScope::enter_for_vm(identity, phase, allowed, ctx, disposition);
     f()
 }
 
@@ -487,6 +561,53 @@ pub fn with_current_ctx_mut<R>(
     Ok(f(unsafe { &mut *frame.ctx }))
 }
 
+/// Mutable request access gated by an explicit ops bit (write/response/control).
+pub fn with_current_request_mut_ops<R>(
+    expected: RequestIdentity,
+    required: AllowedOps,
+    f: impl for<'a> FnOnce(&'a mut Request) -> R,
+) -> Result<R, ScopeError> {
+    let frame = verified_frame(expected)?;
+    if !frame.allowed.contains(required) {
+        return Err(ScopeError::OpsNotAllowed);
+    }
+    let _borrow = acquire_exclusive()?;
+    // SAFETY: same as [`with_current_request_mut`].
+    let request = unsafe { Request::from_ngx_http_request(frame.request) };
+    Ok(f(request))
+}
+
+fn verified_disposition_frame(expected: RequestIdentity) -> Result<ScopeFrame, ScopeError> {
+    let frame = current_frame()?;
+    if frame.identity.request_id() != expected.request_id() {
+        return Err(ScopeError::IdentityMismatch);
+    }
+    if frame.identity.generation() != expected.generation() {
+        return Err(ScopeError::StaleGeneration);
+    }
+    if !frame.allowed.contains(AllowedOps::CONTROL) {
+        return Err(ScopeError::OpsNotAllowed);
+    }
+    if frame.disposition.is_null() {
+        return Err(ScopeError::NullDisposition);
+    }
+    Ok(frame)
+}
+
+/// Run `f` with the request-owned disposition after verifying `expected`.
+///
+/// The HRTB keeps the mutable borrow inside `f`. Ordinary HostError cannot
+/// obtain this pointer.
+pub fn with_current_disposition_mut<R>(
+    expected: RequestIdentity,
+    f: impl for<'a> FnOnce(&'a mut RequestDisposition) -> R,
+) -> Result<R, ScopeError> {
+    let frame = verified_disposition_frame(expected)?;
+    // SAFETY: worker main thread, identity/generation matched, pointer came
+    // from AccessExec via [`RequestExecutionScope::enter`].
+    Ok(f(unsafe { &mut *frame.disposition }))
+}
+
 macro_rules! assert_not_impl_any {
     ($x:ty: $($t:path),+ $(,)?) => {{
         #[allow(dead_code)]
@@ -525,6 +646,7 @@ mod not_send_sync {
         let _scope = RequestExecutionScope::enter(
             std::ptr::null_mut(),
             std::ptr::null_mut(),
+            std::ptr::null_mut(),
             identity,
             NgxPhase::Access,
             AllowedOps::for_phase(NgxPhase::Access),
@@ -539,11 +661,13 @@ mod not_send_sync {
         let outer = RequestExecutionScope::enter(
             std::ptr::null_mut(),
             std::ptr::null_mut(),
+            std::ptr::null_mut(),
             identity,
             NgxPhase::Access,
             AllowedOps::for_phase(NgxPhase::Access),
         );
         let inner = RequestExecutionScope::enter(
+            std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             RequestIdentity::new(3, 3),

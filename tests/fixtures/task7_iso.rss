@@ -1,0 +1,5 @@
+use ngx;
+ngx::var::set("writable", ngx::var::get("arg_id"));
+ngx::header::set("X-Task7", ngx::var::get("writable"));
+ngx::sleep_ms(30);
+ngx::log(ngx::log_level::notice(), "TASK7_ISO=" + ngx::encode_args({ id: ngx::var::get("writable") }));

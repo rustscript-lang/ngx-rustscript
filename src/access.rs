@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use nginx_sys::{
     ngx_handle_read_event, ngx_http_block_reading, ngx_http_request_t, ngx_http_test_reading,
-    ngx_post_event, ngx_posted_events,
+    ngx_int_t, ngx_post_event, ngx_posted_events,
 };
 use ngx::core::Status;
 use ngx::ffi::NGX_LOG_ERR;
@@ -28,6 +28,13 @@ use crate::host::{AllowedOps, NgxPhase, with_request_scope, with_vm_request_scop
 use crate::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
 use crate::request_state::{AccessExec, AccessStatus, IdentityRegistry, ReadyEffect};
 use crate::vm_pool;
+
+unsafe extern "C" {
+    fn ngx_rustscript_c_send_last_response(
+        r: *mut ngx_http_request_t,
+        status: ngx_int_t,
+    ) -> ngx_int_t;
+}
 
 struct AccessCtx {
     exec: RefCell<AccessExec>,
@@ -313,6 +320,11 @@ fn finish_from_raw(raw: *mut ngx_http_request_t) -> Status {
             request.log(),
             "access_by_rss_file: async access failed"
         );
+    }
+    if let AccessStatus::Finalize(code) = status {
+        unsafe {
+            let _ = ngx_rustscript_c_send_last_response(raw, code as ngx_int_t);
+        }
     }
     status.as_nginx()
 }

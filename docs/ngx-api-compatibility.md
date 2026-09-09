@@ -1,15 +1,15 @@
-# Release A ngx API compatibility matrix
+# Release B ngx API compatibility matrix
 
-This matrix is the authoritative Release A ngx host surface for
+This matrix is the authoritative Release B ngx host surface for
 `ngx-rustscript`. It is derived from the production manifest
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **118** names in the same order.
+Those three lists contain the same **132** names in the same order.
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and does not claim
-APIs beyond this Release A set.
+APIs beyond this Release B set.
 
 **Built and tested against official NGINX 1.30.4** (`nginx_version`
 1030004), ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`, and the
@@ -56,10 +56,12 @@ argument.
 | Time | 9 | sync |
 | Metadata / worker / config / phase | 12 | sync |
 | Logging | 1 | sync |
-| Request-read / var | 11 | sync |
+| Request-read / var | 17 | sync |
 | Request-local ctx | 4 | sync |
+| Response metadata | 6 | sync |
+| Control | 2 | sync |
 | Constants | 65 | sync |
-| **Production total** | **118** | |
+| **Production total** | **132** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
 the production manifest, catalog, or `bind_ngx_hosts`.
@@ -105,6 +107,12 @@ Shared sets used by the tables:
 | `PHASE_REQ_FLAGS` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log` |
 | `PHASE_HEADERS_SENT` | `set`, `rewrite`, `access`, `content` |
 | `PHASE_VAR_GET` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `balancer` |
+| `PHASE_REQ_SET_METHOD` | `set`, `rewrite`, `access`, `content`, `header_filter` |
+| `PHASE_REQ_SET_URI` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter` |
+| `PHASE_REQ_SET_HEADER` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `balancer` |
+| `PHASE_RESPONSE_META` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `balancer` |
+| `PHASE_EXIT` | `rewrite`, `access`, `content`, `header_filter`, `timer`, `balancer`, `ssl_certificate`, `ssl_session_fetch`, `ssl_session_store` |
+| `PHASE_REDIRECT` | `rewrite`, `access`, `content` |
 
 ## Cross-cutting adaptations
 
@@ -386,6 +394,44 @@ or list pointers. They require a live request scope.
 | `ngx.is_subrequest` | `ngx::is_subrequest() -> bool` | supported | `PHASE_REQ_FLAGS` | none | `r != r->main`. Live false-path on main requests (`REQ_SUB=false`). `ngx_http_core_access_phase` skips all access handlers when `r != r->main`, so SSI/mirror/auth_request subrequests cannot run `access_by_rss_file`. True is stub-covered; SSI include still returns `sub-ok` as evidence the subrequest ran. | `tests/ngx_request_read.rs` |
 | `ngx.headers_sent` | `ngx::headers_sent() -> bool` | supported | `PHASE_HEADERS_SENT` | none | Live C `r->header_sent` via `ngx_rustscript_request_headers_sent`. Access-phase scripts observe `false`. | `tests/ngx_request_read.rs`, `tests/ngx_request_abi.rs` |
 | `ngx.var.VARIABLE` | `ngx::var::get(name: string) -> optional<string>` | adapted | `PHASE_VAR_GET` | 256-byte name; 65536-byte value | Indexed lookup with `ngx_hash_strlow`. Missing is `null`; present empty is `""`. Rejects empty/NUL names. | `tests/ngx_request_read.rs` (`var_get_*`) |
+| `ngx.req.set_method` | `ngx::req::set_method(method_id: int) -> null` | adapted | `PHASE_REQ_SET_METHOD` | OpenResty method IDs only | Updates numeric `r->method` and canonical static `method_name`. Unsupported IDs fail before mutation. | `tests/ngx_request_mutation.rs` |
+| `ngx.req.set_uri` | `ngx::req::set_uri(uri: string, jump: unknown) -> null` | adapted | `PHASE_REQ_SET_URI` | 65536-byte URI | `jump` `null`/`false` rewrites `r->uri`, sets `internal`, clears `valid_unparsed_uri`/`valid_location`/`uri_changed`, and calls `ngx_http_set_exten` via the C shim. `jump=true` is rejected **before** mutation. Empty/unsafe bytes (0x00-0x08, 0x0A-0x1F, 0x7F) fail first. | `tests/ngx_request_mutation.rs` |
+| `ngx.req.set_uri_args` | `ngx::req::set_uri_args(args: unknown) -> null` | adapted | `PHASE_REQ_SET_URI` | 65536-byte encoded args | String: escape 0x00-0x20 and 0x7F as `%XX`. Map: reuse `encode_args`. Pool-owned `r->args`; `valid_unparsed_uri=0`. | `tests/ngx_request_mutation.rs` |
+| `ngx.req.set_header` | `ngx::req::set_header(name: string, value: unknown) -> null` | adapted | `PHASE_REQ_SET_HEADER` | 256-byte token name; 8192-byte value | `null` clears. String/array values. Token + no CRLF/NUL. Hash-zero then push. Dedicated Host/Content-Length/Content-Type/User-Agent/Connection/Cookie/Referer stay consistent. | `tests/ngx_request_mutation.rs` |
+| `ngx.req.clear_header` | `ngx::req::clear_header(name: string) -> null` | adapted | `PHASE_REQ_SET_HEADER` | same name policy | Hash-zero matching list entries and reset dedicated fields (`content_length_n=-1`, `connection_type=0`). | `tests/ngx_request_mutation.rs` |
+| `ngx.var.VARIABLE` write | `ngx::var::set(name: string, value: unknown) -> null` | adapted | `PHASE_VAR_GET` | 1024-byte name; 65536-byte value | Indexed/set_handler write via C shim. Honors CHANGEABLE. `null` → `not_found`. Empty string is present empty. Read-only and unknown names fail. | `tests/ngx_request_mutation.rs` |
+
+## Response metadata
+
+`headers_out` hosts. Capability is `ResponseWrite` (get and set). Rejected after `header_sent`. Ordinary list plus dedicated Content-Type/Length/Location/Last-Modified/ETag.
+
+| OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ngx.status` | `ngx::status::get() -> int` | adapted | `PHASE_RESPONSE_META` | none | `headers_out.status`; unset is `0`. | `tests/ngx_request_mutation.rs` |
+| `ngx.status` | `ngx::status::set(status: int) -> null` | adapted | `PHASE_RESPONSE_META` | 0-999 | Rejected after headers sent. | `tests/ngx_request_mutation.rs` |
+| `ngx.header.HEADER` | `ngx::header::get(name: string) -> unknown` | adapted | `PHASE_RESPONSE_META` | 256-byte token | Missing `null`; one string; duplicates array. Owned copies. Content-Type/Content-Length prefer dedicated fields. | `tests/ngx_request_mutation.rs` |
+| `ngx.header.HEADER` | `ngx::header::set(name: string, value: unknown) -> null` | adapted | `PHASE_RESPONSE_META` | 8192-byte value | `null` clears. Injection (CRLF/NUL/non-token) rejected. Relative Location does not set the dedicated pointer. New list slots are allocated before old matching names are deactivated. | `tests/ngx_request_mutation.rs` |
+| — | `ngx::header::set_all(headers: map) -> null` | adapted | `PHASE_RESPONSE_META` | same | Validate every pair first. Allocate the intended representation, then deactivate previous headers. Validation or allocation failure leaves the logical list unchanged (pool memory is not rolled back). | `tests/ngx_request_mutation.rs` |
+| — | `ngx::header::clear() -> null` | adapted | `PHASE_RESPONSE_META` | — | Hash-zero every output header and reset dedicated fields. | `tests/ngx_request_mutation.rs` |
+
+## Control flow
+
+Hosts set request-owned `RequestDisposition` then stop the VM. AccessExec consumes disposition only when it is set. Ordinary HostError cannot forge control. First disposition wins. The access handler is the sole finalizer: it returns the NGINX status; hosts never call `ngx_http_finalize_request`.
+
+| OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ngx.exit` | `ngx::exit(status: int) -> null` | adapted | `PHASE_EXIT` | 0, -1, -5, 100-599 | Stops VM immediately. `0` continues the access phase (`NGX_OK`). `-5` is `NGX_DECLINED`. HTTP 201/204 and `>=300` finalize via the access return. HTTP 200-299 except 201/204 send an empty response then return (NGINX does not special-case 200). `NGX_AGAIN`/`NGX_DONE` rejected. | `tests/ngx_control_flow.rs` |
+| `ngx.redirect` | `ngx::redirect(uri: string, status: unknown) -> null` | adapted | `PHASE_REDIRECT` | 65536-byte URI; 301/302/303/307/308 | `status` `null` defaults to 302. Writes Location then disposition. Unsafe URI rejected. | `tests/ngx_control_flow.rs` |
+
+`ngx.exec` is **not** a production host. Import is rejected at config time. `set_uri(jump=true)` is a runtime rejection before mutation.
+
+`PHASE_REQ_SET_METHOD`: `set`, `rewrite`, `access`, `content`, `header_filter`.
+`PHASE_REQ_SET_URI`: `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`.
+`PHASE_REQ_SET_HEADER`: `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `balancer`.
+`PHASE_EXIT`: `rewrite`, `access`, `content`, `header_filter`, `timer`, `balancer`, `ssl_certificate`, `ssl_session_fetch`, `ssl_session_store`.
+`PHASE_REDIRECT`: `rewrite`, `access`, `content`.
+
+Mutation and control programs use request-owned `AccessExec` (capability-based, not host-name matching). Pure sync request-read stays pooled.
 
 ## Request-local context
 
@@ -418,20 +464,19 @@ cancellation, and `AccessExec` drop. Ctx hosts run only on the worker main
 thread inside VM run/resume; polling the Tokio sleep future receives no ctx
 pointer, and a stale wake cannot access a dropped ctx.
 
-## Out of scope for Release A
+## Out of scope for Release B
 
 Not production hosts in this matrix (do not import them):
 
-- Remaining request/response/body/control APIs (`ngx.req.set_*`,
-  `ngx.req.read_body`, `ngx.header`, `ngx.exit`, `ngx.redirect`,
-  `ngx.print` / `ngx.say`, ...)
+- Remaining body/output APIs (`ngx.req.read_body`, `ngx.print` / `ngx.say`, `ngx.eof`, ...)
+- `ngx.exec` / internal redirect (`set_uri jump=true`)
 - Shared dict, cosocket, timer callbacks, light threads
 - Stream subsystem, `ndk.set_var.*`, Lua `coroutine.*`
 - `print`, `runtime::sleep`, and test hosts `ngx::probe` / `ngx::ready` /
   `ngx::fail`
 
 Catalog phase names other than `access` document OpenResty allowlists
-for later directives. They are not runnable entry points in Release A.
+for later directives. They are not runnable entry points in Release B.
 
 ## Maintaining this matrix
 

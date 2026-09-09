@@ -50,6 +50,20 @@ pub const NGX_REQ_START_TIME_NAME: &str = "ngx::req::start_time";
 pub const NGX_IS_SUBREQUEST_NAME: &str = "ngx::is_subrequest";
 pub const NGX_HEADERS_SENT_NAME: &str = "ngx::headers_sent";
 pub const NGX_VAR_GET_NAME: &str = "ngx::var::get";
+pub const NGX_REQ_SET_METHOD_NAME: &str = "ngx::req::set_method";
+pub const NGX_REQ_SET_URI_NAME: &str = "ngx::req::set_uri";
+pub const NGX_REQ_SET_URI_ARGS_NAME: &str = "ngx::req::set_uri_args";
+pub const NGX_REQ_SET_HEADER_NAME: &str = "ngx::req::set_header";
+pub const NGX_REQ_CLEAR_HEADER_NAME: &str = "ngx::req::clear_header";
+pub const NGX_VAR_SET_NAME: &str = "ngx::var::set";
+pub const NGX_STATUS_GET_NAME: &str = "ngx::status::get";
+pub const NGX_STATUS_SET_NAME: &str = "ngx::status::set";
+pub const NGX_HEADER_GET_NAME: &str = "ngx::header::get";
+pub const NGX_HEADER_SET_NAME: &str = "ngx::header::set";
+pub const NGX_HEADER_SET_ALL_NAME: &str = "ngx::header::set_all";
+pub const NGX_HEADER_CLEAR_NAME: &str = "ngx::header::clear";
+pub const NGX_EXIT_NAME: &str = "ngx::exit";
+pub const NGX_REDIRECT_NAME: &str = "ngx::redirect";
 pub const NGX_CTX_GET_NAME: &str = "ngx::ctx::get";
 pub const NGX_CTX_SET_NAME: &str = "ngx::ctx::set";
 pub const NGX_CTX_DELETE_NAME: &str = "ngx::ctx::delete";
@@ -110,6 +124,8 @@ pub enum HostFamily {
     Constant,
     Request,
     RequestCtx,
+    Response,
+    Control,
 }
 
 /// Whether a host submits a future or returns synchronously.
@@ -130,7 +146,10 @@ pub enum HostCapability {
     Log,
     Constant,
     RequestRead,
+    RequestWrite,
     RequestCtx,
+    ResponseWrite,
+    Control,
 }
 
 /// One production ngx host. Schema fields stay next to the catalog builder.
@@ -282,7 +301,10 @@ const META_CAPABILITIES: &[HostCapability] = &[HostCapability::Meta];
 const LOG_CAPABILITIES: &[HostCapability] = &[HostCapability::Log];
 const CONSTANT_CAPABILITIES: &[HostCapability] = &[HostCapability::Constant];
 const REQUEST_READ_CAPABILITIES: &[HostCapability] = &[HostCapability::RequestRead];
+const REQUEST_WRITE_CAPABILITIES: &[HostCapability] = &[HostCapability::RequestWrite];
 const REQUEST_CTX_CAPABILITIES: &[HostCapability] = &[HostCapability::RequestCtx];
+const RESPONSE_WRITE_CAPABILITIES: &[HostCapability] = &[HostCapability::ResponseWrite];
+const CONTROL_CAPABILITIES: &[HostCapability] = &[HostCapability::Control];
 
 /// `ngx.req.get_method` contexts from OpenResty v0.10.29.
 const PHASE_REQ_GET_METHOD: &[NgxPhase] = &[
@@ -368,6 +390,65 @@ const PHASE_VAR_GET: &[NgxPhase] = &[
     NgxPhase::Log,
     NgxPhase::Balancer,
 ];
+
+/// `ngx.req.set_method`.
+const PHASE_REQ_SET_METHOD: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+];
+
+/// `ngx.req.set_uri` / `ngx.req.set_uri_args`.
+const PHASE_REQ_SET_URI: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+];
+
+/// `ngx.req.set_header` / `ngx.req.clear_header`.
+const PHASE_REQ_SET_HEADER: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Balancer,
+];
+
+/// `ngx.status` / `ngx.header.HEADER`.
+const PHASE_RESPONSE_META: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Balancer,
+];
+
+/// `ngx.exit`.
+const PHASE_EXIT: &[NgxPhase] = &[
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::Timer,
+    NgxPhase::Balancer,
+    NgxPhase::SslCertificate,
+    NgxPhase::SslSessionFetch,
+    NgxPhase::SslSessionStore,
+];
+
+/// `ngx.redirect`.
+const PHASE_REDIRECT: &[NgxPhase] = &[NgxPhase::Rewrite, NgxPhase::Access, NgxPhase::Content];
 
 /// OpenResty v0.10.29 `ngx.ctx` contexts. Configuration phases are excluded.
 const PHASE_CTX: &[NgxPhase] = &[
@@ -836,6 +917,52 @@ const MANIFEST: &[HostManifestEntry] = &[
         PHASE_HEADERS_SENT,
     ),
     request_entry(NGX_VAR_GET_NAME, "ngx.var.VARIABLE", PHASE_VAR_GET),
+    request_write_entry(
+        NGX_REQ_SET_METHOD_NAME,
+        "ngx.req.set_method",
+        PHASE_REQ_SET_METHOD,
+    ),
+    request_write_entry(NGX_REQ_SET_URI_NAME, "ngx.req.set_uri", PHASE_REQ_SET_URI),
+    request_write_entry(
+        NGX_REQ_SET_URI_ARGS_NAME,
+        "ngx.req.set_uri_args",
+        PHASE_REQ_SET_URI,
+    ),
+    request_write_entry(
+        NGX_REQ_SET_HEADER_NAME,
+        "ngx.req.set_header",
+        PHASE_REQ_SET_HEADER,
+    ),
+    request_write_entry(
+        NGX_REQ_CLEAR_HEADER_NAME,
+        "ngx.req.clear_header",
+        PHASE_REQ_SET_HEADER,
+    ),
+    request_write_entry(NGX_VAR_SET_NAME, "ngx.var.VARIABLE", PHASE_VAR_GET),
+    response_entry(NGX_STATUS_GET_NAME, "ngx.status", PHASE_RESPONSE_META),
+    response_entry(NGX_STATUS_SET_NAME, "ngx.status", PHASE_RESPONSE_META),
+    response_entry(
+        NGX_HEADER_GET_NAME,
+        "ngx.header.HEADER",
+        PHASE_RESPONSE_META,
+    ),
+    response_entry(
+        NGX_HEADER_SET_NAME,
+        "ngx.header.HEADER",
+        PHASE_RESPONSE_META,
+    ),
+    response_entry(
+        NGX_HEADER_SET_ALL_NAME,
+        "ngx.header.HEADER",
+        PHASE_RESPONSE_META,
+    ),
+    response_entry(
+        NGX_HEADER_CLEAR_NAME,
+        "ngx.header.HEADER",
+        PHASE_RESPONSE_META,
+    ),
+    control_entry(NGX_EXIT_NAME, "ngx.exit", PHASE_EXIT),
+    control_entry(NGX_REDIRECT_NAME, "ngx.redirect", PHASE_REDIRECT),
     ctx_entry(NGX_CTX_GET_NAME, PHASE_CTX),
     ctx_entry(NGX_CTX_SET_NAME, PHASE_CTX),
     ctx_entry(NGX_CTX_DELETE_NAME, PHASE_CTX),
@@ -928,6 +1055,51 @@ const fn request_entry(
         sync: HostSyncKind::Sync,
         phases,
         capabilities: REQUEST_READ_CAPABILITIES,
+        openresty_name,
+    }
+}
+
+const fn request_write_entry(
+    name: &'static str,
+    openresty_name: &'static str,
+    phases: &'static [NgxPhase],
+) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::Request,
+        sync: HostSyncKind::Sync,
+        phases,
+        capabilities: REQUEST_WRITE_CAPABILITIES,
+        openresty_name,
+    }
+}
+
+const fn response_entry(
+    name: &'static str,
+    openresty_name: &'static str,
+    phases: &'static [NgxPhase],
+) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::Response,
+        sync: HostSyncKind::Sync,
+        phases,
+        capabilities: RESPONSE_WRITE_CAPABILITIES,
+        openresty_name,
+    }
+}
+
+const fn control_entry(
+    name: &'static str,
+    openresty_name: &'static str,
+    phases: &'static [NgxPhase],
+) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::Control,
+        sync: HostSyncKind::Sync,
+        phases,
+        capabilities: CONTROL_CAPABILITIES,
         openresty_name,
     }
 }
@@ -1110,6 +1282,83 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             NGX_VAR_GET_NAME,
             vec![HostParamSchema::value("name", HostTypeSchema::String)],
             HostTypeSchema::Optional(Box::new(HostTypeSchema::String)),
+        ),
+        NGX_REQ_SET_METHOD_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_SET_METHOD_NAME,
+            vec![HostParamSchema::value("method_id", HostTypeSchema::Int)],
+            HostTypeSchema::Null,
+        ),
+        NGX_REQ_SET_URI_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_SET_URI_NAME,
+            vec![
+                HostParamSchema::value("uri", HostTypeSchema::String),
+                HostParamSchema::value("jump", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_REQ_SET_URI_ARGS_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_SET_URI_ARGS_NAME,
+            vec![HostParamSchema::value("args", HostTypeSchema::Unknown)],
+            HostTypeSchema::Null,
+        ),
+        NGX_REQ_SET_HEADER_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_SET_HEADER_NAME,
+            vec![
+                HostParamSchema::value("name", HostTypeSchema::String),
+                HostParamSchema::value("value", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_REQ_CLEAR_HEADER_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_CLEAR_HEADER_NAME,
+            vec![HostParamSchema::value("name", HostTypeSchema::String)],
+            HostTypeSchema::Null,
+        ),
+        NGX_VAR_SET_NAME => HostFunctionSchema::with_return(
+            NGX_VAR_SET_NAME,
+            vec![
+                HostParamSchema::value("name", HostTypeSchema::String),
+                HostParamSchema::value("value", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_STATUS_GET_NAME => nullary(NGX_STATUS_GET_NAME, HostTypeSchema::Int),
+        NGX_STATUS_SET_NAME => HostFunctionSchema::with_return(
+            NGX_STATUS_SET_NAME,
+            vec![HostParamSchema::value("status", HostTypeSchema::Int)],
+            HostTypeSchema::Null,
+        ),
+        NGX_HEADER_GET_NAME => HostFunctionSchema::with_return(
+            NGX_HEADER_GET_NAME,
+            vec![HostParamSchema::value("name", HostTypeSchema::String)],
+            HostTypeSchema::Unknown,
+        ),
+        NGX_HEADER_SET_NAME => HostFunctionSchema::with_return(
+            NGX_HEADER_SET_NAME,
+            vec![
+                HostParamSchema::value("name", HostTypeSchema::String),
+                HostParamSchema::value("value", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_HEADER_SET_ALL_NAME => HostFunctionSchema::with_return(
+            NGX_HEADER_SET_ALL_NAME,
+            vec![HostParamSchema::value("headers", HostTypeSchema::Unknown)],
+            HostTypeSchema::Null,
+        ),
+        NGX_HEADER_CLEAR_NAME => nullary(NGX_HEADER_CLEAR_NAME, HostTypeSchema::Null),
+        NGX_EXIT_NAME => HostFunctionSchema::with_return(
+            NGX_EXIT_NAME,
+            vec![HostParamSchema::value("status", HostTypeSchema::Int)],
+            HostTypeSchema::Null,
+        ),
+        NGX_REDIRECT_NAME => HostFunctionSchema::with_return(
+            NGX_REDIRECT_NAME,
+            vec![
+                HostParamSchema::value("uri", HostTypeSchema::String),
+                HostParamSchema::value("status", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Null,
         ),
         NGX_CTX_GET_NAME => HostFunctionSchema::with_return(
             NGX_CTX_GET_NAME,

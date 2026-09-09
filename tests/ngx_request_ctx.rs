@@ -515,5 +515,5 @@ fn vm_entry_installs_ctx_without_request_pointer() {
     assert!(!entries[0].request_live);
     assert_eq!(entries[0].allowed, AllowedOps::for_phase(NgxPhase::Access));
     assert!(entries[0].allowed.contains(AllowedOps::REQUEST_CTX));
-    assert!(!entries[0].allowed.contains(AllowedOps::REQUEST_WRITE));
+    assert!(entries[0].allowed.contains(AllowedOps::REQUEST_WRITE));
 }

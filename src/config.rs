@@ -17,7 +17,9 @@ use vm::{
     CompileSourceFileOptions, Program, SourceFlavor, Vm, compile_source_with_flavor_and_options,
 };
 
-use crate::host::{HostFamily, HostSyncKind, NgxPhase, ngx_host_catalog, ngx_host_manifest};
+use crate::host::{
+    HostCapability, HostFamily, HostSyncKind, NgxPhase, ngx_host_catalog, ngx_host_manifest,
+};
 
 /// Compiled access-phase program stored on the location config.
 #[derive(Default)]
@@ -184,13 +186,22 @@ pub fn validate_program_imports_for_phase(
 
 /// True when the compiled program needs request-owned `AccessExec`.
 ///
-/// Async hosts (sleep) and RequestCtx hosts both require per-request state.
-/// Pure-sync programs without those families stay on the pooled VM fast path.
+/// Async hosts, RequestCtx, and mutation/control capabilities all require
+/// per-request state. Pure-sync request-read programs stay on the pooled path.
 pub fn program_requires_request_state(program: &Program) -> bool {
     program.imports.iter().any(|import| {
         ngx_host_manifest().iter().any(|entry| {
             entry.name == import.name.as_str()
-                && (entry.sync == HostSyncKind::Async || entry.family == HostFamily::RequestCtx)
+                && (entry.sync == HostSyncKind::Async
+                    || entry.family == HostFamily::RequestCtx
+                    || entry.capabilities.iter().any(|cap| {
+                        matches!(
+                            cap,
+                            HostCapability::RequestWrite
+                                | HostCapability::ResponseWrite
+                                | HostCapability::Control
+                        )
+                    }))
         })
     })
 }

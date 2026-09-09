@@ -1,0 +1,4 @@
+use ngx;
+ngx::sleep_ms(20);
+ngx::exit(401);
+ngx::log(ngx::log_level::notice(), "TASK7_SLEEP_EXIT_MARKER");

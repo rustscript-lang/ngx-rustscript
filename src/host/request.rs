@@ -5,8 +5,12 @@ use core::ffi::c_uint;
 
 use nginx_sys::{
     ngx_buf_t, ngx_chain_t, ngx_http_connection_t, ngx_http_request_body_t, ngx_http_request_t,
-    ngx_list_part_t, ngx_list_t, ngx_str_t, ngx_table_elt_t, ngx_uint_t, NGX_HTTP_VERSION_10,
-    NGX_HTTP_VERSION_11, NGX_HTTP_VERSION_20, NGX_HTTP_VERSION_30, NGX_HTTP_VERSION_9,
+    ngx_list_part_t, ngx_list_push, ngx_list_t, ngx_palloc, ngx_pool_t, ngx_str_t, ngx_table_elt_t,
+    ngx_uint_t, NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD, NGX_HTTP_LOCK,
+    NGX_HTTP_MKCOL, NGX_HTTP_MOVE, NGX_HTTP_OPTIONS, NGX_HTTP_PATCH, NGX_HTTP_POST,
+    NGX_HTTP_PROPFIND, NGX_HTTP_PROPPATCH, NGX_HTTP_PUT, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK,
+    NGX_HTTP_VERSION_10, NGX_HTTP_VERSION_11, NGX_HTTP_VERSION_20, NGX_HTTP_VERSION_30,
+    NGX_HTTP_VERSION_9,
 };
 use ngx::http::Request;
 use pd_host_function::pd_host_function;
@@ -14,7 +18,9 @@ use vm::{Value, VmError, VmMap};
 
 use super::super::VmResult;
 use super::{CallOutcome, IntoHostCallOutcome};
-use crate::host::{current_identity, with_current_request, ScopeError};
+use crate::host::{
+    current_identity, with_current_request, with_current_request_mut, ScopeError,
+};
 
 const MAX_COPY_BYTES: usize = 65_536;
 const MAX_HEADER_FIELD_BYTES: usize = 8_192;
@@ -37,11 +43,26 @@ fn with_request<T>(f: impl FnOnce(&Request) -> VmResult<T>) -> VmResult<T> {
     with_current_request(identity, f).map_err(scope_err)?
 }
 
+fn with_request_write<T>(f: impl FnOnce(&mut Request) -> VmResult<T>) -> VmResult<T> {
+    let identity = current_identity().map_err(scope_err)?;
+    with_current_request_mut(identity, f).map_err(scope_err)?
+}
+
 unsafe extern "C" {
     fn ngx_rustscript_c_request_is_internal(r: *const ngx_http_request_t) -> c_uint;
     fn ngx_rustscript_c_request_headers_sent(r: *const ngx_http_request_t) -> c_uint;
     fn ngx_rustscript_c_request_reading_body(r: *const ngx_http_request_t) -> c_uint;
     fn ngx_rustscript_c_request_discard_body(r: *const ngx_http_request_t) -> c_uint;
+    fn ngx_rustscript_c_request_set_uri_flags(
+        r: *mut ngx_http_request_t,
+        internal: c_uint,
+        valid_unparsed_uri: c_uint,
+        valid_location: c_uint,
+        uri_changed: c_uint,
+    );
+    fn ngx_rustscript_c_request_set_valid_unparsed_uri(r: *mut ngx_http_request_t, value: c_uint);
+    fn ngx_rustscript_c_request_set_exten(r: *mut ngx_http_request_t);
+    fn ngx_rustscript_c_request_set_connection_type(r: *mut ngx_http_request_t, value: c_uint);
 }
 
 #[unsafe(no_mangle)]
@@ -804,5 +825,481 @@ pub fn headers_sent() -> VmResult<CallOutcome> {
             request.as_ref(),
             ngx_rustscript_request_headers_sent,
         ))
+    })
+}
+
+fn method_spec(method_id: i64) -> Option<(&'static [u8], ngx_uint_t)> {
+    let id = u32::try_from(method_id).ok()?;
+    const METHODS: &[(u32, &[u8])] = &[
+        (NGX_HTTP_GET, b"GET"),
+        (NGX_HTTP_HEAD, b"HEAD"),
+        (NGX_HTTP_POST, b"POST"),
+        (NGX_HTTP_PUT, b"PUT"),
+        (NGX_HTTP_DELETE, b"DELETE"),
+        (NGX_HTTP_MKCOL, b"MKCOL"),
+        (NGX_HTTP_COPY, b"COPY"),
+        (NGX_HTTP_MOVE, b"MOVE"),
+        (NGX_HTTP_OPTIONS, b"OPTIONS"),
+        (NGX_HTTP_PROPFIND, b"PROPFIND"),
+        (NGX_HTTP_PROPPATCH, b"PROPPATCH"),
+        (NGX_HTTP_LOCK, b"LOCK"),
+        (NGX_HTTP_UNLOCK, b"UNLOCK"),
+        (NGX_HTTP_PATCH, b"PATCH"),
+        (NGX_HTTP_TRACE, b"TRACE"),
+    ];
+    METHODS
+        .iter()
+        .find(|(candidate, _)| *candidate == id)
+        .map(|(_, name)| (*name, id as ngx_uint_t))
+}
+
+fn pool_copy(pool: *mut ngx_pool_t, bytes: &[u8], nul: bool) -> VmResult<*mut u8> {
+    if pool.is_null() {
+        return Err(VmError::HostError("request pool is null".into()));
+    }
+    let size = bytes.len() + usize::from(nul);
+    if size == 0 {
+        return Ok(std::ptr::null_mut());
+    }
+    let ptr = unsafe { ngx_palloc(pool, size) }.cast::<u8>();
+    if ptr.is_null() {
+        return Err(VmError::HostError("out of memory".into()));
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+        if nul {
+            *ptr.add(bytes.len()) = 0;
+        }
+    }
+    Ok(ptr)
+}
+
+fn ngx_str_from_bytes(pool: *mut ngx_pool_t, bytes: &[u8], nul: bool) -> VmResult<ngx_str_t> {
+    if bytes.len() > MAX_COPY_BYTES {
+        return Err(VmError::HostError(format!(
+            "value exceeds the {MAX_COPY_BYTES}-byte copy limit"
+        )));
+    }
+    let data = pool_copy(pool, bytes, nul)?;
+    Ok(ngx_str_t {
+        len: bytes.len(),
+        data,
+    })
+}
+
+fn uri_has_unsafe_bytes(uri: &str) -> Option<u8> {
+    uri.bytes().find(|&b| matches!(b, 0x00..=0x08 | 0x0A..=0x1F | 0x7F))
+}
+
+fn escape_args_controls(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for byte in src.bytes() {
+        if byte <= 0x20 || byte == 0x7F {
+            out.push_str(&format!("%{byte:02X}"));
+        } else {
+            out.push(char::from(byte));
+        }
+    }
+    out
+}
+
+fn is_header_token(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            matches!(
+                b,
+                b'!'
+                    | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+                    | b'0'..=b'9'
+                    | b'A'..=b'Z'
+                    | b'a'..=b'z'
+            )
+        })
+}
+
+fn header_value_safe(value: &str) -> bool {
+    !value.bytes().any(|b| matches!(b, 0 | b'\r' | b'\n'))
+}
+
+fn header_hash(low: &[u8]) -> ngx_uint_t {
+    let mut key: ngx_uint_t = 0;
+    for &byte in low {
+        key = key.wrapping_mul(31).wrapping_add(byte as ngx_uint_t);
+    }
+    key
+}
+
+fn names_equal_ignore_case(key: ngx_str_t, name: &str) -> bool {
+    if key.len != name.len() || key.data.is_null() {
+        return false;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(key.data, key.len) };
+    bytes.eq_ignore_ascii_case(name.as_bytes())
+}
+
+fn for_each_header_mut(
+    list: &mut ngx_list_t,
+    mut f: impl FnMut(&mut ngx_table_elt_t) -> VmResult<()>,
+) -> VmResult<()> {
+    let mut part = &mut list.part as *mut ngx_list_part_t;
+    let mut seen_parts = [std::ptr::null_mut(); MAX_LIST_PARTS];
+    let mut part_count = 0usize;
+    while !part.is_null() {
+        if part_count >= MAX_LIST_PARTS {
+            return Err(VmError::HostError(
+                "header list exceeds the list-part safety cap".into(),
+            ));
+        }
+        if seen_parts[..part_count]
+            .iter()
+            .any(|&seen| std::ptr::eq(seen, part))
+        {
+            return Err(VmError::HostError("malformed cyclic header list".into()));
+        }
+        seen_parts[part_count] = part;
+        part_count += 1;
+        let part_ref = unsafe { &mut *part };
+        if part_ref.nelts > 0 {
+            if part_ref.elts.is_null() {
+                return Err(VmError::HostError("malformed null header elts".into()));
+            }
+            let elts = unsafe {
+                std::slice::from_raw_parts_mut(
+                    part_ref.elts.cast::<ngx_table_elt_t>(),
+                    part_ref.nelts,
+                )
+            };
+            for header in elts {
+                f(header)?;
+            }
+        }
+        part = part_ref.next;
+    }
+    Ok(())
+}
+
+fn clear_matching_headers_except(
+    list: &mut ngx_list_t,
+    name: &str,
+    keep: &[*mut ngx_table_elt_t],
+) -> VmResult<()> {
+    for_each_header_mut(list, |header| {
+        if header.hash != 0 && names_equal_ignore_case(header.key, name) {
+            let ptr = header as *mut ngx_table_elt_t;
+            if !keep.iter().any(|&kept| std::ptr::eq(kept, ptr)) {
+                header.hash = 0;
+                header.next = std::ptr::null_mut();
+            }
+        }
+        Ok(())
+    })
+}
+
+fn push_header(
+    list: *mut ngx_list_t,
+    pool: *mut ngx_pool_t,
+    name: &str,
+    value: &str,
+) -> VmResult<*mut ngx_table_elt_t> {
+    if list.is_null() {
+        return Err(VmError::HostError("header list is null".into()));
+    }
+    let low = lowercase_owned(name.as_bytes());
+    let key = ngx_str_from_bytes(pool, name.as_bytes(), true)?;
+    let lowcase = pool_copy(pool, &low, true)?;
+    let val = ngx_str_from_bytes(pool, value.as_bytes(), true)?;
+    let header = unsafe { ngx_list_push(list) }.cast::<ngx_table_elt_t>();
+    if header.is_null() {
+        return Err(VmError::HostError("out of memory".into()));
+    }
+    unsafe {
+        (*header).hash = 0;
+        (*header).key = key;
+        (*header).value = val;
+        (*header).lowcase_key = lowcase;
+        (*header).next = std::ptr::null_mut();
+        (*header).hash = header_hash(&low);
+    }
+    Ok(header)
+}
+
+fn parse_header_values(value: &Value) -> VmResult<Option<Vec<String>>> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(text) => {
+            if !header_value_safe(text) {
+                return Err(VmError::HostError(
+                    "header value must not contain NUL, CR, or LF".into(),
+                ));
+            }
+            if text.len() > MAX_HEADER_FIELD_BYTES {
+                return Err(VmError::HostError(format!(
+                    "header value exceeds {MAX_HEADER_FIELD_BYTES} bytes"
+                )));
+            }
+            Ok(Some(vec![text.to_string()]))
+        }
+        Value::Array(items) => {
+            let mut values = Vec::with_capacity(items.len());
+            for item in items.iter() {
+                let Value::String(text) = item else {
+                    return Err(VmError::HostError(
+                        "header array values must be strings".into(),
+                    ));
+                };
+                if !header_value_safe(text) {
+                    return Err(VmError::HostError(
+                        "header value must not contain NUL, CR, or LF".into(),
+                    ));
+                }
+                if text.len() > MAX_HEADER_FIELD_BYTES {
+                    return Err(VmError::HostError(format!(
+                        "header value exceeds {MAX_HEADER_FIELD_BYTES} bytes"
+                    )));
+                }
+                values.push(text.to_string());
+            }
+            Ok(Some(values))
+        }
+        _ => Err(VmError::HostError(
+            "header value expects string, array, or null".into(),
+        )),
+    }
+}
+
+fn validate_header_name(name: &str) -> VmResult<()> {
+    if name.len() > 256 {
+        return Err(VmError::HostError("header name exceeds 256 bytes".into()));
+    }
+    if !is_header_token(name) {
+        return Err(VmError::HostError(
+            "header name is not a valid HTTP token".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn apply_request_specials(raw: &mut ngx_http_request_t, name: &str, header: *mut ngx_table_elt_t) {
+    match name.to_ascii_lowercase().as_str() {
+        "host" => {
+            raw.headers_in.host = header;
+            if !header.is_null() {
+                raw.headers_in.server = unsafe { (*header).value };
+            } else {
+                raw.headers_in.server = ngx_str_t {
+                    len: 0,
+                    data: std::ptr::null_mut(),
+                };
+            }
+        }
+        "connection" => {
+            raw.headers_in.connection = header;
+            let connection_type = if header.is_null() {
+                0
+            } else {
+                let value = unsafe { (*header).value };
+                let bytes = if value.data.is_null() || value.len == 0 {
+                    &[][..]
+                } else {
+                    unsafe { std::slice::from_raw_parts(value.data, value.len) }
+                };
+                if bytes.eq_ignore_ascii_case(b"close") {
+                    raw.headers_in.keep_alive_n = -1;
+                    1
+                } else if bytes.eq_ignore_ascii_case(b"keep-alive") {
+                    2
+                } else {
+                    0
+                }
+            };
+            unsafe {
+                ngx_rustscript_c_request_set_connection_type(raw, connection_type);
+            }
+        }
+        "user-agent" => raw.headers_in.user_agent = header,
+        "content-length" => {
+            raw.headers_in.content_length = header;
+            raw.headers_in.content_length_n = if header.is_null() {
+                -1
+            } else {
+                let value = unsafe { (*header).value };
+                let bytes = if value.data.is_null() {
+                    &[][..]
+                } else {
+                    unsafe { std::slice::from_raw_parts(value.data, value.len) }
+                };
+                std::str::from_utf8(bytes)
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(-1)
+            };
+        }
+        "content-type" => raw.headers_in.content_type = header,
+        "cookie" => raw.headers_in.cookie = header,
+        "referer" => raw.headers_in.referer = header,
+        _ => {}
+    }
+}
+
+fn set_or_clear_request_header(
+    raw: &mut ngx_http_request_t,
+    name: &str,
+    values: Option<Vec<String>>,
+) -> VmResult<()> {
+    validate_header_name(name)?;
+    let Some(values) = values.filter(|values| !values.is_empty()) else {
+        clear_matching_headers_except(&mut raw.headers_in.headers, name, &[])?;
+        apply_request_specials(raw, name, std::ptr::null_mut());
+        return Ok(());
+    };
+    let pool = raw.pool;
+    let list = &mut raw.headers_in.headers as *mut ngx_list_t;
+    let mut added = Vec::new();
+    let mut first: *mut ngx_table_elt_t = std::ptr::null_mut();
+    let mut prev: *mut ngx_table_elt_t = std::ptr::null_mut();
+    for value in &values {
+        match push_header(list, pool, name, value) {
+            Ok(header) => {
+                if first.is_null() {
+                    first = header;
+                }
+                if !prev.is_null() {
+                    unsafe {
+                        (*prev).next = header;
+                    }
+                }
+                added.push(header);
+                prev = header;
+            }
+            Err(err) => {
+                for header in &added {
+                    if !header.is_null() {
+                        unsafe {
+                            (**header).hash = 0;
+                            (**header).next = std::ptr::null_mut();
+                        }
+                    }
+                }
+                return Err(err);
+            }
+        }
+    }
+    clear_matching_headers_except(&mut raw.headers_in.headers, name, &added)?;
+    apply_request_specials(raw, name, first);
+    Ok(())
+}
+
+/// Override the current request method using OpenResty method IDs.
+#[pd_host_function(name = "ngx::req::set_method")]
+pub fn set_method(method_id: i64) -> VmResult<CallOutcome> {
+    let (name, id) = method_spec(method_id).ok_or_else(|| {
+        VmError::HostError(format!("unsupported method id {method_id}"))
+    })?;
+    with_request_write(|request| {
+        let raw = request.as_mut();
+        raw.method = id;
+        raw.method_name = ngx_str_t {
+            len: name.len(),
+            data: name.as_ptr().cast_mut(),
+        };
+        ret(())
+    })
+}
+
+/// Rewrite the parsed URI. First release rejects `jump=true` before mutation.
+#[pd_host_function(name = "ngx::req::set_uri")]
+pub fn set_uri(uri: String, jump: &Value) -> VmResult<CallOutcome> {
+    if uri.is_empty() {
+        return Err(VmError::HostError("uri cannot be empty".into()));
+    }
+    if uri.len() > MAX_COPY_BYTES {
+        return Err(VmError::HostError(format!(
+            "uri exceeds the {MAX_COPY_BYTES}-byte copy limit"
+        )));
+    }
+    if let Some(byte) = uri_has_unsafe_bytes(&uri) {
+        return Err(VmError::HostError(format!(
+            "unsafe byte \"0x{byte:02x}\" in uri"
+        )));
+    }
+    if optional_bool(jump, "ngx::req::set_uri jump")?.unwrap_or(false) {
+        return Err(VmError::HostError(
+            "ngx.req.set_uri jump is not supported in this release".into(),
+        ));
+    }
+    with_request_write(|request| {
+        let raw = request.as_mut();
+        raw.uri = ngx_str_from_bytes(raw.pool, uri.as_bytes(), false)?;
+        unsafe {
+            ngx_rustscript_c_request_set_uri_flags(raw, 1, 0, 0, 0);
+            ngx_rustscript_c_request_set_exten(raw);
+        }
+        ret(())
+    })
+}
+
+/// Replace the query string from a raw string or map.
+#[pd_host_function(name = "ngx::req::set_uri_args")]
+pub fn set_uri_args(args: &Value) -> VmResult<CallOutcome> {
+    let encoded = match args {
+        Value::String(text) => {
+            if text.len() > MAX_COPY_BYTES {
+                return Err(VmError::HostError(format!(
+                    "uri args exceed the {MAX_COPY_BYTES}-byte copy limit"
+                )));
+            }
+            escape_args_controls(text)
+        }
+        Value::Map(map) => super::codec::encode_args_map(map)?,
+        _ => {
+            return Err(VmError::HostError(
+                "ngx::req::set_uri_args expects string or map".into(),
+            ));
+        }
+    };
+    if encoded.len() > MAX_COPY_BYTES {
+        return Err(VmError::HostError(format!(
+            "uri args exceed the {MAX_COPY_BYTES}-byte copy limit"
+        )));
+    }
+    with_request_write(|request| {
+        let raw = request.as_mut();
+        raw.args = ngx_str_from_bytes(raw.pool, encoded.as_bytes(), false)?;
+        unsafe {
+            ngx_rustscript_c_request_set_valid_unparsed_uri(raw, 0);
+        }
+        ret(())
+    })
+}
+
+/// Set or replace a request header. `null` clears.
+#[pd_host_function(name = "ngx::req::set_header")]
+pub fn set_header(name: String, value: &Value) -> VmResult<CallOutcome> {
+    let values = parse_header_values(value)?;
+    with_request_write(|request| {
+        set_or_clear_request_header(request.as_mut(), &name, values.clone())?;
+        ret(())
+    })
+}
+
+/// Clear a request header, including dedicated special-field pointers.
+#[pd_host_function(name = "ngx::req::clear_header")]
+pub fn clear_header(name: String) -> VmResult<CallOutcome> {
+    with_request_write(|request| {
+        set_or_clear_request_header(request.as_mut(), &name, None)?;
+        ret(())
     })
 }

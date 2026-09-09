@@ -5,7 +5,7 @@
 //! Nested modules below match that layout. There is no handwritten
 //! `HostFunction`, argument decode, or yield-based host re-entry.
 
-use vm::Vm;
+use vm::{Vm, VmError};
 
 pub mod catalog;
 pub(crate) mod context;
@@ -15,20 +15,26 @@ pub use catalog::{
     NGX_CRC32_LONG_NAME, NGX_CRC32_SHORT_NAME, NGX_CTX_CLEAR_NAME, NGX_CTX_DELETE_NAME,
     NGX_CTX_GET_NAME, NGX_CTX_SET_NAME, NGX_DECODE_ARGS_NAME, NGX_DECODE_BASE64_NAME,
     NGX_DECODE_BASE64MIME_NAME, NGX_ENCODE_ARGS_NAME, NGX_ENCODE_BASE64_NAME, NGX_ESCAPE_URI_NAME,
-    NGX_HEADERS_SENT_NAME, NGX_HMAC_SHA1_NAME, NGX_HTTP_TIME_NAME, NGX_IS_SUBREQUEST_NAME,
-    NGX_LOCALTIME_NAME, NGX_MD5_BIN_NAME, NGX_MD5_NAME, NGX_NOW_NAME, NGX_PARSE_HTTP_TIME_NAME,
-    NGX_QUOTE_SQL_STR_NAME, NGX_REQ_GET_HEADERS_NAME, NGX_REQ_GET_METHOD_NAME,
-    NGX_REQ_GET_POST_ARGS_NAME, NGX_REQ_GET_URI_ARGS_NAME, NGX_REQ_HTTP_VERSION_NAME,
-    NGX_REQ_IS_INTERNAL_NAME, NGX_REQ_RAW_HEADER_NAME, NGX_REQ_START_TIME_NAME, NGX_SHA1_BIN_NAME,
-    NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_TIME_NAME, NGX_TODAY_NAME, NGX_UNESCAPE_URI_NAME,
-    NGX_UPDATE_TIME_NAME, NGX_UTCTIME_NAME, NGX_VAR_GET_NAME, NgxPhase, host_allowed_in_phase,
-    manifest_entry, ngx_host_catalog, ngx_host_manifest,
+    NGX_EXIT_NAME, NGX_HEADER_CLEAR_NAME, NGX_HEADER_GET_NAME, NGX_HEADER_SET_ALL_NAME,
+    NGX_HEADER_SET_NAME, NGX_HEADERS_SENT_NAME, NGX_HMAC_SHA1_NAME, NGX_HTTP_TIME_NAME,
+    NGX_IS_SUBREQUEST_NAME, NGX_LOCALTIME_NAME, NGX_MD5_BIN_NAME, NGX_MD5_NAME, NGX_NOW_NAME,
+    NGX_PARSE_HTTP_TIME_NAME, NGX_QUOTE_SQL_STR_NAME, NGX_REDIRECT_NAME, NGX_REQ_CLEAR_HEADER_NAME,
+    NGX_REQ_GET_HEADERS_NAME, NGX_REQ_GET_METHOD_NAME, NGX_REQ_GET_POST_ARGS_NAME,
+    NGX_REQ_GET_URI_ARGS_NAME, NGX_REQ_HTTP_VERSION_NAME, NGX_REQ_IS_INTERNAL_NAME,
+    NGX_REQ_RAW_HEADER_NAME, NGX_REQ_SET_HEADER_NAME, NGX_REQ_SET_METHOD_NAME,
+    NGX_REQ_SET_URI_ARGS_NAME, NGX_REQ_SET_URI_NAME, NGX_REQ_START_TIME_NAME, NGX_SHA1_BIN_NAME,
+    NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_STATUS_GET_NAME, NGX_STATUS_SET_NAME, NGX_TIME_NAME,
+    NGX_TODAY_NAME, NGX_UNESCAPE_URI_NAME, NGX_UPDATE_TIME_NAME, NGX_UTCTIME_NAME,
+    NGX_VAR_GET_NAME, NGX_VAR_SET_NAME, NgxPhase, host_allowed_in_phase, manifest_entry,
+    ngx_host_catalog, ngx_host_manifest,
 };
 pub use context::{
-    AllowedOps, ScopeError, VmEntryObservation, capture_vm_entries, current_allowed_ops,
-    current_identity, current_phase, current_request_live, is_active, with_current_ctx,
-    with_current_ctx_mut, with_current_request, with_current_request_mut, with_request_scope,
-    with_request_scope_ctx, with_vm_request_scope, with_vm_request_scope_ctx,
+    AllowedOps, RequestDisposition, ScopeError, VmEntryObservation, capture_vm_entries,
+    current_allowed_ops, current_identity, current_phase, current_request_live, is_active,
+    with_current_ctx, with_current_ctx_mut, with_current_disposition_mut, with_current_request,
+    with_current_request_mut, with_current_request_mut_ops, with_request_scope,
+    with_request_scope_ctx, with_request_scope_full, with_vm_request_scope,
+    with_vm_request_scope_ctx, with_vm_request_scope_full,
 };
 #[cfg(test)]
 pub(crate) use layout::helpers::request_ctx::live_owned_entry_count;
@@ -53,6 +59,21 @@ pub fn clear_os_clock_override() {
 /// refresh, matching nginx `ngx_time_update` on the event loop.
 pub fn notify_cached_clock_event_boundary() {
     layout::helpers::time::notify_cached_clock_event_boundary();
+}
+
+/// VM-stop sentinel used by `ngx::exit` / `ngx::redirect`.
+///
+/// AccessExec consumes [`RequestDisposition`] only when the VM stopped with
+/// this exact host error. Ordinary `HostError` text cannot forge a
+/// disposition, including user-supplied strings that happen to mention control.
+pub(crate) const CONTROL_STOP_MESSAGE: &str = "\u{1}ngx::control-stop";
+
+pub(crate) fn control_stop_error() -> VmError {
+    VmError::HostError(CONTROL_STOP_MESSAGE.to_string())
+}
+
+pub(crate) fn is_control_stop(err: &VmError) -> bool {
+    matches!(err, VmError::HostError(message) if message == CONTROL_STOP_MESSAGE)
 }
 
 /// Names bound by [`bind_ngx_hosts`]. Kept next to the explicit bind list so
@@ -174,6 +195,20 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         NGX_IS_SUBREQUEST_NAME,
         NGX_HEADERS_SENT_NAME,
         NGX_VAR_GET_NAME,
+        NGX_REQ_SET_METHOD_NAME,
+        NGX_REQ_SET_URI_NAME,
+        NGX_REQ_SET_URI_ARGS_NAME,
+        NGX_REQ_SET_HEADER_NAME,
+        NGX_REQ_CLEAR_HEADER_NAME,
+        NGX_VAR_SET_NAME,
+        NGX_STATUS_GET_NAME,
+        NGX_STATUS_SET_NAME,
+        NGX_HEADER_GET_NAME,
+        NGX_HEADER_SET_NAME,
+        NGX_HEADER_SET_ALL_NAME,
+        NGX_HEADER_CLEAR_NAME,
+        NGX_EXIT_NAME,
+        NGX_REDIRECT_NAME,
         NGX_CTX_GET_NAME,
         NGX_CTX_SET_NAME,
         NGX_CTX_DELETE_NAME,
@@ -495,6 +530,50 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
         layout::helpers::request::headers_sent,
     );
     vm.bind_static_args_function(NGX_VAR_GET_NAME, layout::helpers::variables::get);
+    vm.bind_static_args_function(
+        NGX_REQ_SET_METHOD_NAME,
+        layout::helpers::request::set_method,
+    );
+    vm.bind_static_args_function(NGX_REQ_SET_URI_NAME, layout::helpers::request::set_uri);
+    vm.bind_static_args_function(
+        NGX_REQ_SET_URI_ARGS_NAME,
+        layout::helpers::request::set_uri_args,
+    );
+    vm.bind_static_args_function(
+        NGX_REQ_SET_HEADER_NAME,
+        layout::helpers::request::set_header,
+    );
+    vm.bind_static_args_function(
+        NGX_REQ_CLEAR_HEADER_NAME,
+        layout::helpers::request::clear_header,
+    );
+    vm.bind_static_args_function(NGX_VAR_SET_NAME, layout::helpers::variables::set);
+    vm.bind_static_args_function(
+        NGX_STATUS_GET_NAME,
+        layout::helpers::response_meta::status_get,
+    );
+    vm.bind_static_args_function(
+        NGX_STATUS_SET_NAME,
+        layout::helpers::response_meta::status_set,
+    );
+    vm.bind_static_args_function(
+        NGX_HEADER_GET_NAME,
+        layout::helpers::response_meta::header_get,
+    );
+    vm.bind_static_args_function(
+        NGX_HEADER_SET_NAME,
+        layout::helpers::response_meta::header_set,
+    );
+    vm.bind_static_args_function(
+        NGX_HEADER_SET_ALL_NAME,
+        layout::helpers::response_meta::header_set_all,
+    );
+    vm.bind_static_args_function(
+        NGX_HEADER_CLEAR_NAME,
+        layout::helpers::response_meta::header_clear,
+    );
+    vm.bind_static_args_function(NGX_EXIT_NAME, layout::helpers::response_meta::exit);
+    vm.bind_static_args_function(NGX_REDIRECT_NAME, layout::helpers::response_meta::redirect);
     vm.bind_static_args_function(NGX_CTX_GET_NAME, layout::helpers::request_ctx::get);
     vm.bind_static_args_function(NGX_CTX_SET_NAME, layout::helpers::request_ctx::set);
     vm.bind_static_args_function(NGX_CTX_DELETE_NAME, layout::helpers::request_ctx::delete);
@@ -540,6 +619,12 @@ mod layout {
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/src/host/variables.rs"
+            ));
+        }
+        pub mod response_meta {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/host/response_meta.rs"
             ));
         }
         pub mod request_ctx {
