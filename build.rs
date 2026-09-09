@@ -8,6 +8,7 @@ fn main() {
         "cargo::rustc-check-cfg=cfg(ngx_feature, values({}))",
         std::env::var("DEP_NGINX_FEATURES_CHECK").unwrap_or_else(|_| "any()".to_string())
     );
+    println!("cargo::rustc-check-cfg=cfg(ngx_features, values(\"rustc-test\"))");
     println!("cargo::rerun-if-env-changed=DEP_NGINX_FEATURES");
     if let Ok(features) = std::env::var("DEP_NGINX_FEATURES") {
         for feature in features.split(',').map(str::trim) {

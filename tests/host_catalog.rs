@@ -176,6 +176,16 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
                 assert_eq!(entry.sync, HostSyncKind::Sync);
                 assert_eq!(entry.capabilities, &[HostCapability::Control]);
             }
+            HostFamily::SharedDict => {
+                assert_eq!(entry.sync, HostSyncKind::Sync);
+                assert_eq!(entry.capabilities, &[HostCapability::SharedDict]);
+                assert!(
+                    entry.openresty_name.starts_with("ngx.shared.DICT"),
+                    "{} openresty name {}",
+                    entry.name,
+                    entry.openresty_name
+                );
+            }
         }
     }
 }

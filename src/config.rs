@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use ngx::core::{NGX_CONF_ERROR, NGX_CONF_OK};
 use ngx::ffi::{
-    NGX_CONF_TAKE1, NGX_HTTP_LOC_CONF, NGX_HTTP_LOC_CONF_OFFSET, NGX_LOG_EMERG, ngx_command_t,
-    ngx_conf_t, ngx_uint_t,
+    NGX_CONF_TAKE1, NGX_CONF_TAKE2, NGX_HTTP_LOC_CONF, NGX_HTTP_LOC_CONF_OFFSET,
+    NGX_HTTP_MAIN_CONF, NGX_LOG_EMERG, ngx_command_t, ngx_conf_t, ngx_uint_t,
 };
 use ngx::http::{Merge, MergeConfigError};
 use ngx::{ngx_conf_log_error, ngx_string};
@@ -247,7 +247,15 @@ pub fn load_and_compile_rss_file_for_phase(
     compile_rss_source_for_phase(&source, phase)
 }
 
-pub(crate) static mut COMMANDS: [ngx_command_t; 3] = [
+pub(crate) static mut COMMANDS: [ngx_command_t; 4] = [
+    ngx_command_t {
+        name: ngx_string!("rss_shared_dict"),
+        type_: (NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE2) as ngx_uint_t,
+        set: Some(set_rss_shared_dict),
+        conf: 0,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
     ngx_command_t {
         name: ngx_string!("access_by_rss_file"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
@@ -266,6 +274,80 @@ pub(crate) static mut COMMANDS: [ngx_command_t; 3] = [
     },
     ngx_command_t::empty(),
 ];
+
+extern "C" fn set_rss_shared_dict(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    _conf: *mut core::ffi::c_void,
+) -> *mut core::ffi::c_char {
+    // SAFETY: NGINX invokes TAKE2 handlers with a live conf and three args.
+    let args = unsafe { (*(*cf).args).as_slice() };
+    if args.len() != 3 {
+        ngx_conf_log_error!(
+            NGX_LOG_EMERG,
+            cf,
+            "invalid number of arguments in \"rss_shared_dict\""
+        );
+        return NGX_CONF_ERROR;
+    }
+
+    let mut name: nginx_sys::ngx_str_t = args[1];
+    let zone_name = match name.to_str() {
+        Ok(value) => value.to_string(),
+        Err(_) => {
+            ngx_conf_log_error!(
+                NGX_LOG_EMERG,
+                cf,
+                "rss_shared_dict: zone name is not valid UTF-8"
+            );
+            return NGX_CONF_ERROR;
+        }
+    };
+    if let Err(err) = crate::shared_dict::validate_zone_name(&zone_name) {
+        ngx_conf_log_error!(NGX_LOG_EMERG, cf, "rss_shared_dict: {err}");
+        return NGX_CONF_ERROR;
+    }
+
+    let mut size_arg = args[2];
+    let size = unsafe { nginx_sys::ngx_parse_size(&raw mut size_arg) };
+    if size < crate::shared_dict::MIN_ZONE_BYTES as isize {
+        ngx_conf_log_error!(
+            NGX_LOG_EMERG,
+            cf,
+            "rss_shared_dict: invalid size (minimum 8k)"
+        );
+        return NGX_CONF_ERROR;
+    }
+
+    let zone = unsafe {
+        nginx_sys::ngx_shared_memory_add(
+            cf,
+            &raw mut name,
+            size as usize,
+            core::ptr::addr_of_mut!(crate::ngx_http_rustscript_module).cast(),
+        )
+    };
+    let Some(zone) = (unsafe { zone.as_mut() }) else {
+        return NGX_CONF_ERROR;
+    };
+    if !zone.data.is_null() {
+        ngx_conf_log_error!(
+            NGX_LOG_EMERG,
+            cf,
+            "rss_shared_dict \"{zone_name}\" is already defined"
+        );
+        return NGX_CONF_ERROR;
+    }
+    #[cfg(not(ngx_features = "rustc-test"))]
+    {
+        if crate::shared_dict::attach_shm_zone(cf, zone, name).is_err() {
+            ngx_conf_log_error!(NGX_LOG_EMERG, cf, "rss_shared_dict: no memory");
+            return NGX_CONF_ERROR;
+        }
+    }
+    let _ = zone;
+    NGX_CONF_OK
+}
 
 extern "C" fn set_access_by_rss_file(
     cf: *mut ngx_conf_t,

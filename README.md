@@ -5,12 +5,12 @@ phase. Location directive `access_by_rss_file <path>` compiles the script
 once at configuration time.
 
 Import-free scripts run synchronously to `Halted` on a worker-local VM
-pool. Scripts that import `ngx::sleep` or `ngx::sleep_ms` bind a
-request-local VM, return `NGX_AGAIN` while a generic host future is
-pending, and resume the same VM from the eventfd callback. Client
-disconnect during a wait finalizes the request as HTTP 499. Graceful
-master shutdown cancels in-flight host futures instead of waiting them
-out.
+pool. Scripts that import `ngx::sleep`, `ngx::sleep_ms`, or
+`ngx::socket::udp*` bind a request-local VM, return `NGX_AGAIN` while a
+generic host future is pending, and resume the same VM from the eventfd
+callback. Client disconnect during a wait finalizes the request as HTTP
+499. Graceful master shutdown cancels in-flight host futures instead of
+waiting them out.
 
 ## Requirements
 
@@ -140,6 +140,7 @@ Load the cdylib and attach a script to a location:
 load_module /absolute/path/to/libngx_rustscript.so;
 
 http {
+    rss_shared_dict dogs 1m;
     server {
         listen 127.0.0.1:8080;
         location /t {
@@ -152,13 +153,14 @@ http {
 ```
 
 `access_by_rss_file` is location-only and takes exactly one argument.
-Relative paths resolve with NGINX `ngx_conf_full_name` against the conf
+`rss_shared_dict <name> <size>` is HTTP-main only and takes exactly two
+arguments. Relative paths resolve with NGINX `ngx_conf_full_name` against the conf
 prefix (the directory of the config file). Absolute paths are unchanged.
 The file is read once at `nginx -t` / reload, must be a regular UTF-8 file,
 and is compiled with `compile_source`.
 
 Config accepts catalogued ngx hosts in the access phase, including timers,
-codec, time, metadata, constants, and `ngx::log`. `print` is not a host (use `ngx::log`); `runtime::sleep`, unknown imports, and
+codec, time, metadata, constants, `ngx::log`, and `ngx::shared::*`. `print` is not a host (use `ngx::log`); `runtime::sleep`, unknown imports, and
 phase-forbidden imports are rejected at configuration time. Unknown
 modules fail compile or import check. Duplicate directives in the same
 location are rejected. Unset nested locations inherit the parent
@@ -223,9 +225,9 @@ On each request the access handler leases a worker-thread-local VM via
 pool size is bounded. VM errors and unexpected `Waiting` on import-free
 programs fail the request with 500.
 
-Scripts that imported `ngx::sleep` or `ngx::sleep_ms` bind a request-local
-VM instead of the pool. `Waiting` returns `NGX_AGAIN` without incrementing
-`r->main->count`.
+Scripts that imported `ngx::sleep`, `ngx::sleep_ms`, or UDP cosocket
+hosts bind a request-local VM instead of the pool. `Waiting` returns
+`NGX_AGAIN` without incrementing `r->main->count`.
 The eventfd callback polls the waiting host op, resumes the same VM on the
 worker main thread, and continues `ngx_http_core_run_phases` exactly once
 so the access handler can return `NGX_OK`. Host-bound waiting VMs are never
@@ -242,8 +244,9 @@ limits, and OpenResty adaptations) is listed in
   `NGX_PROCESS_SINGLE`. Helper processes skip initialization. `nginx -t`,
   master, and config never create Tokio threads or the eventfd.
   `exit_process` shuts the runtime down and is idempotent.
-- Tokio features: `rt` + `rt-multi-thread` + `time` only (no HTTP/network
-  client). One worker thread named `ngx-rustscript-async`.
+- Tokio features: `rt` + `rt-multi-thread` + `time` + `net` + `sync`
+  (UDP cosocket; no HTTP client). One worker thread named
+  `ngx-rustscript-async`. The I/O driver is enabled alongside time.
 - Async wait capacity is `DEFAULT_MAX_IN_FLIGHT` (1024). Reserve is rejected
   when full. Host futures and wakers own only a queue sender and request
   identity — no NGINX request/pool/VM pointers cross into Tokio, and Tokio

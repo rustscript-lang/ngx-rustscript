@@ -6,7 +6,10 @@
 
 use std::fmt;
 
-use vm::{HostApiBuilder, HostApiCatalog, HostFunctionSchema, HostParamSchema, HostTypeSchema};
+use vm::{
+    HostApiBuilder, HostApiCatalog, HostFunctionSchema, HostParamPassing, HostParamSchema,
+    HostTypeSchema, ResourceTypeSchema,
+};
 
 /// Import name compiled into access-phase programs for OpenResty-style sleep.
 pub const NGX_SLEEP_NAME: &str = "ngx::sleep";
@@ -69,6 +72,21 @@ pub const NGX_CTX_SET_NAME: &str = "ngx::ctx::set";
 pub const NGX_CTX_DELETE_NAME: &str = "ngx::ctx::delete";
 pub const NGX_CTX_CLEAR_NAME: &str = "ngx::ctx::clear";
 
+pub const NGX_SHARED_DICT_NAME: &str = "ngx::shared::dict";
+pub const NGX_SHARED_GET_NAME: &str = "ngx::shared::get";
+pub const NGX_SHARED_GET_STALE_NAME: &str = "ngx::shared::get_stale";
+pub const NGX_SHARED_SET_NAME: &str = "ngx::shared::set";
+pub const NGX_SHARED_SAFE_SET_NAME: &str = "ngx::shared::safe_set";
+pub const NGX_SHARED_ADD_NAME: &str = "ngx::shared::add";
+pub const NGX_SHARED_SAFE_ADD_NAME: &str = "ngx::shared::safe_add";
+pub const NGX_SHARED_REPLACE_NAME: &str = "ngx::shared::replace";
+pub const NGX_SHARED_DELETE_NAME: &str = "ngx::shared::delete";
+pub const NGX_SHARED_INCR_NAME: &str = "ngx::shared::incr";
+pub const NGX_SHARED_TTL_NAME: &str = "ngx::shared::ttl";
+pub const NGX_SHARED_EXPIRE_NAME: &str = "ngx::shared::expire";
+pub const NGX_SHARED_CAPACITY_NAME: &str = "ngx::shared::capacity";
+pub const NGX_SHARED_FREE_SPACE_NAME: &str = "ngx::shared::free_space";
+
 /// NGINX / OpenResty execution phases that can host a script.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NgxPhase {
@@ -126,6 +144,7 @@ pub enum HostFamily {
     RequestCtx,
     Response,
     Control,
+    SharedDict,
 }
 
 /// Whether a host submits a future or returns synchronously.
@@ -150,6 +169,7 @@ pub enum HostCapability {
     RequestCtx,
     ResponseWrite,
     Control,
+    SharedDict,
 }
 
 /// One production ngx host. Schema fields stay next to the catalog builder.
@@ -305,6 +325,7 @@ const REQUEST_WRITE_CAPABILITIES: &[HostCapability] = &[HostCapability::RequestW
 const REQUEST_CTX_CAPABILITIES: &[HostCapability] = &[HostCapability::RequestCtx];
 const RESPONSE_WRITE_CAPABILITIES: &[HostCapability] = &[HostCapability::ResponseWrite];
 const CONTROL_CAPABILITIES: &[HostCapability] = &[HostCapability::Control];
+const SHARED_DICT_CAPABILITIES: &[HostCapability] = &[HostCapability::SharedDict];
 
 /// `ngx.req.get_method` contexts from OpenResty v0.10.29.
 const PHASE_REQ_GET_METHOD: &[NgxPhase] = &[
@@ -452,6 +473,30 @@ const PHASE_REDIRECT: &[NgxPhase] = &[NgxPhase::Rewrite, NgxPhase::Access, NgxPh
 
 /// OpenResty v0.10.29 `ngx.ctx` contexts. Configuration phases are excluded.
 const PHASE_CTX: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Timer,
+    NgxPhase::Balancer,
+    NgxPhase::SslCertificate,
+    NgxPhase::SslSessionFetch,
+    NgxPhase::SslSessionStore,
+    NgxPhase::SslClientHello,
+];
+
+/// `ngx.shared.DICT` object lookup, including init / init_worker / exit_worker.
+const PHASE_DICT_LOOKUP: &[NgxPhase] = PHASE_ESCAPE_URI;
+
+/// `ngx.shared.DICT.get` / `get_stale`: no init / init_worker / exit_worker.
+const PHASE_DICT_GET: &[NgxPhase] = PHASE_CTX;
+
+/// Shared-dict writers: OpenResty allows `init_by_lua*` but not worker init/exit.
+const PHASE_DICT_WRITE: &[NgxPhase] = &[
+    NgxPhase::Init,
     NgxPhase::Set,
     NgxPhase::Rewrite,
     NgxPhase::Access,
@@ -967,6 +1012,56 @@ const MANIFEST: &[HostManifestEntry] = &[
     ctx_entry(NGX_CTX_SET_NAME, PHASE_CTX),
     ctx_entry(NGX_CTX_DELETE_NAME, PHASE_CTX),
     ctx_entry(NGX_CTX_CLEAR_NAME, PHASE_CTX),
+    shared_dict_entry(NGX_SHARED_DICT_NAME, "ngx.shared.DICT", PHASE_DICT_LOOKUP),
+    shared_dict_entry(NGX_SHARED_GET_NAME, "ngx.shared.DICT.get", PHASE_DICT_GET),
+    shared_dict_entry(
+        NGX_SHARED_GET_STALE_NAME,
+        "ngx.shared.DICT.get_stale",
+        PHASE_DICT_GET,
+    ),
+    shared_dict_entry(NGX_SHARED_SET_NAME, "ngx.shared.DICT.set", PHASE_DICT_WRITE),
+    shared_dict_entry(
+        NGX_SHARED_SAFE_SET_NAME,
+        "ngx.shared.DICT.safe_set",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(NGX_SHARED_ADD_NAME, "ngx.shared.DICT.add", PHASE_DICT_WRITE),
+    shared_dict_entry(
+        NGX_SHARED_SAFE_ADD_NAME,
+        "ngx.shared.DICT.safe_add",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(
+        NGX_SHARED_REPLACE_NAME,
+        "ngx.shared.DICT.replace",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(
+        NGX_SHARED_DELETE_NAME,
+        "ngx.shared.DICT.delete",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(
+        NGX_SHARED_INCR_NAME,
+        "ngx.shared.DICT.incr",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(NGX_SHARED_TTL_NAME, "ngx.shared.DICT.ttl", PHASE_DICT_WRITE),
+    shared_dict_entry(
+        NGX_SHARED_EXPIRE_NAME,
+        "ngx.shared.DICT.expire",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(
+        NGX_SHARED_CAPACITY_NAME,
+        "ngx.shared.DICT.capacity",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(
+        NGX_SHARED_FREE_SPACE_NAME,
+        "ngx.shared.DICT.free_space",
+        PHASE_DICT_WRITE,
+    ),
 ];
 
 const fn codec_entry(
@@ -1115,6 +1210,21 @@ const fn ctx_entry(name: &'static str, phases: &'static [NgxPhase]) -> HostManif
     }
 }
 
+const fn shared_dict_entry(
+    name: &'static str,
+    openresty_name: &'static str,
+    phases: &'static [NgxPhase],
+) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::SharedDict,
+        sync: HostSyncKind::Sync,
+        phases,
+        capabilities: SHARED_DICT_CAPABILITIES,
+        openresty_name,
+    }
+}
+
 /// Auditable list of production ngx hosts.
 pub fn ngx_host_manifest() -> &'static [HostManifestEntry] {
     MANIFEST
@@ -1162,6 +1272,39 @@ fn int_in_string_out(name: &'static str, param: &'static str) -> HostFunctionSch
 
 fn nullary(name: &str, return_type: HostTypeSchema) -> HostFunctionSchema {
     HostFunctionSchema::with_return(name, Vec::new(), return_type)
+}
+
+fn dict_handle_param() -> HostParamSchema {
+    HostParamSchema::with_passing(
+        "dict",
+        HostTypeSchema::Resource(crate::shared_dict::shared_dict_resource_key()),
+        HostParamPassing::Borrow,
+    )
+}
+
+fn dict_get_schema(name: &'static str) -> HostFunctionSchema {
+    HostFunctionSchema::with_return(
+        name,
+        vec![
+            dict_handle_param(),
+            HostParamSchema::value("key", HostTypeSchema::String),
+        ],
+        HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+    )
+}
+
+fn dict_store_schema(name: &'static str) -> HostFunctionSchema {
+    HostFunctionSchema::with_return(
+        name,
+        vec![
+            dict_handle_param(),
+            HostParamSchema::value("key", HostTypeSchema::String),
+            HostParamSchema::value("value", HostTypeSchema::Unknown),
+            HostParamSchema::value("exptime", HostTypeSchema::Unknown),
+            HostParamSchema::value("flags", HostTypeSchema::Unknown),
+        ],
+        HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+    )
 }
 
 fn schema_for(name: &str) -> HostFunctionSchema {
@@ -1379,6 +1522,64 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             HostTypeSchema::Unknown,
         ),
         NGX_CTX_CLEAR_NAME => nullary(NGX_CTX_CLEAR_NAME, HostTypeSchema::Null),
+        NGX_SHARED_DICT_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_DICT_NAME,
+            vec![HostParamSchema::value("name", HostTypeSchema::String)],
+            HostTypeSchema::Resource(crate::shared_dict::shared_dict_resource_key()),
+        ),
+        NGX_SHARED_GET_NAME => dict_get_schema(NGX_SHARED_GET_NAME),
+        NGX_SHARED_GET_STALE_NAME => dict_get_schema(NGX_SHARED_GET_STALE_NAME),
+        NGX_SHARED_SET_NAME => dict_store_schema(NGX_SHARED_SET_NAME),
+        NGX_SHARED_SAFE_SET_NAME => dict_store_schema(NGX_SHARED_SAFE_SET_NAME),
+        NGX_SHARED_ADD_NAME => dict_store_schema(NGX_SHARED_ADD_NAME),
+        NGX_SHARED_SAFE_ADD_NAME => dict_store_schema(NGX_SHARED_SAFE_ADD_NAME),
+        NGX_SHARED_REPLACE_NAME => dict_store_schema(NGX_SHARED_REPLACE_NAME),
+        NGX_SHARED_DELETE_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_DELETE_NAME,
+            vec![
+                dict_handle_param(),
+                HostParamSchema::value("key", HostTypeSchema::String),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_SHARED_INCR_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_INCR_NAME,
+            vec![
+                dict_handle_param(),
+                HostParamSchema::value("key", HostTypeSchema::String),
+                HostParamSchema::value("value", HostTypeSchema::Unknown),
+                HostParamSchema::value("init", HostTypeSchema::Unknown),
+                HostParamSchema::value("init_ttl", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+        ),
+        NGX_SHARED_TTL_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_TTL_NAME,
+            vec![
+                dict_handle_param(),
+                HostParamSchema::value("key", HostTypeSchema::String),
+            ],
+            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+        ),
+        NGX_SHARED_EXPIRE_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_EXPIRE_NAME,
+            vec![
+                dict_handle_param(),
+                HostParamSchema::value("key", HostTypeSchema::String),
+                HostParamSchema::value("exptime", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+        ),
+        NGX_SHARED_CAPACITY_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_CAPACITY_NAME,
+            vec![dict_handle_param()],
+            HostTypeSchema::Int,
+        ),
+        NGX_SHARED_FREE_SPACE_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_FREE_SPACE_NAME,
+            vec![dict_handle_param()],
+            HostTypeSchema::Int,
+        ),
         other => metadata_schema(other)
             .unwrap_or_else(|| panic!("ngx host catalog has no schema for {other}")),
     }
@@ -1489,6 +1690,10 @@ fn is_int_constant(name: &str) -> bool {
 /// exclusively macro-generated via [`crate::host::bind_ngx_hosts`].
 pub fn ngx_host_catalog() -> HostApiCatalog {
     let mut builder = HostApiBuilder::new();
+    builder.resource(ResourceTypeSchema::new(
+        crate::shared_dict::shared_dict_resource_key(),
+        "Shared dictionary zone handle",
+    ));
     for entry in MANIFEST {
         builder.function(schema_for(entry.name));
     }

@@ -5,7 +5,7 @@ This matrix is the authoritative Release B ngx host surface for
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **132** names in the same order.
+Those three lists contain the same **146** names in the same order.
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and does not claim
@@ -41,7 +41,7 @@ helpers as part of this module.
 
 Catalog type labels: `number` (int or float), `int`, `string`, `bytes`,
 `bool`, `null`, `unknown` (checked at runtime), `map`, `array<int>`,
-`optional<T>` (`T` or `null`).
+`optional<T>` (`T` or `null`), `resource` (typed VM handle).
 
 The pinned compiler matches host arity exactly. OpenResty optional
 trailing arguments are an explicit `null` argument, not an omitted
@@ -60,9 +60,10 @@ argument.
 | Request-local ctx | 4 | sync |
 | Response metadata | 6 | sync |
 | Control | 2 | sync |
+| Shared dict | 14 | sync |
 | Constants | 65 | sync |
 | of which HTTP status | 35 | sync |
-| **Production total** | **132** | |
+| **Production total** | **146** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
 the production manifest, catalog, or `bind_ngx_hosts`.
@@ -465,13 +466,54 @@ cancellation, and `AccessExec` drop. Ctx hosts run only on the worker main
 thread inside VM run/resume; polling the Tokio sleep future receives no ctx
 pointer, and a stale wake cannot access a dropped ctx.
 
+## Shared dictionary
+
+Directive `rss_shared_dict <name> <size>` is HTTP main only (`TAKE2`).
+Minimum size is 8k. Names are unique, non-empty, UTF-8, at most 256
+bytes. Duplicate names (same or different size) are rejected. The zone
+is NGINX shared memory with a slab-backed rbtree/LRU store, the
+`init(shm_zone, old_data)` reload contract, and a cross-worker mutex.
+`ngx::shared::dict(name)` returns a typed handle; later methods take
+that handle. Multi-return OpenResty values become maps with fixed keys
+(`value` / `flags` / `stale` / `ok` / `error` / `forcible`; incr is
+`{value, error, forcible}` only). Optional `exptime` and `flags` are
+explicit `null`. Values are bool, int, float, string, or bytes;
+`set(..., null, ...)` deletes. `add`/`replace` reject null.
+Keys are at most 65535 bytes; values at most 65536 bytes.
+Empty keys are rejected. LRU eviction reports `forcible`; `safe_*`
+never evicts and returns `no memory`. Shared dict hosts do not require
+request-owned VMs.
+
+| OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ngx.shared.DICT` | `ngx::shared::dict(name: string) -> SharedDictHandle` | adapted | `PHASE_DICT_LOOKUP` | unknown zone is a host error | Typed handle, not `ngx.shared.NAME` field | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.get` | `ngx::shared::get(dict, key) -> map` | adapted | `PHASE_DICT_GET` | missing → `{value: null}` | Map `{value, flags, stale, error}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.get_stale` | `ngx::shared::get_stale(dict, key) -> map` | adapted | `PHASE_DICT_GET` | stale expired values | `stale` is bool | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.set` | `ngx::shared::set(dict, key, value, exptime, flags) -> map` | adapted | `PHASE_DICT_WRITE` | LRU up to 30 | `{ok, error, forcible}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.safe_set` | `ngx::shared::safe_set(...)` | adapted | `PHASE_DICT_WRITE` | no eviction | `{ok, error}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.add` | `ngx::shared::add(...)` | adapted | `PHASE_DICT_WRITE` | exists → error | `{ok, error, forcible}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.safe_add` | `ngx::shared::safe_add(...)` | adapted | `PHASE_DICT_WRITE` | no eviction | `{ok, error}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.replace` | `ngx::shared::replace(...)` | adapted | `PHASE_DICT_WRITE` | missing → not found | `{ok, error, forcible}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.delete` | `ngx::shared::delete(dict, key) -> null` | adapted | `PHASE_DICT_WRITE` | — | Missing delete is success | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.incr` | `ngx::shared::incr(dict, key, value, init, init_ttl) -> map` | adapted | `PHASE_DICT_WRITE` | numbers only | `{value, error, forcible}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.ttl` | `ngx::shared::ttl(dict, key) -> map` | adapted | `PHASE_DICT_WRITE` | never-expire is `0` | `{value, error}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.expire` | `ngx::shared::expire(dict, key, exptime) -> map` | adapted | `PHASE_DICT_WRITE` | — | `{ok, error}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.capacity` | `ngx::shared::capacity(dict) -> int` | adapted | `PHASE_DICT_WRITE` | — | Zone size in bytes | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.free_space` | `ngx::shared::free_space(dict) -> int` | adapted | `PHASE_DICT_WRITE` | approximate | Process-local: capacity − used; shm: `pfree * pagesize` | `tests/ngx_shared_dict.rs` |
+
+List/queue APIs (`lpush`/`rpush`/`lpop`/`rpop`/`llen`), `flush_all`,
+`flush_expired`, and `get_keys` are Task 15.
+
+Cross-worker visibility, atomic incr, and reload reuse are covered by
+`tests/shared_dict_nginx.rs`. Config parsing is `tests/shared_dict_config.rs`.
+
 ## Out of scope for Release B
 
 Not production hosts in this matrix (do not import them):
 
 - Remaining body/output APIs (`ngx.req.read_body`, `ngx.print` / `ngx.say`, `ngx.eof`, ...)
 - `ngx.exec` / internal redirect (`set_uri jump=true`)
-- Shared dict, cosocket, timer callbacks, light threads
+- Shared dict lists, TCP cosocket, timer callbacks, light threads
 - Stream subsystem, `ndk.set_var.*`, Lua `coroutine.*`
 - `print`, `runtime::sleep`, and test hosts `ngx::probe` / `ngx::ready` /
   `ngx::fail`

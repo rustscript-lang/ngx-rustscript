@@ -267,4 +267,72 @@ time_t ngx_parse_http_time(unsigned char *value, size_t len)
     return (time_t)-1;
 }
 
+ssize_t ngx_parse_size(ngx_str_t *line)
+{
+    (void)line;
+    return (ssize_t)-1;
+}
+
+void *ngx_shared_memory_add(void *cf, void *name, size_t size, void *tag)
+{
+    (void)cf;
+    (void)name;
+    (void)size;
+    (void)tag;
+    return NULL;
+}
+
+void ngx_shmtx_lock(void *mtx)
+{
+    (void)mtx;
+}
+
+void ngx_shmtx_unlock(void *mtx)
+{
+    (void)mtx;
+}
+
+void *ngx_slab_alloc_locked(void *pool, size_t size)
+{
+    (void)pool;
+    (void)size;
+    return NULL;
+}
+
+void ngx_slab_free_locked(void *pool, void *p)
+{
+    (void)pool;
+    (void)p;
+}
+
+void ngx_rbtree_insert(void *tree, void *node)
+{
+    (void)tree;
+    (void)node;
+}
+
+void ngx_rbtree_delete(void *tree, void *node)
+{
+    (void)tree;
+    (void)node;
+}
+
+void *ngx_pcalloc(void *pool, size_t size)
+{
+    (void)pool;
+    (void)size;
+    return NULL;
+}
+
+typedef struct {
+    time_t sec;
+    ngx_uint_t msec;
+    ngx_int_t gmtoff;
+} ngx_time_t;
+
+static ngx_time_t ngx_stub_cached_time;
+volatile ngx_time_t *ngx_cached_time = &ngx_stub_cached_time;
+
+ngx_int_t ngx_pagesize = 4096;
+
 /* ngx_http_send_header / ngx_http_send_special live in request_abi.c. */

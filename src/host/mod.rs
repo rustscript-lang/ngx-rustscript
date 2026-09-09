@@ -23,6 +23,10 @@ pub use catalog::{
     NGX_REQ_GET_URI_ARGS_NAME, NGX_REQ_HTTP_VERSION_NAME, NGX_REQ_IS_INTERNAL_NAME,
     NGX_REQ_RAW_HEADER_NAME, NGX_REQ_SET_HEADER_NAME, NGX_REQ_SET_METHOD_NAME,
     NGX_REQ_SET_URI_ARGS_NAME, NGX_REQ_SET_URI_NAME, NGX_REQ_START_TIME_NAME, NGX_SHA1_BIN_NAME,
+    NGX_SHARED_ADD_NAME, NGX_SHARED_CAPACITY_NAME, NGX_SHARED_DELETE_NAME, NGX_SHARED_DICT_NAME,
+    NGX_SHARED_EXPIRE_NAME, NGX_SHARED_FREE_SPACE_NAME, NGX_SHARED_GET_NAME,
+    NGX_SHARED_GET_STALE_NAME, NGX_SHARED_INCR_NAME, NGX_SHARED_REPLACE_NAME,
+    NGX_SHARED_SAFE_ADD_NAME, NGX_SHARED_SAFE_SET_NAME, NGX_SHARED_SET_NAME, NGX_SHARED_TTL_NAME,
     NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_STATUS_GET_NAME, NGX_STATUS_SET_NAME, NGX_TIME_NAME,
     NGX_TODAY_NAME, NGX_UNESCAPE_URI_NAME, NGX_UPDATE_TIME_NAME, NGX_UTCTIME_NAME,
     NGX_VAR_GET_NAME, NGX_VAR_SET_NAME, NgxPhase, host_allowed_in_phase, manifest_entry,
@@ -217,6 +221,20 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         NGX_CTX_SET_NAME,
         NGX_CTX_DELETE_NAME,
         NGX_CTX_CLEAR_NAME,
+        NGX_SHARED_DICT_NAME,
+        NGX_SHARED_GET_NAME,
+        NGX_SHARED_GET_STALE_NAME,
+        NGX_SHARED_SET_NAME,
+        NGX_SHARED_SAFE_SET_NAME,
+        NGX_SHARED_ADD_NAME,
+        NGX_SHARED_SAFE_ADD_NAME,
+        NGX_SHARED_REPLACE_NAME,
+        NGX_SHARED_DELETE_NAME,
+        NGX_SHARED_INCR_NAME,
+        NGX_SHARED_TTL_NAME,
+        NGX_SHARED_EXPIRE_NAME,
+        NGX_SHARED_CAPACITY_NAME,
+        NGX_SHARED_FREE_SPACE_NAME,
     ]
 }
 
@@ -582,6 +600,38 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
     vm.bind_static_args_function(NGX_CTX_SET_NAME, layout::helpers::request_ctx::set);
     vm.bind_static_args_function(NGX_CTX_DELETE_NAME, layout::helpers::request_ctx::delete);
     vm.bind_static_args_function(NGX_CTX_CLEAR_NAME, layout::helpers::request_ctx::clear);
+    vm.bind_static_function(NGX_SHARED_DICT_NAME, layout::helpers::shared_dict::dict);
+    vm.bind_static_function(NGX_SHARED_GET_NAME, layout::helpers::shared_dict::get);
+    vm.bind_static_function(
+        NGX_SHARED_GET_STALE_NAME,
+        layout::helpers::shared_dict::get_stale,
+    );
+    vm.bind_static_function(NGX_SHARED_SET_NAME, layout::helpers::shared_dict::set);
+    vm.bind_static_function(
+        NGX_SHARED_SAFE_SET_NAME,
+        layout::helpers::shared_dict::safe_set,
+    );
+    vm.bind_static_function(NGX_SHARED_ADD_NAME, layout::helpers::shared_dict::add);
+    vm.bind_static_function(
+        NGX_SHARED_SAFE_ADD_NAME,
+        layout::helpers::shared_dict::safe_add,
+    );
+    vm.bind_static_function(
+        NGX_SHARED_REPLACE_NAME,
+        layout::helpers::shared_dict::replace,
+    );
+    vm.bind_static_function(NGX_SHARED_DELETE_NAME, layout::helpers::shared_dict::delete);
+    vm.bind_static_function(NGX_SHARED_INCR_NAME, layout::helpers::shared_dict::incr);
+    vm.bind_static_function(NGX_SHARED_TTL_NAME, layout::helpers::shared_dict::ttl);
+    vm.bind_static_function(NGX_SHARED_EXPIRE_NAME, layout::helpers::shared_dict::expire);
+    vm.bind_static_function(
+        NGX_SHARED_CAPACITY_NAME,
+        layout::helpers::shared_dict::capacity,
+    );
+    vm.bind_static_function(
+        NGX_SHARED_FREE_SPACE_NAME,
+        layout::helpers::shared_dict::free_space,
+    );
 }
 
 #[cfg(test)]
@@ -593,7 +643,7 @@ pub(crate) fn bind_test_hosts(vm: &mut Vm) {
 }
 
 mod layout {
-    pub use vm::{Value, Vm, VmResult};
+    pub use vm::{Value, Vm, VmError, VmResult, resource};
 
     pub mod helpers {
         #[allow(unused_imports)]
@@ -601,7 +651,7 @@ mod layout {
         #[allow(unused_imports)]
         pub use vm::{
             CallOutcome, CaptureAsyncHostContext, FromVmValue, HostFutureOutput,
-            IntoHostCallOutcome, VmError, borrow_arg,
+            IntoHostCallOutcome, VmError, arg, borrow_arg, resource, take_arg,
         };
 
         pub mod codec {
@@ -635,6 +685,12 @@ mod layout {
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/src/host/request_ctx.rs"
+            ));
+        }
+        pub mod shared_dict {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/host/shared_dict.rs"
             ));
         }
 
