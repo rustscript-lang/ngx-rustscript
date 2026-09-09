@@ -12,7 +12,8 @@ pub(crate) mod context;
 
 pub use catalog::{
     HostCapability, HostFamily, HostManifestEntry, HostSyncKind, NGX_COOKIE_TIME_NAME,
-    NGX_CRC32_LONG_NAME, NGX_CRC32_SHORT_NAME, NGX_DECODE_ARGS_NAME, NGX_DECODE_BASE64_NAME,
+    NGX_CRC32_LONG_NAME, NGX_CRC32_SHORT_NAME, NGX_CTX_CLEAR_NAME, NGX_CTX_DELETE_NAME,
+    NGX_CTX_GET_NAME, NGX_CTX_SET_NAME, NGX_DECODE_ARGS_NAME, NGX_DECODE_BASE64_NAME,
     NGX_DECODE_BASE64MIME_NAME, NGX_ENCODE_ARGS_NAME, NGX_ENCODE_BASE64_NAME, NGX_ESCAPE_URI_NAME,
     NGX_HEADERS_SENT_NAME, NGX_HMAC_SHA1_NAME, NGX_HTTP_TIME_NAME, NGX_IS_SUBREQUEST_NAME,
     NGX_LOCALTIME_NAME, NGX_MD5_BIN_NAME, NGX_MD5_NAME, NGX_NOW_NAME, NGX_PARSE_HTTP_TIME_NAME,
@@ -25,8 +26,13 @@ pub use catalog::{
 };
 pub use context::{
     AllowedOps, ScopeError, VmEntryObservation, capture_vm_entries, current_allowed_ops,
-    current_identity, current_phase, current_request_live, is_active, with_current_request,
-    with_current_request_mut, with_request_scope, with_vm_request_scope,
+    current_identity, current_phase, current_request_live, is_active, with_current_ctx,
+    with_current_ctx_mut, with_current_request, with_current_request_mut, with_request_scope,
+    with_request_scope_ctx, with_vm_request_scope, with_vm_request_scope_ctx,
+};
+pub use layout::helpers::request_ctx::{
+    MAX_CTX_CONTAINER_ELEMS, MAX_CTX_DEPTH, MAX_CTX_KEY_BYTES, MAX_CTX_KEYS, MAX_CTX_SCALAR_BYTES,
+    MAX_CTX_TOTAL_BYTES, RequestLocalCtx,
 };
 
 /// Override the OS clock sampled by time hosts. Used by tests and by
@@ -166,6 +172,10 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         NGX_IS_SUBREQUEST_NAME,
         NGX_HEADERS_SENT_NAME,
         NGX_VAR_GET_NAME,
+        NGX_CTX_GET_NAME,
+        NGX_CTX_SET_NAME,
+        NGX_CTX_DELETE_NAME,
+        NGX_CTX_CLEAR_NAME,
     ]
 }
 
@@ -483,6 +493,10 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
         layout::helpers::request::headers_sent,
     );
     vm.bind_static_args_function(NGX_VAR_GET_NAME, layout::helpers::variables::get);
+    vm.bind_static_args_function(NGX_CTX_GET_NAME, layout::helpers::request_ctx::get);
+    vm.bind_static_args_function(NGX_CTX_SET_NAME, layout::helpers::request_ctx::set);
+    vm.bind_static_args_function(NGX_CTX_DELETE_NAME, layout::helpers::request_ctx::delete);
+    vm.bind_static_args_function(NGX_CTX_CLEAR_NAME, layout::helpers::request_ctx::clear);
 }
 
 #[cfg(test)]
@@ -524,6 +538,12 @@ mod layout {
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/src/host/variables.rs"
+            ));
+        }
+        pub mod request_ctx {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/host/request_ctx.rs"
             ));
         }
 

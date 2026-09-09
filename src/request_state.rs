@@ -14,14 +14,21 @@ use tokio::runtime::Handle;
 use vm::{Program, Vm, VmStatus};
 
 use crate::async_bridge::NgxAsyncBridge;
-use crate::host::{AllowedOps, NgxPhase, bind_ngx_hosts, with_vm_request_scope};
+use crate::host::{
+    AllowedOps, NgxPhase, RequestLocalCtx, bind_ngx_hosts, with_vm_request_scope_ctx,
+};
 use crate::notify::{CompletionPermit, RequestIdentity};
 
-fn with_vm_entry<T>(identity: RequestIdentity, f: impl FnOnce() -> T) -> T {
-    with_vm_request_scope(
+fn with_vm_entry<T>(
+    identity: RequestIdentity,
+    ctx: *mut RequestLocalCtx,
+    f: impl FnOnce() -> T,
+) -> T {
+    with_vm_request_scope_ctx(
         identity,
         NgxPhase::Access,
         AllowedOps::for_phase(NgxPhase::Access),
+        ctx,
         f,
     )
 }
@@ -192,6 +199,7 @@ pub struct AccessExec {
     vm: Option<Vm>,
     request_id: u64,
     identity: RequestIdentity,
+    ctx: RequestLocalCtx,
     state: ExecState,
     suspend_committed: bool,
     deferred: bool,
@@ -214,6 +222,7 @@ impl AccessExec {
             vm: Some(vm),
             request_id,
             identity: RequestIdentity::new(generation, request_id),
+            ctx: RequestLocalCtx::new(),
             state: ExecState::New,
             suspend_committed: false,
             deferred: false,
@@ -282,7 +291,8 @@ impl AccessExec {
             }
         };
         let identity = self.identity;
-        match with_vm_entry(identity, || vm.run()) {
+        let ctx = &mut self.ctx as *mut RequestLocalCtx;
+        match with_vm_entry(identity, ctx, || vm.run()) {
             Ok(VmStatus::Halted) => {
                 self.last_status = Some(VmStatus::Halted);
                 self.state = ExecState::Halted;
@@ -323,8 +333,9 @@ impl AccessExec {
         let waker = waiter.waker(self.identity);
         let mut cx = Context::from_waker(&waker);
         let identity = self.identity;
+        let ctx = &mut self.ctx as *mut RequestLocalCtx;
         let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
-        match with_vm_entry(identity, || vm.poll_waiting_host_op(&mut cx)) {
+        match with_vm_entry(identity, ctx, || vm.poll_waiting_host_op(&mut cx)) {
             Poll::Pending => {
                 self.state = ExecState::Suspended;
                 self.last_status = match self.last_status {
@@ -353,8 +364,9 @@ impl AccessExec {
         waiter: &impl AsyncWait,
     ) -> Result<AccessStatus, AccessStatus> {
         let identity = self.identity;
+        let ctx = &mut self.ctx as *mut RequestLocalCtx;
         let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
-        match with_vm_entry(identity, || vm.resume()) {
+        match with_vm_entry(identity, ctx, || vm.resume()) {
             Ok(VmStatus::Halted) => {
                 self.last_status = Some(VmStatus::Halted);
                 self.state = ExecState::Halted;
@@ -414,12 +426,13 @@ impl AccessExec {
         waiter: &impl AsyncWait,
     ) -> ReadyEffect {
         let identity = self.identity;
+        let ctx = &mut self.ctx as *mut RequestLocalCtx;
         let Some(vm) = self.vm.as_mut() else {
             return ReadyEffect::Ignored;
         };
         let waker = waiter.waker(identity);
         let mut cx = Context::from_waker(&waker);
-        match with_vm_entry(identity, || vm.poll_waiting_host_op(&mut cx)) {
+        match with_vm_entry(identity, ctx, || vm.poll_waiting_host_op(&mut cx)) {
             Poll::Pending => ReadyEffect::Ignored,
             Poll::Ready(Ok(())) => {
                 registry.remove_exact(self.identity, &self.request_id);
@@ -439,12 +452,13 @@ impl AccessExec {
         }
     }
 
-    /// Invalidate this wait, then drop the VM/bridge future.
+    /// Invalidate this wait, then drop the VM/bridge future and ctx map.
     pub fn cleanup(&mut self) -> Option<RequestIdentity> {
         if self.state == ExecState::Cancelled {
             return None;
         }
         if matches!(self.state, ExecState::Halted | ExecState::Failed) {
+            self.ctx.clear();
             self.vm = None;
             self.permit = None;
             return None;
@@ -453,6 +467,7 @@ impl AccessExec {
         self.state = ExecState::Cancelled;
         self.deferred = false;
         self.permit = None;
+        self.ctx.clear();
         self.vm = None;
         identity
     }

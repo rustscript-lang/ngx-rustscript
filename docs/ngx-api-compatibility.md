@@ -5,7 +5,7 @@ This matrix is the authoritative Release A ngx host surface for
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **114** names in the same order.
+Those three lists contain the same **118** names in the same order.
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and does not claim
@@ -57,8 +57,9 @@ argument.
 | Metadata / worker / config / phase | 12 | sync |
 | Logging | 1 | sync |
 | Request-read / var | 11 | sync |
+| Request-local ctx | 4 | sync |
 | Constants | 65 | sync |
-| **Production total** | **114** | |
+| **Production total** | **118** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
 the production manifest, catalog, or `bind_ngx_hosts`.
@@ -385,6 +386,34 @@ or list pointers. They require a live request scope.
 | `ngx.is_subrequest` | `ngx::is_subrequest() -> bool` | supported | `PHASE_REQ_FLAGS` | none | `r != r->main`. Live false-path on main requests (`REQ_SUB=false`). `ngx_http_core_access_phase` skips all access handlers when `r != r->main`, so SSI/mirror/auth_request subrequests cannot run `access_by_rss_file`. True is stub-covered; SSI include still returns `sub-ok` as evidence the subrequest ran. | `tests/ngx_request_read.rs` |
 | `ngx.headers_sent` | `ngx::headers_sent() -> bool` | supported | `PHASE_HEADERS_SENT` | none | Live C `r->header_sent` via `ngx_rustscript_request_headers_sent`. Access-phase scripts observe `false`. | `tests/ngx_request_read.rs`, `tests/ngx_request_abi.rs` |
 | `ngx.var.VARIABLE` | `ngx::var::get(name: string) -> optional<string>` | adapted | `PHASE_VAR_GET` | 256-byte name; 65536-byte value | Indexed lookup with `ngx_hash_strlow`. Missing is `null`; present empty is `""`. Rejects empty/NUL names. | `tests/ngx_request_read.rs` (`var_get_*`) |
+
+## Request-local context
+
+`ngx.ctx` is adapted as four explicit hosts rather than a Lua table. The map
+is owned by `AccessExec` (request lifetime). Hosts clone deep-owned VM values
+out; callables and other non-owning runtime values are rejected. Empty and
+embedded-NUL keys are rejected. `delete` returns the removed value, or `null`
+if missing (OpenResty uses `ngx.ctx.key = nil`). Configuration phases cannot
+import these hosts. Capability is `RequestCtx` only — ctx hosts do not read
+the request pointer.
+
+| OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ngx.ctx` | `ngx::ctx::get(key: string) -> unknown` | adapted | `PHASE_CTX` | missing → `null` | Explicit get; missing is `null`. | `tests/ngx_request_ctx.rs` |
+| `ngx.ctx` | `ngx::ctx::set(key: string, value: unknown) -> null` | adapted | `PHASE_CTX` | 256 keys; 256-byte key; depth 16; 65536 total bytes; 1024 elems/container; 8192-byte scalar | Failed set leaves the previous value intact. Shared aliases are deep-cloned and counted per occurrence. | `tests/ngx_request_ctx.rs` |
+| `ngx.ctx` | `ngx::ctx::delete(key: string) -> unknown` | adapted | `PHASE_CTX` | same key policy | Returns the removed value, or `null` if missing. | `tests/ngx_request_ctx.rs` |
+| `ngx.ctx` | `ngx::ctx::clear() -> null` | adapted | `PHASE_CTX` | — | Drops every entry. OpenResty would assign a new table. | `tests/ngx_request_ctx.rs` |
+
+`PHASE_CTX` (OpenResty v0.10.29 `ngx.ctx` contexts): `set`, `rewrite`,
+`access`, `content`, `header_filter`, `body_filter`, `log`, `timer`,
+`balancer`, `ssl_certificate`, `ssl_session_fetch`, `ssl_session_store`,
+`ssl_client_hello`. Not `init` / `init_worker` / `exit_worker`.
+
+The map persists across `ngx::sleep` `Waiting`/resume cycles on the same
+`AccessExec`. Concurrent requests are isolated. Values are released on
+cleanup, HostError, cancellation, and `AccessExec` drop. Ctx hosts run only
+on the worker main thread inside VM run/resume/poll; the sleep future owns
+no ctx pointer.
 
 ## Out of scope for Release A
 

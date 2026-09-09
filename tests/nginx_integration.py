@@ -229,6 +229,8 @@ def runtime_conf(module, prefix, port):
             location("/long/", fixture("sleep_30s.rss")),
             location("/iso-a/", fixture("request_iso.rss")),
             location("/iso-b/", fixture("request_iso.rss")),
+            location("/ctx-iso-a/", fixture("ctx_iso.rss")),
+            location("/ctx-iso-b/", fixture("ctx_iso.rss")),
             """
         location /plain/ {
         }
@@ -543,6 +545,8 @@ def run_acceptance(nginx, module):
         write_index(prefix, "plain/index.html", "plain\n")
         write_index(prefix, "iso-a/index.html", "iso-a\n")
         write_index(prefix, "iso-b/index.html", "iso-b\n")
+        write_index(prefix, "ctx-iso-a/index.html", "ctx-iso-a\n")
+        write_index(prefix, "ctx-iso-b/index.html", "ctx-iso-b\n")
 
         write_text(
             os.path.join(prefix, "conf", "nginx.conf"),
@@ -825,6 +829,73 @@ def run_acceptance(nginx, module):
             raise CheckError(
                 "iso-b must log its own arg and header",
                 dump_owned(prefix, proc, "\n".join(b_lines)),
+            )
+
+        ctx_barrier = threading.Barrier(2, timeout=5.0)
+        ctx_results = {}
+        ctx_errors = []
+        ctx_lock = threading.Lock()
+
+        def ctx_one(name, path):
+            try:
+                ctx_barrier.wait()
+                status, body, raw = http_get(port, path, timeout=8.0)
+                with ctx_lock:
+                    ctx_results[name] = (status, body, raw)
+                    if status != 200:
+                        ctx_errors.append((name, status, body))
+            except Exception as exc:
+                with ctx_lock:
+                    ctx_errors.append((name, "exc", str(exc)))
+
+        ctx_threads = [
+            threading.Thread(target=ctx_one, args=("ctx-a", "/ctx-iso-a/?id=alpha")),
+            threading.Thread(target=ctx_one, args=("ctx-b", "/ctx-iso-b/?id=beta")),
+        ]
+        for thread in ctx_threads:
+            thread.start()
+        for thread in ctx_threads:
+            thread.join(timeout=10.0)
+        if any(thread.is_alive() for thread in ctx_threads):
+            raise CheckError(
+                "ctx isolation requests did not finish",
+                dump_owned(prefix, proc),
+            )
+        if ctx_errors:
+            raise CheckError(
+                f"ctx isolation HTTP mismatch: {ctx_errors}",
+                dump_owned(prefix, proc),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        ctx_a_lines = [
+            line
+            for line in error_text.splitlines()
+            if "/ctx-iso-a/?id=alpha" in line and "CTX_ISO=" in line
+        ]
+        ctx_b_lines = [
+            line
+            for line in error_text.splitlines()
+            if "/ctx-iso-b/?id=beta" in line and "CTX_ISO=" in line
+        ]
+        if not any("id=alpha" in line for line in ctx_a_lines):
+            raise CheckError(
+                "ctx-iso-a must log its own ctx id",
+                dump_owned(prefix, proc, error_text),
+            )
+        if not any("id=beta" in line for line in ctx_b_lines):
+            raise CheckError(
+                "ctx-iso-b must log its own ctx id",
+                dump_owned(prefix, proc, error_text),
+            )
+        if any("id=beta" in line for line in ctx_a_lines):
+            raise CheckError(
+                "ctx-iso-a logs must not contain ctx-iso-b id",
+                dump_owned(prefix, proc, "\n".join(ctx_a_lines)),
+            )
+        if any("id=alpha" in line for line in ctx_b_lines):
+            raise CheckError(
+                "ctx-iso-b logs must not contain ctx-iso-a id",
+                dump_owned(prefix, proc, "\n".join(ctx_b_lines)),
             )
         summary["concurrent"] = "12/12 mapped plain=200/plain isolation=ok"
 

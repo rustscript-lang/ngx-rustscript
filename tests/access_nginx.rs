@@ -804,3 +804,48 @@ fn access_phase_rejects_invalid_log_level_and_embedded_nul() {
         "embedded NUL must fail the request; got:\n{response}"
     );
 }
+
+#[test]
+fn access_phase_ctx_persists_across_two_sleeps() {
+    let nginx = nginx_binary();
+    let module = module_cdylib();
+    let port = free_port();
+    let prefix = isolated_prefix("ngx-rustscript-ctx");
+    write_index(&prefix, "ctx/index.html", "ctx-ok\n");
+    let script = prefix.join("conf/ctx_persist.rss");
+    std::fs::copy(fixture("ctx_persist.rss"), &script).unwrap();
+    let conf = meta_conf(
+        &nginx_quote_path(&module).unwrap(),
+        &prefix,
+        port,
+        &format!(
+            r#"
+        location /ctx/ {{
+            access_by_rss_file {script};
+        }}
+"#,
+            script = nginx_quote_path(&script).unwrap(),
+        ),
+    );
+    write_conf(&prefix, &conf);
+    let out = nginx_test(&nginx, &prefix);
+    let text = combined(&out);
+    assert!(
+        out.status.success(),
+        "ctx persist script must compile:\n{text}"
+    );
+
+    let _child = spawn_nginx(&nginx, &prefix);
+    wait_for_port(port, Duration::from_secs(5));
+    let (status, response) = http_get(port, "/ctx/");
+    assert_eq!(status, 200, "ctx persist request failed:\n{response}");
+    let log = fs::read_to_string(prefix.join("logs/error.log")).unwrap();
+    assert!(
+        log.contains("CTX_PERSIST=") && log.contains("n=2") && log.contains("k=v"),
+        "missing persisted ctx in log:\n{log}"
+    );
+    assert!(
+        log.contains("CTX_USER=") && log.contains("id=7") && log.contains("name=ada"),
+        "missing nested ctx in log:\n{log}"
+    );
+}

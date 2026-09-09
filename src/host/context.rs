@@ -18,6 +18,8 @@ use ngx::http::Request;
 use crate::host::catalog::NgxPhase;
 use crate::notify::RequestIdentity;
 
+use super::layout::helpers::request_ctx::RequestLocalCtx;
+
 /// Operations a request-aware host may perform while a scope is active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AllowedOps {
@@ -29,6 +31,7 @@ impl AllowedOps {
     pub const REQUEST_READ: Self = Self { bits: 1 << 0 };
     pub const REQUEST_WRITE: Self = Self { bits: 1 << 1 };
     pub const LOG: Self = Self { bits: 1 << 2 };
+    pub const REQUEST_CTX: Self = Self { bits: 1 << 3 };
 
     pub const fn union(self, other: Self) -> Self {
         Self {
@@ -41,11 +44,11 @@ impl AllowedOps {
     }
 
     /// Default host operations for a script phase. Access currently allows
-    /// request reads and logging; mutation APIs arrive in later tasks.
+    /// request reads, request-local ctx, and logging; mutation APIs arrive later.
     pub fn for_phase(phase: NgxPhase) -> Self {
         match phase {
             NgxPhase::Rewrite | NgxPhase::Access | NgxPhase::Content => {
-                Self::REQUEST_READ.union(Self::LOG)
+                Self::REQUEST_READ.union(Self::LOG).union(Self::REQUEST_CTX)
             }
             _ => Self::EMPTY,
         }
@@ -63,6 +66,8 @@ pub enum ScopeError {
     StaleGeneration,
     /// The live scope has a null request pointer.
     NullRequest,
+    /// The live scope has no request-local ctx map.
+    NullCtx,
     /// The live scope does not allow the requested read or write.
     OpsNotAllowed,
     /// Mutable request access is already active on this thread.
@@ -83,6 +88,7 @@ impl std::fmt::Display for ScopeError {
                 write!(f, "ngx request host identity generation is stale")
             }
             Self::NullRequest => write!(f, "ngx request execution scope has a null request"),
+            Self::NullCtx => write!(f, "ngx ctx execution scope has no request-local context"),
             Self::OpsNotAllowed => {
                 write!(f, "ngx request host is not allowed by the current scope")
             }
@@ -98,6 +104,7 @@ impl std::error::Error for ScopeError {}
 #[derive(Clone, Copy)]
 struct ScopeFrame {
     request: *mut ngx_http_request_t,
+    ctx: *mut RequestLocalCtx,
     identity: RequestIdentity,
     phase: NgxPhase,
     allowed: AllowedOps,
@@ -135,6 +142,7 @@ impl RequestExecutionScope {
     /// Push the current request onto the worker-thread scope stack.
     pub(crate) fn enter(
         request: *mut ngx_http_request_t,
+        ctx: *mut RequestLocalCtx,
         identity: RequestIdentity,
         phase: NgxPhase,
         allowed: AllowedOps,
@@ -143,6 +151,7 @@ impl RequestExecutionScope {
             let mut stack = stack.borrow_mut();
             stack.push(ScopeFrame {
                 request,
+                ctx,
                 identity,
                 phase,
                 allowed,
@@ -161,7 +170,13 @@ impl RequestExecutionScope {
         let frame = STACK.with(|stack| stack.borrow().last().copied());
         match frame {
             Some(frame) => {
-                let _scope = Self::enter(frame.request, frame.identity, frame.phase, frame.allowed);
+                let _scope = Self::enter(
+                    frame.request,
+                    frame.ctx,
+                    frame.identity,
+                    frame.phase,
+                    frame.allowed,
+                );
                 f()
             }
             None => f(),
@@ -172,21 +187,36 @@ impl RequestExecutionScope {
     ///
     /// Uses the outer request pointer only when that frame has the exact same
     /// generation-safe identity and a non-null pointer. A mismatched parent
-    /// identity never authorizes its pointer under the VM identity.
+    /// identity never authorizes its pointer under the VM identity. The ctx
+    /// pointer is taken from `ctx` when non-null, otherwise from a matching
+    /// outer frame.
     pub(crate) fn enter_for_vm(
         identity: RequestIdentity,
         phase: NgxPhase,
         allowed: AllowedOps,
+        ctx: *mut RequestLocalCtx,
     ) -> Self {
         let request = matching_outer_request(identity);
+        let ctx = if ctx.is_null() {
+            matching_outer_ctx(identity)
+        } else {
+            ctx
+        };
         record_vm_entry(identity, phase, allowed, !request.is_null());
-        Self::enter(request, identity, phase, allowed)
+        Self::enter(request, ctx, identity, phase, allowed)
     }
 }
 
 fn matching_outer_request(identity: RequestIdentity) -> *mut ngx_http_request_t {
     match current_frame() {
         Ok(frame) if frame.identity == identity && !frame.request.is_null() => frame.request,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+fn matching_outer_ctx(identity: RequestIdentity) -> *mut RequestLocalCtx {
+    match current_frame() {
+        Ok(frame) if frame.identity == identity && !frame.ctx.is_null() => frame.ctx,
         _ => std::ptr::null_mut(),
     }
 }
@@ -199,7 +229,19 @@ pub fn with_request_scope<R>(
     allowed: AllowedOps,
     f: impl FnOnce() -> R,
 ) -> R {
-    let _scope = RequestExecutionScope::enter(request, identity, phase, allowed);
+    with_request_scope_ctx(request, std::ptr::null_mut(), identity, phase, allowed, f)
+}
+
+/// Install a request scope that also carries a request-local ctx map.
+pub fn with_request_scope_ctx<R>(
+    request: *mut ngx_http_request_t,
+    ctx: *mut RequestLocalCtx,
+    identity: RequestIdentity,
+    phase: NgxPhase,
+    allowed: AllowedOps,
+    f: impl FnOnce() -> R,
+) -> R {
+    let _scope = RequestExecutionScope::enter(request, ctx, identity, phase, allowed);
     f()
 }
 
@@ -210,7 +252,18 @@ pub fn with_vm_request_scope<R>(
     allowed: AllowedOps,
     f: impl FnOnce() -> R,
 ) -> R {
-    let _scope = RequestExecutionScope::enter_for_vm(identity, phase, allowed);
+    with_vm_request_scope_ctx(identity, phase, allowed, std::ptr::null_mut(), f)
+}
+
+/// VM entry that installs a request-owned ctx pointer for sync ctx hosts.
+pub fn with_vm_request_scope_ctx<R>(
+    identity: RequestIdentity,
+    phase: NgxPhase,
+    allowed: AllowedOps,
+    ctx: *mut RequestLocalCtx,
+    f: impl FnOnce() -> R,
+) -> R {
+    let _scope = RequestExecutionScope::enter_for_vm(identity, phase, allowed, ctx);
     f()
 }
 
@@ -391,6 +444,49 @@ pub fn with_current_request_mut<R>(
     Ok(f(request))
 }
 
+fn verified_ctx_frame(expected: RequestIdentity) -> Result<ScopeFrame, ScopeError> {
+    let frame = current_frame()?;
+    if frame.identity.request_id() != expected.request_id() {
+        return Err(ScopeError::IdentityMismatch);
+    }
+    if frame.identity.generation() != expected.generation() {
+        return Err(ScopeError::StaleGeneration);
+    }
+    if !frame.allowed.contains(AllowedOps::REQUEST_CTX) {
+        return Err(ScopeError::OpsNotAllowed);
+    }
+    if frame.ctx.is_null() {
+        return Err(ScopeError::NullCtx);
+    }
+    Ok(frame)
+}
+
+/// Run `f` with the live request-local ctx after verifying `expected`.
+///
+/// Does not require a request pointer. The HRTB keeps the ctx borrow inside
+/// `f` so it cannot be stored past the closure or across `.await`.
+pub fn with_current_ctx<R>(
+    expected: RequestIdentity,
+    f: impl for<'a> FnOnce(&'a RequestLocalCtx) -> R,
+) -> Result<R, ScopeError> {
+    let frame = verified_ctx_frame(expected)?;
+    let _borrow = acquire_shared()?;
+    // SAFETY: worker main thread, identity/generation matched, ctx pointer
+    // came from [`RequestExecutionScope::enter`] and the frame is live.
+    Ok(f(unsafe { &*frame.ctx }))
+}
+
+/// Mutable variant of [`with_current_ctx`].
+pub fn with_current_ctx_mut<R>(
+    expected: RequestIdentity,
+    f: impl for<'a> FnOnce(&'a mut RequestLocalCtx) -> R,
+) -> Result<R, ScopeError> {
+    let frame = verified_ctx_frame(expected)?;
+    let _borrow = acquire_exclusive()?;
+    // SAFETY: same as [`with_current_ctx`]; exclusive borrow rejected aliases.
+    Ok(f(unsafe { &mut *frame.ctx }))
+}
+
 macro_rules! assert_not_impl_any {
     ($x:ty: $($t:path),+ $(,)?) => {{
         #[allow(dead_code)]
@@ -428,6 +524,7 @@ mod not_send_sync {
         let identity = RequestIdentity::new(1, 1);
         let _scope = RequestExecutionScope::enter(
             std::ptr::null_mut(),
+            std::ptr::null_mut(),
             identity,
             NgxPhase::Access,
             AllowedOps::for_phase(NgxPhase::Access),
@@ -441,11 +538,13 @@ mod not_send_sync {
         let identity = RequestIdentity::new(2, 2);
         let outer = RequestExecutionScope::enter(
             std::ptr::null_mut(),
+            std::ptr::null_mut(),
             identity,
             NgxPhase::Access,
             AllowedOps::for_phase(NgxPhase::Access),
         );
         let inner = RequestExecutionScope::enter(
+            std::ptr::null_mut(),
             std::ptr::null_mut(),
             RequestIdentity::new(3, 3),
             NgxPhase::Access,

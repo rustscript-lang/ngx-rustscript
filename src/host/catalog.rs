@@ -50,6 +50,10 @@ pub const NGX_REQ_START_TIME_NAME: &str = "ngx::req::start_time";
 pub const NGX_IS_SUBREQUEST_NAME: &str = "ngx::is_subrequest";
 pub const NGX_HEADERS_SENT_NAME: &str = "ngx::headers_sent";
 pub const NGX_VAR_GET_NAME: &str = "ngx::var::get";
+pub const NGX_CTX_GET_NAME: &str = "ngx::ctx::get";
+pub const NGX_CTX_SET_NAME: &str = "ngx::ctx::set";
+pub const NGX_CTX_DELETE_NAME: &str = "ngx::ctx::delete";
+pub const NGX_CTX_CLEAR_NAME: &str = "ngx::ctx::clear";
 
 /// NGINX / OpenResty execution phases that can host a script.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +109,7 @@ pub enum HostFamily {
     Log,
     Constant,
     Request,
+    RequestCtx,
 }
 
 /// Whether a host submits a future or returns synchronously.
@@ -125,6 +130,7 @@ pub enum HostCapability {
     Log,
     Constant,
     RequestRead,
+    RequestCtx,
 }
 
 /// One production ngx host. Schema fields stay next to the catalog builder.
@@ -276,6 +282,7 @@ const META_CAPABILITIES: &[HostCapability] = &[HostCapability::Meta];
 const LOG_CAPABILITIES: &[HostCapability] = &[HostCapability::Log];
 const CONSTANT_CAPABILITIES: &[HostCapability] = &[HostCapability::Constant];
 const REQUEST_READ_CAPABILITIES: &[HostCapability] = &[HostCapability::RequestRead];
+const REQUEST_CTX_CAPABILITIES: &[HostCapability] = &[HostCapability::RequestCtx];
 
 /// `ngx.req.get_method` contexts from OpenResty v0.10.29.
 const PHASE_REQ_GET_METHOD: &[NgxPhase] = &[
@@ -360,6 +367,23 @@ const PHASE_VAR_GET: &[NgxPhase] = &[
     NgxPhase::BodyFilter,
     NgxPhase::Log,
     NgxPhase::Balancer,
+];
+
+/// OpenResty v0.10.29 `ngx.ctx` contexts. Configuration phases are excluded.
+const PHASE_CTX: &[NgxPhase] = &[
+    NgxPhase::Set,
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::HeaderFilter,
+    NgxPhase::BodyFilter,
+    NgxPhase::Log,
+    NgxPhase::Timer,
+    NgxPhase::Balancer,
+    NgxPhase::SslCertificate,
+    NgxPhase::SslSessionFetch,
+    NgxPhase::SslSessionStore,
+    NgxPhase::SslClientHello,
 ];
 
 /// OpenResty `ngx.log` / `ngx.get_phase` contexts: every script phase.
@@ -812,6 +836,10 @@ const MANIFEST: &[HostManifestEntry] = &[
         PHASE_HEADERS_SENT,
     ),
     request_entry(NGX_VAR_GET_NAME, "ngx.var.VARIABLE", PHASE_VAR_GET),
+    ctx_entry(NGX_CTX_GET_NAME, PHASE_CTX),
+    ctx_entry(NGX_CTX_SET_NAME, PHASE_CTX),
+    ctx_entry(NGX_CTX_DELETE_NAME, PHASE_CTX),
+    ctx_entry(NGX_CTX_CLEAR_NAME, PHASE_CTX),
 ];
 
 const fn codec_entry(
@@ -901,6 +929,17 @@ const fn request_entry(
         phases,
         capabilities: REQUEST_READ_CAPABILITIES,
         openresty_name,
+    }
+}
+
+const fn ctx_entry(name: &'static str, phases: &'static [NgxPhase]) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::RequestCtx,
+        sync: HostSyncKind::Sync,
+        phases,
+        capabilities: REQUEST_CTX_CAPABILITIES,
+        openresty_name: "ngx.ctx",
     }
 }
 
@@ -1072,6 +1111,25 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             vec![HostParamSchema::value("name", HostTypeSchema::String)],
             HostTypeSchema::Optional(Box::new(HostTypeSchema::String)),
         ),
+        NGX_CTX_GET_NAME => HostFunctionSchema::with_return(
+            NGX_CTX_GET_NAME,
+            vec![HostParamSchema::value("key", HostTypeSchema::String)],
+            HostTypeSchema::Unknown,
+        ),
+        NGX_CTX_SET_NAME => HostFunctionSchema::with_return(
+            NGX_CTX_SET_NAME,
+            vec![
+                HostParamSchema::value("key", HostTypeSchema::String),
+                HostParamSchema::value("value", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_CTX_DELETE_NAME => HostFunctionSchema::with_return(
+            NGX_CTX_DELETE_NAME,
+            vec![HostParamSchema::value("key", HostTypeSchema::String)],
+            HostTypeSchema::Unknown,
+        ),
+        NGX_CTX_CLEAR_NAME => nullary(NGX_CTX_CLEAR_NAME, HostTypeSchema::Null),
         other => metadata_schema(other)
             .unwrap_or_else(|| panic!("ngx host catalog has no schema for {other}")),
     }

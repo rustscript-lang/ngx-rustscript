@@ -158,9 +158,14 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
                 assert_eq!(entry.sync, HostSyncKind::Sync);
                 assert!(
                     entry.capabilities.contains(&HostCapability::RequestRead),
-                    "{} is a request-read host",
+                    "{} request hosts require RequestRead",
                     entry.name
                 );
+            }
+            HostFamily::RequestCtx => {
+                assert_eq!(entry.sync, HostSyncKind::Sync);
+                assert_eq!(entry.capabilities, &[HostCapability::RequestCtx]);
+                assert_eq!(entry.openresty_name, "ngx.ctx");
             }
         }
     }
