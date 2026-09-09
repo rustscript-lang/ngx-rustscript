@@ -24,8 +24,10 @@ pub use catalog::{
     NGX_REQ_RAW_HEADER_NAME, NGX_REQ_SET_HEADER_NAME, NGX_REQ_SET_METHOD_NAME,
     NGX_REQ_SET_URI_ARGS_NAME, NGX_REQ_SET_URI_NAME, NGX_REQ_START_TIME_NAME, NGX_SHA1_BIN_NAME,
     NGX_SHARED_ADD_NAME, NGX_SHARED_CAPACITY_NAME, NGX_SHARED_DELETE_NAME, NGX_SHARED_DICT_NAME,
-    NGX_SHARED_EXPIRE_NAME, NGX_SHARED_FREE_SPACE_NAME, NGX_SHARED_GET_NAME,
-    NGX_SHARED_GET_STALE_NAME, NGX_SHARED_INCR_NAME, NGX_SHARED_REPLACE_NAME,
+    NGX_SHARED_EXPIRE_NAME, NGX_SHARED_FLUSH_ALL_NAME, NGX_SHARED_FLUSH_EXPIRED_NAME,
+    NGX_SHARED_FREE_SPACE_NAME, NGX_SHARED_GET_KEYS_NAME, NGX_SHARED_GET_NAME,
+    NGX_SHARED_GET_STALE_NAME, NGX_SHARED_INCR_NAME, NGX_SHARED_LLEN_NAME, NGX_SHARED_LPOP_NAME,
+    NGX_SHARED_LPUSH_NAME, NGX_SHARED_REPLACE_NAME, NGX_SHARED_RPOP_NAME, NGX_SHARED_RPUSH_NAME,
     NGX_SHARED_SAFE_ADD_NAME, NGX_SHARED_SAFE_SET_NAME, NGX_SHARED_SET_NAME, NGX_SHARED_TTL_NAME,
     NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_SOCKET_UDP_BIND_NAME, NGX_SOCKET_UDP_CLOSE_NAME,
     NGX_SOCKET_UDP_NAME, NGX_SOCKET_UDP_RECEIVE_NAME, NGX_SOCKET_UDP_RESOURCE_KEY,
@@ -237,6 +239,14 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         NGX_SHARED_EXPIRE_NAME,
         NGX_SHARED_CAPACITY_NAME,
         NGX_SHARED_FREE_SPACE_NAME,
+        NGX_SHARED_LPUSH_NAME,
+        NGX_SHARED_RPUSH_NAME,
+        NGX_SHARED_LPOP_NAME,
+        NGX_SHARED_RPOP_NAME,
+        NGX_SHARED_LLEN_NAME,
+        NGX_SHARED_FLUSH_ALL_NAME,
+        NGX_SHARED_FLUSH_EXPIRED_NAME,
+        NGX_SHARED_GET_KEYS_NAME,
         NGX_SOCKET_UDP_NAME,
         NGX_SOCKET_UDP_BIND_NAME,
         NGX_SOCKET_UDP_SETPEERNAME_NAME,
@@ -640,6 +650,23 @@ pub fn bind_ngx_hosts(vm: &mut Vm) {
     vm.bind_static_function(
         NGX_SHARED_FREE_SPACE_NAME,
         layout::helpers::shared_dict::free_space,
+    );
+    vm.bind_static_function(NGX_SHARED_LPUSH_NAME, layout::helpers::shared_dict::lpush);
+    vm.bind_static_function(NGX_SHARED_RPUSH_NAME, layout::helpers::shared_dict::rpush);
+    vm.bind_static_function(NGX_SHARED_LPOP_NAME, layout::helpers::shared_dict::lpop);
+    vm.bind_static_function(NGX_SHARED_RPOP_NAME, layout::helpers::shared_dict::rpop);
+    vm.bind_static_function(NGX_SHARED_LLEN_NAME, layout::helpers::shared_dict::llen);
+    vm.bind_static_function(
+        NGX_SHARED_FLUSH_ALL_NAME,
+        layout::helpers::shared_dict::flush_all,
+    );
+    vm.bind_static_function(
+        NGX_SHARED_FLUSH_EXPIRED_NAME,
+        layout::helpers::shared_dict::flush_expired,
+    );
+    vm.bind_static_function(
+        NGX_SHARED_GET_KEYS_NAME,
+        layout::helpers::shared_dict::get_keys,
     );
     vm.bind_static_function(NGX_SOCKET_UDP_NAME, layout::helpers::socket::udp);
     vm.bind_static_function(NGX_SOCKET_UDP_BIND_NAME, layout::helpers::socket::bind);

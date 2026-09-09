@@ -5,7 +5,7 @@ This matrix is the authoritative current ngx host surface for
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **153** names in the same order.
+Those three lists contain the same **161** names in the same order.
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and documents only
@@ -60,11 +60,11 @@ argument.
 | Request-local ctx | 4 | sync |
 | Response metadata | 6 | sync |
 | Control | 2 | sync |
-| Shared dict | 14 | sync |
+| Shared dict | 22 | sync |
 | Cosocket (UDP) | 7 | mixed |
 | Constants | 65 | sync |
 | of which HTTP status | 35 | sync |
-| **Production total** | **153** | |
+| **Production total** | **161** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
 the production manifest, catalog, or `bind_ngx_hosts`.
@@ -504,9 +504,16 @@ request-owned VMs.
 | `ngx.shared.DICT.expire` | `ngx::shared::expire(dict, key, exptime) -> map` | adapted | `PHASE_DICT_WRITE` | — | `{ok, error}` | `tests/ngx_shared_dict.rs` |
 | `ngx.shared.DICT.capacity` | `ngx::shared::capacity(dict) -> int` | adapted | `PHASE_DICT_WRITE` | — | Zone size in bytes | `tests/ngx_shared_dict.rs` |
 | `ngx.shared.DICT.free_space` | `ngx::shared::free_space(dict) -> int` | adapted | `PHASE_DICT_WRITE` | approximate | Process-local: capacity − used; shm: `pfree * pagesize` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.lpush` | `ngx::shared::lpush(dict, key, value) -> map` | adapted | `PHASE_DICT_WRITE` | list len ≤ 65536; no LRU eviction | `{value: len, error}`; bool/null/map → `bad value type`; scalar conflict → `value not a list` without mutating the node | `tests/ngx_shared_dict_list.rs` |
+| `ngx.shared.DICT.rpush` | `ngx::shared::rpush(dict, key, value) -> map` | adapted | `PHASE_DICT_WRITE` | same | Same map as lpush; appends | `tests/ngx_shared_dict_list.rs` |
+| `ngx.shared.DICT.lpop` | `ngx::shared::lpop(dict, key) -> map` | adapted | `PHASE_DICT_WRITE` | decode before unlink | `{value, flags, stale, error}`; empty/missing → `{value: null}`; decode failure → `{error: "bad value type"}` and the item stays queued | `tests/ngx_shared_dict_list.rs` |
+| `ngx.shared.DICT.rpop` | `ngx::shared::rpop(dict, key) -> map` | adapted | `PHASE_DICT_WRITE` | same | Same map as lpop; pops tail | `tests/ngx_shared_dict_list.rs` |
+| `ngx.shared.DICT.llen` | `ngx::shared::llen(dict, key) -> map` | adapted | `PHASE_DICT_WRITE` | — | Missing/expired → `{value: 0}`; scalar → `value not a list` | `tests/ngx_shared_dict_list.rs` |
+| `ngx.shared.DICT.flush_all` | `ngx::shared::flush_all(dict) -> null` | adapted | `PHASE_DICT_WRITE` | LRU; ≤1024 visits/call | Each call first frees already-expired keys (visit-capped), then marks live LRU keys with `expires=1` (visit-capped), then `expire(0)`. Repeated calls make monotonic progress across >1024 keys; one call does not wipe the zone. | `tests/ngx_shared_dict_list.rs` |
+| `ngx.shared.DICT.flush_expired` | `ngx::shared::flush_expired(dict, max) -> int` | adapted | `PHASE_DICT_WRITE` | `max` 0/null still ≤ 1024 results; visits ≤ 1024 | Freed count. Walk stops at the result cap *or* the hard visit cap, whichever comes first. OpenResty `0` is unlimited. | `tests/ngx_shared_dict_list.rs` |
+| `ngx.shared.DICT.get_keys` | `ngx::shared::get_keys(dict, max) -> array<string>` | adapted | `PHASE_DICT_WRITE` | read-only; `max` 0/null still ≤ 1024 results; visits ≤ 1024 | Oldest-first, skips expired, never deletes or force-expires. OpenResty `0` returns all keys; this project keeps both a result cap and a visit cap. | `tests/ngx_shared_dict_list.rs` |
 
-List/queue APIs (`lpush`/`rpush`/`lpop`/`rpop`/`llen`), `flush_all`,
-`flush_expired`, and `get_keys` are Task 15.
+List nodes are slab-owned; every mutation is atomic under the shm mutex. Failed item allocation rolls back an empty list. `get`/`incr` on a list return structured errors (`value is a list` / `not a number`) and never overwrite the node. List items are int/float/string/bytes. `get_keys` is read-only under the shm mutex: it never force-expires or deletes, skips expired keys, and stops at both the result cap and a 1024-visit cap. `flush_all` / `flush_expired` likewise bound visits independently of hits. There is no process-local production fallback: `cargo test` uses an in-process zone; the cdylib talks to NGINX shm only.
 
 Cross-worker visibility, atomic incr, and reload reuse are covered by
 `tests/shared_dict_nginx.rs`. Config parsing is `tests/shared_dict_config.rs`.
@@ -551,7 +558,7 @@ Not production hosts in this matrix (do not import them):
 
 - Remaining body/output APIs (`ngx.req.read_body`, `ngx.print` / `ngx.say`, `ngx.eof`, ...)
 - `ngx.exec` / internal redirect (`set_uri jump=true`)
-- Shared dict lists, TCP cosocket, timer callbacks, light threads
+- TCP cosocket, timer callbacks, light threads
 - Stream subsystem, `ndk.set_var.*`, Lua `coroutine.*`
 - `print`, `runtime::sleep`, and test hosts `ngx::probe` / `ngx::ready` /
   `ngx::fail`

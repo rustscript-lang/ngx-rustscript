@@ -23,6 +23,12 @@ pub const MAX_ZONE_NAME_BYTES: usize = 256;
 pub const MAX_KEY_BYTES: usize = 65_535;
 /// Project value ceiling (aligned with other ngx hosts).
 pub const MAX_VALUE_BYTES: usize = 65_536;
+/// Project list-length ceiling (OpenResty is unbounded `int`).
+pub const MAX_LIST_LEN: usize = 65_536;
+/// Hard cap for `get_keys` results *and* LRU visits (OpenResty `get_keys(0)` is unlimited).
+pub const MAX_GET_KEYS: usize = 1_024;
+/// Per-call cap for `flush_all` / `flush_expired` results *and* LRU visits (OpenResty `max=0` is unlimited).
+pub const MAX_FLUSH_BATCH: usize = 1_024;
 /// OpenResty hard minimum zone size.
 pub const MIN_ZONE_BYTES: usize = 8 * 1024;
 /// Approximate per-entry overhead counted against process-local capacity.
@@ -46,7 +52,7 @@ impl SharedDictHandle {
     }
 }
 
-/// Scalar values stored in a shared dict. Tables/lists are Task 15.
+/// Scalar values stored in a shared dict. List keys use a separate node kind.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DictValue {
     Bool(bool),
@@ -166,6 +172,13 @@ pub(crate) fn validate_key(key: &[u8]) -> Result<(), &'static str> {
     }
 }
 
+pub(crate) fn enumeration_limit(max: Option<i64>, hard: usize) -> usize {
+    match max {
+        Some(n) if n > 0 => (n as usize).min(hard),
+        _ => hard,
+    }
+}
+
 pub fn validate_zone_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty() {
         Err("empty shared dict name")
@@ -202,13 +215,20 @@ fn process_now_ms() -> u64 {
 #[cfg(any(debug_assertions, ngx_features = "rustc-test"))]
 mod process_local {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
 
+    const LIST_NODE_OVERHEAD: usize = 16;
+
+    enum ProcessPayload {
+        Scalar(DictValue),
+        List(VecDeque<DictValue>),
+    }
+
     struct ProcessNode {
         key: Vec<u8>,
-        value: DictValue,
+        payload: ProcessPayload,
         flags: u32,
         expire_ms: u64,
         prev: Option<usize>,
@@ -245,8 +265,27 @@ mod process_local {
             }
         }
 
-        fn entry_size(key: &[u8], value: &DictValue) -> usize {
-            NODE_OVERHEAD + key.len() + value.stored_len()
+        fn entry_size(key: &[u8], payload: &ProcessPayload) -> usize {
+            match payload {
+                ProcessPayload::Scalar(value) => NODE_OVERHEAD + key.len() + value.stored_len(),
+                ProcessPayload::List(items) => {
+                    NODE_OVERHEAD
+                        + key.len()
+                        + LIST_NODE_OVERHEAD
+                        + items
+                            .iter()
+                            .map(|item| LIST_NODE_OVERHEAD + item.stored_len())
+                            .sum::<usize>()
+                }
+            }
+        }
+
+        fn item_size(value: &DictValue) -> usize {
+            LIST_NODE_OVERHEAD + value.stored_len()
+        }
+
+        fn is_list(node: &ProcessNode) -> bool {
+            matches!(node.payload, ProcessPayload::List(_))
         }
 
         fn unlink(&mut self, idx: usize) {
@@ -284,7 +323,7 @@ mod process_local {
 
         fn remove_at(&mut self, idx: usize) {
             let key = self.nodes[idx].key.clone();
-            let size = Self::entry_size(&key, &self.nodes[idx].value);
+            let size = Self::entry_size(&key, &self.nodes[idx].payload);
             self.unlink(idx);
             self.map.remove(&key);
             self.used = self.used.saturating_sub(size);
@@ -366,7 +405,7 @@ mod process_local {
             now: u64,
             skip: Option<&[u8]>,
         ) -> StoreResult {
-            let need = Self::entry_size(&key, &value);
+            let need = Self::entry_size(&key, &ProcessPayload::Scalar(value.clone()));
             let forcible = match self.make_room(need, safe, now, skip) {
                 Ok(forcible) => forcible,
                 Err(err) => return err,
@@ -376,7 +415,7 @@ mod process_local {
             }
             let idx = self.alloc_slot(ProcessNode {
                 key: key.clone(),
-                value,
+                payload: ProcessPayload::Scalar(value),
                 flags,
                 expire_ms,
                 prev: None,
@@ -434,10 +473,14 @@ mod process_local {
             }
             let safe = matches!(mode, StoreMode::SafeSet | StoreMode::SafeAdd);
             if let Some(idx) = live.or_else(|| self.map.get(key).copied()) {
-                let old_size = Self::entry_size(&self.nodes[idx].key, &self.nodes[idx].value);
-                let new_size = Self::entry_size(key, &value);
+                if Self::is_list(&self.nodes[idx]) {
+                    self.remove_at(idx);
+                    return self.insert_new(key.to_vec(), value, flags, expire_ms, safe, now, None);
+                }
+                let old_size = Self::entry_size(&self.nodes[idx].key, &self.nodes[idx].payload);
+                let new_size = Self::entry_size(key, &ProcessPayload::Scalar(value.clone()));
                 if old_size == new_size {
-                    self.nodes[idx].value = value;
+                    self.nodes[idx].payload = ProcessPayload::Scalar(value);
                     self.nodes[idx].flags = flags;
                     self.nodes[idx].expire_ms = expire_ms;
                     self.touch(idx);
@@ -480,11 +523,27 @@ mod process_local {
                     error: None,
                 };
             }
+            if Self::is_list(&self.nodes[idx]) {
+                return GetResult {
+                    value: None,
+                    flags: 0,
+                    stale: expired,
+                    error: Some("value is a list"),
+                };
+            }
             if !expired {
                 self.touch(idx);
             }
+            let ProcessPayload::Scalar(value) = &self.nodes[idx].payload else {
+                return GetResult {
+                    value: None,
+                    flags: 0,
+                    stale: expired,
+                    error: Some("value is a list"),
+                };
+            };
             GetResult {
-                value: Some(self.nodes[idx].value.clone()),
+                value: Some(value.clone()),
                 flags: self.nodes[idx].flags,
                 stale: expired,
                 error: None,
@@ -514,12 +573,16 @@ mod process_local {
                 return store_err("not a number");
             };
             if let Some(idx) = self.lookup_live(key, now) {
-                let Some(current) = self.nodes[idx].value.as_number() else {
+                let ProcessPayload::Scalar(current_value) = &self.nodes[idx].payload else {
                     return store_err("not a number");
                 };
+                let Some(current) = current_value.as_number() else {
+                    return store_err("not a number");
+                };
+                let current_len = current_value.stored_len();
                 let next = add_numbers(&current, &delta);
-                if self.nodes[idx].value.stored_len() == next.stored_len() {
-                    self.nodes[idx].value = next.clone();
+                if current_len == next.stored_len() {
+                    self.nodes[idx].payload = ProcessPayload::Scalar(next.clone());
                     self.touch(idx);
                     return StoreResult {
                         ok: true,
@@ -530,8 +593,8 @@ mod process_local {
                 }
                 let flags = self.nodes[idx].flags;
                 let expire_ms = self.nodes[idx].expire_ms;
-                let extra = Self::entry_size(key, &next)
-                    .saturating_sub(Self::entry_size(key, &self.nodes[idx].value));
+                let extra = Self::entry_size(key, &ProcessPayload::Scalar(next.clone()))
+                    .saturating_sub(Self::entry_size(key, &self.nodes[idx].payload));
                 let forcible = match self.make_room(extra, false, now, Some(key)) {
                     Ok(forcible) => forcible,
                     Err(err) => return err,
@@ -594,6 +657,267 @@ mod process_local {
 
         pub(super) fn free_space(&self) -> usize {
             self.capacity.saturating_sub(self.used)
+        }
+
+        fn validate_list_item(value: &DictValue) -> Result<(), &'static str> {
+            match value {
+                DictValue::Bool(_) => Err("bad value type"),
+                DictValue::String(text) if text.len() > MAX_VALUE_BYTES => Err("value too long"),
+                DictValue::Bytes(bytes) if bytes.len() > MAX_VALUE_BYTES => Err("value too long"),
+                _ => Ok(()),
+            }
+        }
+
+        fn insert_list(&mut self, key: Vec<u8>, first: DictValue, _now: u64) -> StoreResult {
+            let mut items = VecDeque::new();
+            items.push_back(first);
+            let payload = ProcessPayload::List(items);
+            let need = Self::entry_size(&key, &payload);
+            if self.used + need > self.capacity {
+                return store_err("no memory");
+            }
+            let idx = self.alloc_slot(ProcessNode {
+                key: key.clone(),
+                payload,
+                flags: 0,
+                expire_ms: 0,
+                prev: None,
+                next: None,
+            });
+            self.map.insert(key, idx);
+            self.used += need;
+            self.push_mru(idx);
+            StoreResult {
+                ok: true,
+                error: None,
+                forcible: false,
+                value: Some(DictValue::Int(1)),
+            }
+        }
+
+        pub(super) fn list_push(
+            &mut self,
+            key: &[u8],
+            value: DictValue,
+            left: bool,
+            now: u64,
+        ) -> StoreResult {
+            if let Err(err) = validate_key(key) {
+                return store_err(err);
+            }
+            if let Err(err) = Self::validate_list_item(&value) {
+                return store_err(err);
+            }
+            if let Some(&idx) = self.map.get(key) {
+                let expired = Self::expired(&self.nodes[idx], now);
+                if !Self::is_list(&self.nodes[idx]) {
+                    if expired {
+                        self.remove_at(idx);
+                        return self.insert_list(key.to_vec(), value, now);
+                    }
+                    return store_err("value not a list");
+                }
+                if expired {
+                    let old = Self::entry_size(&self.nodes[idx].key, &self.nodes[idx].payload);
+                    self.nodes[idx].payload = ProcessPayload::List(VecDeque::new());
+                    self.nodes[idx].expire_ms = 0;
+                    self.nodes[idx].flags = 0;
+                    self.used = self.used.saturating_sub(old)
+                        + Self::entry_size(&self.nodes[idx].key, &self.nodes[idx].payload);
+                }
+                let ProcessPayload::List(items) = &self.nodes[idx].payload else {
+                    return store_err("value not a list");
+                };
+                if items.len() >= MAX_LIST_LEN {
+                    return store_err("list too long");
+                }
+                let extra = Self::item_size(&value);
+                if self.used + extra > self.capacity {
+                    if matches!(&self.nodes[idx].payload, ProcessPayload::List(items) if items.is_empty())
+                    {
+                        self.remove_at(idx);
+                    }
+                    return store_err("no memory");
+                }
+                let ProcessPayload::List(items) = &mut self.nodes[idx].payload else {
+                    return store_err("value not a list");
+                };
+                if left {
+                    items.push_front(value);
+                } else {
+                    items.push_back(value);
+                }
+                let len = items.len() as i64;
+                self.used += extra;
+                self.touch(idx);
+                return StoreResult {
+                    ok: true,
+                    error: None,
+                    forcible: false,
+                    value: Some(DictValue::Int(len)),
+                };
+            }
+            self.insert_list(key.to_vec(), value, now)
+        }
+
+        pub(super) fn list_pop(&mut self, key: &[u8], left: bool, now: u64) -> GetResult {
+            if let Err(err) = validate_key(key) {
+                return empty_get(err);
+            }
+            let Some(&idx) = self.map.get(key) else {
+                return GetResult {
+                    value: None,
+                    flags: 0,
+                    stale: false,
+                    error: None,
+                };
+            };
+            if Self::expired(&self.nodes[idx], now) {
+                return GetResult {
+                    value: None,
+                    flags: 0,
+                    stale: false,
+                    error: None,
+                };
+            }
+            if !Self::is_list(&self.nodes[idx]) {
+                return GetResult {
+                    value: None,
+                    flags: 0,
+                    stale: false,
+                    error: Some("value not a list"),
+                };
+            }
+            let ProcessPayload::List(items) = &mut self.nodes[idx].payload else {
+                return GetResult {
+                    value: None,
+                    flags: 0,
+                    stale: false,
+                    error: Some("value not a list"),
+                };
+            };
+            let popped = if left {
+                items.pop_front()
+            } else {
+                items.pop_back()
+            };
+            let Some(value) = popped else {
+                self.remove_at(idx);
+                return GetResult {
+                    value: None,
+                    flags: 0,
+                    stale: false,
+                    error: None,
+                };
+            };
+            let extra = Self::item_size(&value);
+            self.used = self.used.saturating_sub(extra);
+            if matches!(&self.nodes[idx].payload, ProcessPayload::List(items) if items.is_empty()) {
+                self.remove_at(idx);
+            } else {
+                self.touch(idx);
+            }
+            GetResult {
+                value: Some(value),
+                flags: 0,
+                stale: false,
+                error: None,
+            }
+        }
+
+        pub(super) fn llen(&mut self, key: &[u8], now: u64) -> GetResult {
+            if let Err(err) = validate_key(key) {
+                return empty_get(err);
+            }
+            let Some(&idx) = self.map.get(key) else {
+                return GetResult {
+                    value: Some(DictValue::Int(0)),
+                    flags: 0,
+                    stale: false,
+                    error: None,
+                };
+            };
+            if Self::expired(&self.nodes[idx], now) {
+                return GetResult {
+                    value: Some(DictValue::Int(0)),
+                    flags: 0,
+                    stale: false,
+                    error: None,
+                };
+            }
+            match &self.nodes[idx].payload {
+                ProcessPayload::List(items) => {
+                    let len = items.len() as i64;
+                    self.touch(idx);
+                    GetResult {
+                        value: Some(DictValue::Int(len)),
+                        flags: 0,
+                        stale: false,
+                        error: None,
+                    }
+                }
+                ProcessPayload::Scalar(_) => GetResult {
+                    value: None,
+                    flags: 0,
+                    stale: false,
+                    error: Some("value not a list"),
+                },
+            }
+        }
+
+        pub(super) fn flush_all(&mut self, now: u64) {
+            let _ = self.flush_expired(Some(MAX_FLUSH_BATCH as i64), now);
+            let mut visits = 0usize;
+            let mut idx = self.lru;
+            while let Some(cur) = idx {
+                if visits >= MAX_FLUSH_BATCH {
+                    break;
+                }
+                visits += 1;
+                let prev = self.nodes[cur].prev;
+                if !Self::expired(&self.nodes[cur], now) {
+                    self.nodes[cur].expire_ms = 1;
+                }
+                idx = prev;
+            }
+        }
+
+        pub(super) fn flush_expired(&mut self, max: Option<i64>, now: u64) -> i64 {
+            let limit = enumeration_limit(max, MAX_FLUSH_BATCH);
+            let mut freed = 0i64;
+            let mut visits = 0usize;
+            let mut idx = self.lru;
+            while let Some(cur) = idx {
+                if visits >= MAX_FLUSH_BATCH || (freed as usize) >= limit {
+                    break;
+                }
+                visits += 1;
+                let prev = self.nodes[cur].prev;
+                if Self::expired(&self.nodes[cur], now) {
+                    self.remove_at(cur);
+                    freed += 1;
+                }
+                idx = prev;
+            }
+            freed
+        }
+
+        pub(super) fn get_keys(&mut self, max: Option<i64>, now: u64) -> Vec<Vec<u8>> {
+            let limit = enumeration_limit(max, MAX_GET_KEYS);
+            let mut keys = Vec::new();
+            let mut visits = 0usize;
+            let mut idx = self.lru;
+            while let Some(cur) = idx {
+                if keys.len() >= limit || visits >= MAX_GET_KEYS {
+                    break;
+                }
+                visits += 1;
+                if !Self::expired(&self.nodes[cur], now) {
+                    keys.push(self.nodes[cur].key.clone());
+                }
+                idx = self.nodes[cur].prev;
+            }
+            keys
         }
     }
 
@@ -791,6 +1115,79 @@ pub fn dict_free_space(name: &str) -> Result<usize, &'static str> {
     shm_backend::free_space(name)
 }
 
+pub fn dict_lpush(name: &str, key: &[u8], value: DictValue) -> Result<StoreResult, &'static str> {
+    dict_list_push(name, key, value, true)
+}
+
+pub fn dict_rpush(name: &str, key: &[u8], value: DictValue) -> Result<StoreResult, &'static str> {
+    dict_list_push(name, key, value, false)
+}
+
+fn dict_list_push(
+    name: &str,
+    key: &[u8],
+    value: DictValue,
+    left: bool,
+) -> Result<StoreResult, &'static str> {
+    #[cfg(any(debug_assertions, ngx_features = "rustc-test"))]
+    if process_local::has_process(name) {
+        return process_local::with_process(name, |dict| {
+            dict.list_push(key, value, left, process_now_ms())
+        });
+    }
+    shm_backend::list_push(name, key, value, left)
+}
+
+pub fn dict_lpop(name: &str, key: &[u8]) -> Result<GetResult, &'static str> {
+    dict_list_pop(name, key, true)
+}
+
+pub fn dict_rpop(name: &str, key: &[u8]) -> Result<GetResult, &'static str> {
+    dict_list_pop(name, key, false)
+}
+
+fn dict_list_pop(name: &str, key: &[u8], left: bool) -> Result<GetResult, &'static str> {
+    #[cfg(any(debug_assertions, ngx_features = "rustc-test"))]
+    if process_local::has_process(name) {
+        return process_local::with_process(name, |dict| {
+            dict.list_pop(key, left, process_now_ms())
+        });
+    }
+    shm_backend::list_pop(name, key, left)
+}
+
+pub fn dict_llen(name: &str, key: &[u8]) -> Result<GetResult, &'static str> {
+    #[cfg(any(debug_assertions, ngx_features = "rustc-test"))]
+    if process_local::has_process(name) {
+        return process_local::with_process(name, |dict| dict.llen(key, process_now_ms()));
+    }
+    shm_backend::llen(name, key)
+}
+
+pub fn dict_flush_all(name: &str) -> Result<(), &'static str> {
+    #[cfg(any(debug_assertions, ngx_features = "rustc-test"))]
+    if process_local::has_process(name) {
+        return process_local::with_process(name, |dict| dict.flush_all(process_now_ms()));
+    }
+    shm_backend::flush_all(name)
+}
+
+pub fn dict_flush_expired(name: &str, max: Option<i64>) -> Result<i64, &'static str> {
+    #[cfg(any(debug_assertions, ngx_features = "rustc-test"))]
+    if process_local::has_process(name) {
+        return process_local::with_process(name, |dict| dict.flush_expired(max, process_now_ms()));
+    }
+    shm_backend::flush_expired(name, max)
+}
+
+pub fn dict_get_keys(name: &str, max: Option<i64>) -> Result<Vec<Vec<u8>>, &'static str> {
+    #[cfg(any(debug_assertions, ngx_features = "rustc-test"))]
+    if process_local::has_process(name) {
+        return process_local::with_process(name, |dict| dict.get_keys(max, process_now_ms()));
+    }
+    shm_backend::get_keys(name, max)
+}
+
 fn shm_zone_exists(name: &str) -> bool {
     shm_backend::zone_exists(name)
 }
@@ -837,6 +1234,29 @@ mod shm_backend {
         Err("not found")
     }
     pub(super) fn free_space(_: &str) -> Result<usize, &'static str> {
+        Err("not found")
+    }
+    pub(super) fn list_push(
+        _: &str,
+        _: &[u8],
+        _: DictValue,
+        _: bool,
+    ) -> Result<StoreResult, &'static str> {
+        Err("not found")
+    }
+    pub(super) fn list_pop(_: &str, _: &[u8], _: bool) -> Result<GetResult, &'static str> {
+        Err("not found")
+    }
+    pub(super) fn llen(_: &str, _: &[u8]) -> Result<GetResult, &'static str> {
+        Err("not found")
+    }
+    pub(super) fn flush_all(_: &str) -> Result<(), &'static str> {
+        Err("not found")
+    }
+    pub(super) fn flush_expired(_: &str, _: Option<i64>) -> Result<i64, &'static str> {
+        Err("not found")
+    }
+    pub(super) fn get_keys(_: &str, _: Option<i64>) -> Result<Vec<Vec<u8>>, &'static str> {
         Err("not found")
     }
 }

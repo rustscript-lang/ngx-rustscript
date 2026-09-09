@@ -94,6 +94,14 @@ pub const NGX_SHARED_TTL_NAME: &str = "ngx::shared::ttl";
 pub const NGX_SHARED_EXPIRE_NAME: &str = "ngx::shared::expire";
 pub const NGX_SHARED_CAPACITY_NAME: &str = "ngx::shared::capacity";
 pub const NGX_SHARED_FREE_SPACE_NAME: &str = "ngx::shared::free_space";
+pub const NGX_SHARED_LPUSH_NAME: &str = "ngx::shared::lpush";
+pub const NGX_SHARED_RPUSH_NAME: &str = "ngx::shared::rpush";
+pub const NGX_SHARED_LPOP_NAME: &str = "ngx::shared::lpop";
+pub const NGX_SHARED_RPOP_NAME: &str = "ngx::shared::rpop";
+pub const NGX_SHARED_LLEN_NAME: &str = "ngx::shared::llen";
+pub const NGX_SHARED_FLUSH_ALL_NAME: &str = "ngx::shared::flush_all";
+pub const NGX_SHARED_FLUSH_EXPIRED_NAME: &str = "ngx::shared::flush_expired";
+pub const NGX_SHARED_GET_KEYS_NAME: &str = "ngx::shared::get_keys";
 
 /// NGINX / OpenResty execution phases that can host a script.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1074,6 +1082,46 @@ const MANIFEST: &[HostManifestEntry] = &[
         "ngx.shared.DICT.free_space",
         PHASE_DICT_WRITE,
     ),
+    shared_dict_entry(
+        NGX_SHARED_LPUSH_NAME,
+        "ngx.shared.DICT.lpush",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(
+        NGX_SHARED_RPUSH_NAME,
+        "ngx.shared.DICT.rpush",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(
+        NGX_SHARED_LPOP_NAME,
+        "ngx.shared.DICT.lpop",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(
+        NGX_SHARED_RPOP_NAME,
+        "ngx.shared.DICT.rpop",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(
+        NGX_SHARED_LLEN_NAME,
+        "ngx.shared.DICT.llen",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(
+        NGX_SHARED_FLUSH_ALL_NAME,
+        "ngx.shared.DICT.flush_all",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(
+        NGX_SHARED_FLUSH_EXPIRED_NAME,
+        "ngx.shared.DICT.flush_expired",
+        PHASE_DICT_WRITE,
+    ),
+    shared_dict_entry(
+        NGX_SHARED_GET_KEYS_NAME,
+        "ngx.shared.DICT.get_keys",
+        PHASE_DICT_WRITE,
+    ),
     cosocket_entry(NGX_SOCKET_UDP_NAME, HostSyncKind::Sync),
     cosocket_entry(NGX_SOCKET_UDP_BIND_NAME, HostSyncKind::Async),
     cosocket_entry(NGX_SOCKET_UDP_SETPEERNAME_NAME, HostSyncKind::Async),
@@ -1622,6 +1670,48 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             NGX_SHARED_FREE_SPACE_NAME,
             vec![dict_handle_param()],
             HostTypeSchema::Int,
+        ),
+        NGX_SHARED_LPUSH_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_LPUSH_NAME,
+            vec![
+                dict_handle_param(),
+                HostParamSchema::value("key", HostTypeSchema::String),
+                HostParamSchema::value("value", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+        ),
+        NGX_SHARED_RPUSH_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_RPUSH_NAME,
+            vec![
+                dict_handle_param(),
+                HostParamSchema::value("key", HostTypeSchema::String),
+                HostParamSchema::value("value", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+        ),
+        NGX_SHARED_LPOP_NAME => dict_get_schema(NGX_SHARED_LPOP_NAME),
+        NGX_SHARED_RPOP_NAME => dict_get_schema(NGX_SHARED_RPOP_NAME),
+        NGX_SHARED_LLEN_NAME => dict_get_schema(NGX_SHARED_LLEN_NAME),
+        NGX_SHARED_FLUSH_ALL_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_FLUSH_ALL_NAME,
+            vec![dict_handle_param()],
+            HostTypeSchema::Null,
+        ),
+        NGX_SHARED_FLUSH_EXPIRED_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_FLUSH_EXPIRED_NAME,
+            vec![
+                dict_handle_param(),
+                HostParamSchema::value("max", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Int,
+        ),
+        NGX_SHARED_GET_KEYS_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_GET_KEYS_NAME,
+            vec![
+                dict_handle_param(),
+                HostParamSchema::value("max", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Array(Box::new(HostTypeSchema::String)),
         ),
         NGX_SOCKET_UDP_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_UDP_NAME,

@@ -5,19 +5,20 @@
 //! production cdylib (`not(ngx_features = "rustc-test")`).
 
 use super::{
-    DictValue, GetResult, MAX_EVICT, MAX_VALUE_BYTES, StoreMode, StoreResult, add_numbers,
-    empty_get, expire_from_exptime, nginx_memn2cmp, ngx_crc32_short, now_ms, store_err, store_ok,
-    validate_key,
+    DictValue, GetResult, MAX_EVICT, MAX_FLUSH_BATCH, MAX_GET_KEYS, MAX_LIST_LEN, MAX_VALUE_BYTES,
+    StoreMode, StoreResult, add_numbers, empty_get, enumeration_limit, expire_from_exptime,
+    nginx_memn2cmp, ngx_crc32_short, now_ms, store_err, store_ok, validate_key,
 };
 use core::mem::{self, offset_of};
 use core::ptr::{self, NonNull};
 use core::slice;
 use nginx_sys::{
     ngx_conf_t, ngx_cycle, ngx_cycle_t, ngx_int_t, ngx_list_part_t, ngx_pagesize, ngx_pcalloc,
-    ngx_queue_empty, ngx_queue_init, ngx_queue_insert_after, ngx_queue_remove, ngx_queue_t,
-    ngx_rbt_red, ngx_rbtree_delete, ngx_rbtree_init, ngx_rbtree_insert, ngx_rbtree_key_t,
-    ngx_rbtree_node_t, ngx_rbtree_t, ngx_shm_zone_t, ngx_shmtx_lock, ngx_shmtx_unlock,
-    ngx_slab_alloc_locked, ngx_slab_free_locked, ngx_slab_pool_t, ngx_str_t,
+    ngx_queue_empty, ngx_queue_init, ngx_queue_insert_after, ngx_queue_insert_before,
+    ngx_queue_remove, ngx_queue_t, ngx_rbt_red, ngx_rbtree_delete, ngx_rbtree_init,
+    ngx_rbtree_insert, ngx_rbtree_key_t, ngx_rbtree_node_t, ngx_rbtree_t, ngx_shm_zone_t,
+    ngx_shmtx_lock, ngx_shmtx_unlock, ngx_slab_alloc_locked, ngx_slab_free_locked, ngx_slab_pool_t,
+    ngx_str_t,
 };
 use ngx::core::Status;
 
@@ -26,6 +27,9 @@ const T_INT: u8 = 2;
 const T_FLOAT: u8 = 3;
 const T_STRING: u8 = 4;
 const T_BYTES: u8 = 5;
+const T_LIST: u8 = 6;
+/// NGINX `NGX_ALIGNMENT` on this 1.30.4 x86_64 tree.
+const SHDICT_ALIGNMENT: usize = 16;
 
 /// Conf-pool context stored in `ngx_shm_zone_t.data` (OpenResty `shdict_ctx`).
 #[repr(C)]
@@ -53,6 +57,14 @@ struct ShdictNode {
     expires: u64,
     queue: ngx_queue_t,
     user_flags: u32,
+    data: [u8; 0],
+}
+
+#[repr(C)]
+struct ShdictListNode {
+    queue: ngx_queue_t,
+    value_len: u32,
+    value_type: u8,
     data: [u8; 0],
 }
 
@@ -193,6 +205,71 @@ fn node_alloc_size(key: &[u8], value_len: usize) -> usize {
     offset_of!(ngx_rbtree_node_t, color) + offset_of!(ShdictNode, data) + key.len() + value_len
 }
 
+fn align_up(n: usize) -> usize {
+    n.wrapping_add(SHDICT_ALIGNMENT - 1) & !(SHDICT_ALIGNMENT - 1)
+}
+
+fn is_list(sd: *mut ShdictNode) -> bool {
+    unsafe { (*sd).value_type == T_LIST }
+}
+
+fn list_entry_size(key: &[u8]) -> usize {
+    align_up(
+        offset_of!(ngx_rbtree_node_t, color)
+            + offset_of!(ShdictNode, data)
+            + key.len()
+            + mem::size_of::<ngx_queue_t>(),
+    )
+}
+
+fn list_item_alloc_size(value_len: usize) -> usize {
+    offset_of!(ShdictListNode, data) + value_len
+}
+
+fn list_queue(sd: *mut ShdictNode) -> *mut ngx_queue_t {
+    unsafe {
+        let p = ptr::addr_of_mut!((*sd).data)
+            .cast::<u8>()
+            .add((*sd).key_len as usize) as usize;
+        align_up(p) as *mut ngx_queue_t
+    }
+}
+
+fn validate_list_item(value: &DictValue) -> Result<(), &'static str> {
+    match value {
+        DictValue::Bool(_) => Err("bad value type"),
+        DictValue::String(text) if text.len() > MAX_VALUE_BYTES => Err("value too long"),
+        DictValue::Bytes(bytes) if bytes.len() > MAX_VALUE_BYTES => Err("value too long"),
+        _ => Ok(()),
+    }
+}
+
+fn decode_raw(ty: u8, raw: &[u8]) -> Option<DictValue> {
+    match ty {
+        T_BOOL => Some(DictValue::Bool(raw.first().copied()? != 0)),
+        T_INT => {
+            let bytes: [u8; 8] = raw.try_into().ok()?;
+            Some(DictValue::Int(i64::from_le_bytes(bytes)))
+        }
+        T_FLOAT => {
+            let bytes: [u8; 8] = raw.try_into().ok()?;
+            Some(DictValue::Float(f64::from_le_bytes(bytes)))
+        }
+        T_STRING => Some(DictValue::String(String::from_utf8(raw.to_vec()).ok()?)),
+        T_BYTES => Some(DictValue::Bytes(raw.to_vec())),
+        _ => None,
+    }
+}
+
+fn decode_list_item(lnode: *mut ShdictListNode) -> Option<DictValue> {
+    unsafe {
+        let ty = (*lnode).value_type;
+        let len = (*lnode).value_len as usize;
+        let data = ptr::addr_of_mut!((*lnode).data).cast::<u8>();
+        decode_raw(ty, slice::from_raw_parts(data, len))
+    }
+}
+
 unsafe extern "C" fn shdict_rbtree_insert_value(
     mut temp: *mut ngx_rbtree_node_t,
     node: *mut ngx_rbtree_node_t,
@@ -272,6 +349,23 @@ impl Drop for LockedZone {
     }
 }
 
+fn free_list_nodes(zone: &mut LockedZone, sd: *mut ShdictNode) {
+    if sd.is_null() || !is_list(sd) {
+        return;
+    }
+    unsafe {
+        let queue = list_queue(sd);
+        let mut q = (*queue).next;
+        while q != queue {
+            let next = (*q).next;
+            zone.free(q.cast());
+            q = next;
+        }
+        ngx_queue_init(queue);
+        (*sd).value_len = 0;
+    }
+}
+
 fn lookup_node(sh: *mut ShdictShctx, key: &[u8]) -> *mut ngx_rbtree_node_t {
     let hash = ngx_crc32_short(key) as ngx_rbtree_key_t;
     unsafe {
@@ -346,6 +440,7 @@ fn expire_locked(zone: &mut LockedZone, n: usize, skip: *mut ngx_rbtree_node_t) 
                 }
             }
             n += 1;
+            free_list_nodes(zone, sd);
             ngx_queue_remove(q);
             ngx_rbtree_delete(ptr::addr_of_mut!((*sh).rbtree), node);
             zone.free(node.cast());
@@ -361,6 +456,7 @@ fn delete_node(zone: &mut LockedZone, node: *mut ngx_rbtree_node_t) {
     }
     let sh = zone.sh();
     let sd = node_sd(node);
+    free_list_nodes(zone, sd);
     unsafe {
         ngx_queue_remove(ptr::addr_of_mut!((*sd).queue));
         ngx_rbtree_delete(ptr::addr_of_mut!((*sh).rbtree), node);
@@ -479,6 +575,14 @@ pub(super) fn get(name: &str, key: &[u8], stale: bool) -> Result<GetResult, &'st
             error: None,
         });
     }
+    if is_list(sd) {
+        return Ok(GetResult {
+            value: None,
+            flags: 0,
+            stale: is_expired,
+            error: Some("value is a list"),
+        });
+    }
     if !is_expired {
         touch_lru(sh, sd);
     }
@@ -548,7 +652,7 @@ pub(super) fn store(
         Some(existing)
     }) {
         let sd = node_sd(node);
-        if unsafe { (*sd).value_len as usize } == value.stored_len() {
+        if !is_list(sd) && unsafe { (*sd).value_len as usize } == value.stored_len() {
             inplace_update(sd, &value, flags, expire_ms);
             touch_lru(sh, sd);
             return Ok(store_ok(false));
@@ -606,6 +710,9 @@ pub(super) fn incr(
     let node = lookup_node(sh, key);
     if !node.is_null() && !expired(node_sd(node), now) {
         let sd = node_sd(node);
+        if is_list(sd) {
+            return Ok(store_err("not a number"));
+        }
         let Some(current) = decode_value(sd).and_then(|v| v.as_number()) else {
             return Ok(store_err("not a number"));
         };
@@ -699,6 +806,320 @@ pub(super) fn capacity(name: &str) -> Result<usize, &'static str> {
 pub(super) fn free_space(name: &str) -> Result<usize, &'static str> {
     let zone = LockedZone::open(name)?;
     Ok(zone.pfree().saturating_mul(unsafe { ngx_pagesize }))
+}
+
+fn init_list_node(zone: &mut LockedZone, node: *mut ngx_rbtree_node_t, size: usize, key: &[u8]) {
+    unsafe {
+        ptr::write_bytes(node.cast::<u8>(), 0, size);
+        let sd = node_sd(node);
+        (*sd).value_type = T_LIST;
+        (*sd).key_len = key.len() as u16;
+        (*sd).value_len = 0;
+        (*sd).expires = 0;
+        (*sd).user_flags = 0;
+        let data = ptr::addr_of_mut!((*sd).data).cast::<u8>();
+        ptr::copy_nonoverlapping(key.as_ptr(), data, key.len());
+        ngx_queue_init(list_queue(sd));
+        (*node).key = ngx_crc32_short(key) as ngx_rbtree_key_t;
+        let sh = zone.sh();
+        ngx_rbtree_insert(ptr::addr_of_mut!((*sh).rbtree), node);
+        ngx_queue_insert_after(
+            ptr::addr_of_mut!((*sh).lru_queue),
+            ptr::addr_of_mut!((*sd).queue),
+        );
+    }
+}
+
+fn push_list_item(
+    zone: &mut LockedZone,
+    sd: *mut ShdictNode,
+    value: &DictValue,
+    left: bool,
+) -> Result<i64, StoreResult> {
+    let len = unsafe { (*sd).value_len as usize };
+    if len >= MAX_LIST_LEN {
+        return Err(store_err("list too long"));
+    }
+    let n = list_item_alloc_size(value.stored_len());
+    let ptr = zone.alloc(n);
+    if ptr.is_null() {
+        return Err(store_err("no memory"));
+    }
+    unsafe {
+        ptr::write_bytes(ptr, 0, n);
+        let lnode = ptr.cast::<ShdictListNode>();
+        (*lnode).value_len = value.stored_len() as u32;
+        (*lnode).value_type = value_type(value);
+        encode_value(
+            value,
+            slice::from_raw_parts_mut(
+                ptr::addr_of_mut!((*lnode).data).cast::<u8>(),
+                value.stored_len(),
+            ),
+        );
+        let queue = list_queue(sd);
+        if left {
+            ngx_queue_insert_after(queue, ptr::addr_of_mut!((*lnode).queue));
+        } else {
+            ngx_queue_insert_before(queue, ptr::addr_of_mut!((*lnode).queue));
+        }
+        (*sd).value_len = (len + 1) as u32;
+        Ok((*sd).value_len as i64)
+    }
+}
+
+pub(super) fn list_push(
+    name: &str,
+    key: &[u8],
+    value: DictValue,
+    left: bool,
+) -> Result<StoreResult, &'static str> {
+    if let Err(err) = validate_key(key) {
+        return Ok(store_err(err));
+    }
+    if let Err(err) = validate_list_item(&value) {
+        return Ok(store_err(err));
+    }
+    let mut zone = LockedZone::open(name)?;
+    let _ = expire_locked(&mut zone, 1, ptr::null_mut());
+    let sh = zone.sh();
+    let existing = lookup_node(sh, key);
+    let sd = if existing.is_null() {
+        ptr::null_mut()
+    } else {
+        node_sd(existing)
+    };
+    let now = now_ms();
+    let sd = if !sd.is_null() && expired(sd, now) {
+        if !is_list(sd) {
+            delete_node(&mut zone, existing);
+            ptr::null_mut()
+        } else {
+            free_list_nodes(&mut zone, sd);
+            unsafe {
+                (*sd).expires = 0;
+                (*sd).user_flags = 0;
+            }
+            touch_lru(zone.sh(), sd);
+            sd
+        }
+    } else if !sd.is_null() {
+        if !is_list(sd) {
+            return Ok(store_err("value not a list"));
+        }
+        touch_lru(sh, sd);
+        sd
+    } else {
+        ptr::null_mut()
+    };
+    let sd = if sd.is_null() {
+        let size = list_entry_size(key);
+        let node = zone.alloc(size).cast::<ngx_rbtree_node_t>();
+        if node.is_null() {
+            return Ok(store_err("no memory"));
+        }
+        init_list_node(&mut zone, node, size, key);
+        node_sd(node)
+    } else {
+        sd
+    };
+    match push_list_item(&mut zone, sd, &value, left) {
+        Ok(len) => Ok(StoreResult {
+            ok: true,
+            error: None,
+            forcible: false,
+            value: Some(DictValue::Int(len)),
+        }),
+        Err(err) => {
+            if unsafe { (*sd).value_len } == 0 {
+                delete_node(&mut zone, sd_rbtree_node(sd));
+            }
+            Ok(err)
+        }
+    }
+}
+
+pub(super) fn list_pop(name: &str, key: &[u8], left: bool) -> Result<GetResult, &'static str> {
+    if let Err(err) = validate_key(key) {
+        return Ok(empty_get(err));
+    }
+    let mut zone = LockedZone::open(name)?;
+    let _ = expire_locked(&mut zone, 1, ptr::null_mut());
+    let sh = zone.sh();
+    let node = lookup_node(sh, key);
+    if node.is_null() || expired(node_sd(node), now_ms()) {
+        return Ok(GetResult {
+            value: None,
+            flags: 0,
+            stale: false,
+            error: None,
+        });
+    }
+    let sd = node_sd(node);
+    if !is_list(sd) {
+        return Ok(GetResult {
+            value: None,
+            flags: 0,
+            stale: false,
+            error: Some("value not a list"),
+        });
+    }
+    let queue = list_queue(sd);
+    let item_q = unsafe { if left { (*queue).next } else { (*queue).prev } };
+    if item_q == queue {
+        delete_node(&mut zone, node);
+        return Ok(GetResult {
+            value: None,
+            flags: 0,
+            stale: false,
+            error: None,
+        });
+    }
+    let lnode = item_q.cast::<ShdictListNode>();
+    let Some(value) = decode_list_item(lnode) else {
+        return Ok(empty_get("bad value type"));
+    };
+    unsafe { ngx_queue_remove(item_q) };
+    zone.free(item_q.cast());
+    let remaining = unsafe { (*sd).value_len.saturating_sub(1) };
+    if remaining == 0 {
+        unsafe { (*sd).value_len = 0 };
+        delete_node(&mut zone, node);
+    } else {
+        unsafe { (*sd).value_len = remaining };
+        touch_lru(sh, sd);
+    }
+    Ok(GetResult {
+        value: Some(value),
+        flags: 0,
+        stale: false,
+        error: None,
+    })
+}
+
+pub(super) fn llen(name: &str, key: &[u8]) -> Result<GetResult, &'static str> {
+    if let Err(err) = validate_key(key) {
+        return Ok(empty_get(err));
+    }
+    let mut zone = LockedZone::open(name)?;
+    let _ = expire_locked(&mut zone, 1, ptr::null_mut());
+    let sh = zone.sh();
+    let node = lookup_node(sh, key);
+    if node.is_null() || expired(node_sd(node), now_ms()) {
+        return Ok(GetResult {
+            value: Some(DictValue::Int(0)),
+            flags: 0,
+            stale: false,
+            error: None,
+        });
+    }
+    let sd = node_sd(node);
+    if !is_list(sd) {
+        return Ok(GetResult {
+            value: None,
+            flags: 0,
+            stale: false,
+            error: Some("value not a list"),
+        });
+    }
+    touch_lru(sh, sd);
+    Ok(GetResult {
+        value: Some(DictValue::Int(unsafe { (*sd).value_len as i64 })),
+        flags: 0,
+        stale: false,
+        error: None,
+    })
+}
+
+pub(super) fn flush_all(name: &str) -> Result<(), &'static str> {
+    let mut zone = LockedZone::open(name)?;
+    let now = now_ms();
+    let _ = flush_expired_locked(&mut zone, MAX_FLUSH_BATCH, MAX_FLUSH_BATCH, now);
+    unsafe {
+        let sh = zone.sh();
+        let head = ptr::addr_of_mut!((*sh).lru_queue);
+        let mut q = (*head).prev;
+        let mut visits = 0usize;
+        while q != head && visits < MAX_FLUSH_BATCH {
+            visits += 1;
+            let sd = q
+                .byte_sub(offset_of!(ShdictNode, queue))
+                .cast::<ShdictNode>();
+            if !expired(sd, now) {
+                (*sd).expires = 1;
+            }
+            q = (*q).prev;
+        }
+    }
+    let _ = expire_locked(&mut zone, 0, ptr::null_mut());
+    Ok(())
+}
+
+fn flush_expired_locked(
+    zone: &mut LockedZone,
+    result_limit: usize,
+    visit_limit: usize,
+    now: u64,
+) -> i64 {
+    let sh = zone.sh();
+    let mut freed = 0i64;
+    let mut visits = 0usize;
+    unsafe {
+        let head = ptr::addr_of_mut!((*sh).lru_queue);
+        let mut q = (*head).prev;
+        while q != head && visits < visit_limit && (freed as usize) < result_limit {
+            visits += 1;
+            let prev = (*q).prev;
+            let sd = q
+                .byte_sub(offset_of!(ShdictNode, queue))
+                .cast::<ShdictNode>();
+            if expired(sd, now) {
+                let node = sd_rbtree_node(sd);
+                free_list_nodes(zone, sd);
+                ngx_queue_remove(q);
+                ngx_rbtree_delete(ptr::addr_of_mut!((*sh).rbtree), node);
+                zone.free(node.cast());
+                freed += 1;
+            }
+            q = prev;
+        }
+    }
+    freed
+}
+
+pub(super) fn flush_expired(name: &str, max: Option<i64>) -> Result<i64, &'static str> {
+    let mut zone = LockedZone::open(name)?;
+    let limit = enumeration_limit(max, MAX_FLUSH_BATCH);
+    Ok(flush_expired_locked(
+        &mut zone,
+        limit,
+        MAX_FLUSH_BATCH,
+        now_ms(),
+    ))
+}
+
+pub(super) fn get_keys(name: &str, max: Option<i64>) -> Result<Vec<Vec<u8>>, &'static str> {
+    let zone = LockedZone::open(name)?;
+    let limit = enumeration_limit(max, MAX_GET_KEYS);
+    let sh = zone.sh();
+    let now = now_ms();
+    let mut keys = Vec::new();
+    let mut visits = 0usize;
+    unsafe {
+        let head = ptr::addr_of_mut!((*sh).lru_queue);
+        let mut q = (*head).prev;
+        while q != head && keys.len() < limit && visits < MAX_GET_KEYS {
+            visits += 1;
+            let sd = q
+                .byte_sub(offset_of!(ShdictNode, queue))
+                .cast::<ShdictNode>();
+            if !expired(sd, now) {
+                keys.push(sd_key(sd).to_vec());
+            }
+            q = (*q).prev;
+        }
+    }
+    Ok(keys)
 }
 
 /// Bind `rss_shared_dict` to `zone.data` + `zone.init` (OpenResty directive).

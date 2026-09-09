@@ -406,3 +406,145 @@ fn free_space(dict: ResourceRef<'_, SharedDictHandle>) -> VmResult<CallOutcome> 
     let bytes = zone_op(&dict, shared_dict::dict_free_space)?;
     ret(bytes as i64)
 }
+
+fn list_item_from_vm(value: &Value) -> Result<DictValue, &'static str> {
+    match value {
+        Value::Int(number) => Ok(DictValue::Int(*number)),
+        Value::Float(number) if number.is_finite() => Ok(DictValue::Float(*number)),
+        Value::String(text) if text.len() <= MAX_VALUE_BYTES => {
+            Ok(DictValue::String((**text).clone()))
+        }
+        Value::Bytes(bytes) if bytes.len() <= MAX_VALUE_BYTES => {
+            Ok(DictValue::Bytes((**bytes).clone()))
+        }
+        Value::String(_) | Value::Bytes(_) => Err("value too long"),
+        _ => Err("bad value type"),
+    }
+}
+
+fn list_result_map(result: shared_dict::StoreResult) -> Value {
+    let mut map = VmMap::new();
+    insert_map(&mut map, "value", dict_value_to_vm(result.value));
+    insert_map(
+        &mut map,
+        "error",
+        match result.error {
+            Some(err) => Value::String(err.to_string().into()),
+            None => Value::Null,
+        },
+    );
+    Value::Map(Arc::new(map))
+}
+
+fn optional_max(value: &Value) -> VmResult<Option<i64>> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Int(number) => Ok(Some(*number)),
+        Value::Float(number) if number.is_finite() && number.fract() == 0.0 => {
+            Ok(Some(*number as i64))
+        }
+        _ => Err(host_err("max expects an integer or null")),
+    }
+}
+
+fn list_push_host(
+    dict: &SharedDictHandle,
+    key: String,
+    value: Value,
+    left: bool,
+) -> VmResult<CallOutcome> {
+    let key = key_bytes(&key)?;
+    let item = match list_item_from_vm(&value) {
+        Ok(item) => item,
+        Err(err) => {
+            return ret(list_result_map(shared_dict::StoreResult {
+                ok: false,
+                error: Some(err),
+                forcible: false,
+                value: None,
+            }));
+        }
+    };
+    let result = zone_op(dict, |name| {
+        if left {
+            shared_dict::dict_lpush(name, key, item.clone())
+        } else {
+            shared_dict::dict_rpush(name, key, item.clone())
+        }
+    })?;
+    ret(list_result_map(result))
+}
+
+/// `len, err = dict:lpush(key, value)` — prepend a list item.
+#[pd_host_function(name = "ngx::shared::lpush")]
+fn lpush(
+    dict: ResourceRef<'_, SharedDictHandle>,
+    key: String,
+    value: Value,
+) -> VmResult<CallOutcome> {
+    list_push_host(&dict, key, value, true)
+}
+
+/// `len, err = dict:rpush(key, value)` — append a list item.
+#[pd_host_function(name = "ngx::shared::rpush")]
+fn rpush(
+    dict: ResourceRef<'_, SharedDictHandle>,
+    key: String,
+    value: Value,
+) -> VmResult<CallOutcome> {
+    list_push_host(&dict, key, value, false)
+}
+
+/// `value, err = dict:lpop(key)`.
+#[pd_host_function(name = "ngx::shared::lpop")]
+fn lpop(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
+    let key = key_bytes(&key)?;
+    let result = zone_op(&dict, |name| shared_dict::dict_lpop(name, key))?;
+    ret(get_map(result))
+}
+
+/// `value, err = dict:rpop(key)`.
+#[pd_host_function(name = "ngx::shared::rpop")]
+fn rpop(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
+    let key = key_bytes(&key)?;
+    let result = zone_op(&dict, |name| shared_dict::dict_rpop(name, key))?;
+    ret(get_map(result))
+}
+
+/// `len, err = dict:llen(key)`. Missing keys are length 0.
+#[pd_host_function(name = "ngx::shared::llen")]
+fn llen(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
+    let key = key_bytes(&key)?;
+    let result = zone_op(&dict, |name| shared_dict::dict_llen(name, key))?;
+    ret(get_map(result))
+}
+
+/// Mark up to `MAX_FLUSH_BATCH` keys expired (OpenResty sets `expires=1`).
+#[pd_host_function(name = "ngx::shared::flush_all")]
+fn flush_all(dict: ResourceRef<'_, SharedDictHandle>) -> VmResult<CallOutcome> {
+    zone_op(&dict, shared_dict::dict_flush_all)?;
+    ret(())
+}
+
+/// Delete up to `max` expired keys. `null`/`0` still obey the project batch cap.
+#[pd_host_function(name = "ngx::shared::flush_expired")]
+fn flush_expired(
+    dict: ResourceRef<'_, SharedDictHandle>,
+    max: Value,
+) -> VmResult<CallOutcome> {
+    let max = optional_max(&max)?;
+    let freed = zone_op(&dict, |name| shared_dict::dict_flush_expired(name, max))?;
+    ret(freed)
+}
+
+/// Enumerate keys oldest-first. `null`/`0` still obey `MAX_GET_KEYS`.
+#[pd_host_function(name = "ngx::shared::get_keys")]
+fn get_keys(dict: ResourceRef<'_, SharedDictHandle>, max: Value) -> VmResult<CallOutcome> {
+    let max = optional_max(&max)?;
+    let keys = zone_op(&dict, |name| shared_dict::dict_get_keys(name, max))?;
+    let values = keys
+        .into_iter()
+        .map(|key| Value::string(String::from_utf8_lossy(&key).into_owned()))
+        .collect();
+    ret(Value::array(values))
+}
