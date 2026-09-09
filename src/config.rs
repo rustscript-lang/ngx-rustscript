@@ -1,4 +1,4 @@
-//! `access_by_rss_file` location configuration: resolve, read, compile, bind-check.
+//! `access_by_rss_file` / `content_by_rss_file` location configuration.
 
 use std::fmt;
 use std::fs;
@@ -20,43 +20,45 @@ use vm::{
 use crate::host::{
     HostCapability, HostFamily, HostSyncKind, NgxPhase, ngx_host_catalog, ngx_host_manifest,
 };
+use crate::phase::{DuplicateSlot, ScriptLocationConf};
 
-/// Compiled access-phase program stored on the location config.
+/// Per-location compiled scripts. Access and content slots are independent.
 #[derive(Default)]
 pub struct LocationConf {
-    program: Option<Arc<Program>>,
+    access: ScriptLocationConf,
+    content: ScriptLocationConf,
 }
 
 impl LocationConf {
-    /// True when this location currently holds a compiled program.
-    ///
-    /// After merge this includes a program inherited from a parent. Duplicate
-    /// detection runs in the directive setter before merge, so a child that
-    /// did not write the directive still starts unset.
-    pub fn is_set(&self) -> bool {
-        self.program.is_some()
+    /// Compiled access program after merge, if any.
+    pub fn access_program(&self) -> Option<&Arc<Program>> {
+        self.access.program()
     }
 
-    /// Compiled program after merge, if any.
-    pub fn program(&self) -> Option<&Arc<Program>> {
-        self.program.as_ref()
+    /// Compiled content program after merge, if any.
+    pub fn content_program(&self) -> Option<&Arc<Program>> {
+        self.content.program()
     }
 
-    /// Record a compiled program. A second set in the same location is a duplicate.
-    pub fn set_program(&mut self, program: Arc<Program>) -> Result<(), ConfigError> {
-        if self.program.is_some() {
-            return Err(ConfigError::Duplicate);
-        }
-        self.program = Some(program);
-        Ok(())
+    /// Record a compiled access program. A second set in the same location is a duplicate.
+    pub fn set_access_program(&mut self, program: Arc<Program>) -> Result<(), ConfigError> {
+        self.access
+            .set_program(program)
+            .map_err(|DuplicateSlot| ConfigError::Duplicate)
+    }
+
+    /// Record a compiled content program. A second set in the same location is a duplicate.
+    pub fn set_content_program(&mut self, program: Arc<Program>) -> Result<(), ConfigError> {
+        self.content
+            .set_program(program)
+            .map_err(|DuplicateSlot| ConfigError::DuplicateContent)
     }
 }
 
 impl Merge for LocationConf {
     fn merge(&mut self, prev: &Self) -> Result<(), MergeConfigError> {
-        if self.program.is_none() {
-            self.program = prev.program.clone();
-        }
+        self.access.merge_from(&prev.access);
+        self.content.merge_from(&prev.content);
         Ok(())
     }
 }
@@ -73,6 +75,7 @@ pub enum ConfigError {
     UnsupportedImport(String),
     PhaseForbidden { name: String, phase: NgxPhase },
     Duplicate,
+    DuplicateContent,
     VmConstruct(String),
 }
 
@@ -99,6 +102,7 @@ impl fmt::Display for ConfigError {
                 )
             }
             Self::Duplicate => write!(f, "duplicate access_by_rss_file in this location"),
+            Self::DuplicateContent => write!(f, "duplicate content_by_rss_file in this location"),
             Self::VmConstruct(msg) => write!(f, "cannot construct VM for script: {msg}"),
         }
     }
@@ -208,6 +212,14 @@ pub fn program_requires_request_state(program: &Program) -> bool {
 
 /// Compile with the ngx host catalog and reject unknown or phase-forbidden imports.
 pub fn compile_rss_source(source: &str) -> Result<Arc<Program>, ConfigError> {
+    compile_rss_source_for_phase(source, NgxPhase::Access)
+}
+
+/// Compile and validate imports against a specific NGINX phase.
+pub fn compile_rss_source_for_phase(
+    source: &str,
+    phase: NgxPhase,
+) -> Result<Arc<Program>, ConfigError> {
     let catalog = Arc::new(ngx_host_catalog());
     let compiled = compile_source_with_flavor_and_options(
         source,
@@ -215,7 +227,7 @@ pub fn compile_rss_source(source: &str) -> Result<Arc<Program>, ConfigError> {
         CompileSourceFileOptions::default().with_host_api_catalog(catalog),
     )
     .map_err(|err| ConfigError::Compile(err.to_string()))?;
-    reject_program_imports(&compiled.program)?;
+    validate_program_imports_for_phase(&compiled.program, phase)?;
     Vm::try_new(compiled.program.clone())
         .map_err(|err| ConfigError::VmConstruct(err.to_string()))?;
     Ok(Arc::new(compiled.program))
@@ -223,15 +235,31 @@ pub fn compile_rss_source(source: &str) -> Result<Arc<Program>, ConfigError> {
 
 /// Resolve-independent load: regular file, UTF-8, compile, import check, VM construct.
 pub fn load_and_compile_rss_file(path: &Path) -> Result<Arc<Program>, ConfigError> {
-    let source = load_rss_file(path)?;
-    compile_rss_source(&source)
+    load_and_compile_rss_file_for_phase(path, NgxPhase::Access)
 }
 
-pub(crate) static mut COMMANDS: [ngx_command_t; 2] = [
+/// Load a script and validate it for the given phase.
+pub fn load_and_compile_rss_file_for_phase(
+    path: &Path,
+    phase: NgxPhase,
+) -> Result<Arc<Program>, ConfigError> {
+    let source = load_rss_file(path)?;
+    compile_rss_source_for_phase(&source, phase)
+}
+
+pub(crate) static mut COMMANDS: [ngx_command_t; 3] = [
     ngx_command_t {
         name: ngx_string!("access_by_rss_file"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
         set: Some(set_access_by_rss_file),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
+    ngx_command_t {
+        name: ngx_string!("content_by_rss_file"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
+        set: Some(set_content_by_rss_file),
         conf: NGX_HTTP_LOC_CONF_OFFSET,
         offset: 0,
         post: std::ptr::null_mut(),
@@ -244,13 +272,34 @@ extern "C" fn set_access_by_rss_file(
     _cmd: *mut ngx_command_t,
     conf: *mut core::ffi::c_void,
 ) -> *mut core::ffi::c_char {
+    set_phase_by_rss_file(cf, conf, NgxPhase::Access, "access_by_rss_file")
+}
+
+extern "C" fn set_content_by_rss_file(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut core::ffi::c_void,
+) -> *mut core::ffi::c_char {
+    set_phase_by_rss_file(cf, conf, NgxPhase::Content, "content_by_rss_file")
+}
+
+fn set_phase_by_rss_file(
+    cf: *mut ngx_conf_t,
+    conf: *mut core::ffi::c_void,
+    phase: NgxPhase,
+    directive: &'static str,
+) -> *mut core::ffi::c_char {
     // SAFETY: NGINX invokes the setter with a live conf, command, and location conf.
     let loc = unsafe { &mut *conf.cast::<LocationConf>() };
-    if loc.is_set() {
+    let already_set = match phase {
+        NgxPhase::Content => loc.content_program().is_some(),
+        _ => loc.access_program().is_some(),
+    };
+    if already_set {
         ngx_conf_log_error!(
             NGX_LOG_EMERG,
             cf,
-            "duplicate access_by_rss_file directive in this location"
+            "duplicate {directive} directive in this location"
         );
         return NGX_CONF_ERROR;
     }
@@ -260,7 +309,7 @@ extern "C" fn set_access_by_rss_file(
         ngx_conf_log_error!(
             NGX_LOG_EMERG,
             cf,
-            "invalid number of arguments in \"access_by_rss_file\""
+            "invalid number of arguments in \"{directive}\""
         );
         return NGX_CONF_ERROR;
     }
@@ -273,7 +322,7 @@ extern "C" fn set_access_by_rss_file(
         ngx_conf_log_error!(
             NGX_LOG_EMERG,
             cf,
-            "access_by_rss_file: failed to resolve script path"
+            "{directive}: failed to resolve script path"
         );
         return NGX_CONF_ERROR;
     }
@@ -281,29 +330,35 @@ extern "C" fn set_access_by_rss_file(
     let path = match name.to_str() {
         Ok(path) if !path.is_empty() => Path::new(path),
         Ok(_) => {
-            ngx_conf_log_error!(NGX_LOG_EMERG, cf, "access_by_rss_file: empty script path");
+            ngx_conf_log_error!(NGX_LOG_EMERG, cf, "{directive}: empty script path");
             return NGX_CONF_ERROR;
         }
         Err(_) => {
             ngx_conf_log_error!(
                 NGX_LOG_EMERG,
                 cf,
-                "access_by_rss_file: script path is not valid UTF-8"
+                "{directive}: script path is not valid UTF-8"
             );
             return NGX_CONF_ERROR;
         }
     };
 
-    match load_and_compile_rss_file(path) {
-        Ok(program) => match loc.set_program(program) {
-            Ok(()) => NGX_CONF_OK,
-            Err(err) => {
-                ngx_conf_log_error!(NGX_LOG_EMERG, cf, "access_by_rss_file: {err}");
-                NGX_CONF_ERROR
+    match load_and_compile_rss_file_for_phase(path, phase) {
+        Ok(program) => {
+            let set = match phase {
+                NgxPhase::Content => loc.set_content_program(program),
+                _ => loc.set_access_program(program),
+            };
+            match set {
+                Ok(()) => NGX_CONF_OK,
+                Err(err) => {
+                    ngx_conf_log_error!(NGX_LOG_EMERG, cf, "{directive}: {err}");
+                    NGX_CONF_ERROR
+                }
             }
-        },
+        }
         Err(err) => {
-            ngx_conf_log_error!(NGX_LOG_EMERG, cf, "access_by_rss_file: {err}");
+            ngx_conf_log_error!(NGX_LOG_EMERG, cf, "{directive}: {err}");
             NGX_CONF_ERROR
         }
     }

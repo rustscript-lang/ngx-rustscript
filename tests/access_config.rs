@@ -269,8 +269,8 @@ fn empty_imports_are_accepted() {
 fn duplicate_directive_in_same_location_is_rejected() {
     let program = load_and_compile_rss_file(&fixture("ok.rss")).unwrap();
     let mut conf = LocationConf::default();
-    conf.set_program(program.clone()).unwrap();
-    let err = conf.set_program(program).expect_err("duplicate");
+    conf.set_access_program(program.clone()).unwrap();
+    let err = conf.set_access_program(program).expect_err("duplicate");
     assert!(matches!(err, ConfigError::Duplicate), "got {err:?}");
 }
 
@@ -278,10 +278,13 @@ fn duplicate_directive_in_same_location_is_rejected() {
 fn unset_child_inherits_parent_program() {
     let parent_program = load_and_compile_rss_file(&fixture("ok.rss")).unwrap();
     let mut parent = LocationConf::default();
-    parent.set_program(parent_program).unwrap();
+    parent.set_access_program(parent_program).unwrap();
     let mut child = LocationConf::default();
     child.merge(&parent).unwrap();
-    assert!(child.program().is_some(), "unset child must inherit parent");
+    assert!(
+        child.access_program().is_some(),
+        "unset child must inherit parent"
+    );
 }
 
 #[test]
@@ -289,18 +292,18 @@ fn explicit_child_overrides_parent_program() {
     let parent_program = load_and_compile_rss_file(&fixture("runtime_error.rss")).unwrap();
     let child_program = load_and_compile_rss_file(&fixture("ok.rss")).unwrap();
     let mut parent = LocationConf::default();
-    parent.set_program(parent_program).unwrap();
+    parent.set_access_program(parent_program).unwrap();
     let mut child = LocationConf::default();
-    child.set_program(child_program).unwrap();
+    child.set_access_program(child_program).unwrap();
     child.merge(&parent).unwrap();
-    let child_program = child.program().expect("override kept");
+    let child_program = child.access_program().expect("override kept");
     run_access_program(child_program).expect("override script must halt");
 }
 
 #[test]
 fn unconfigured_location_has_no_program() {
     let conf = LocationConf::default();
-    assert!(conf.program().is_none());
+    assert!(conf.access_program().is_none());
 }
 
 #[test]

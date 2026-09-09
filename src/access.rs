@@ -24,8 +24,11 @@ use vm::{Program, VmError, VmStatus};
 
 use crate::Module;
 use crate::config::{self, LocationConf};
-use crate::host::{AllowedOps, NgxPhase, with_request_scope, with_vm_request_scope};
+use crate::host::{
+    AllowedOps, NgxPhase, RequestLocalCtx, with_request_scope, with_vm_request_scope,
+};
 use crate::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
+use crate::phase::PhaseSlot;
 use crate::request_state::{AccessExec, AccessStatus, IdentityRegistry, ReadyEffect};
 use crate::vm_pool;
 
@@ -34,10 +37,58 @@ unsafe extern "C" {
         r: *mut ngx_http_request_t,
         status: ngx_int_t,
     ) -> ngx_int_t;
+    fn ngx_rustscript_c_request_main_count_inc(r: *mut ngx_http_request_t);
 }
 
-struct AccessCtx {
-    exec: RefCell<AccessExec>,
+struct RequestPhaseCtx {
+    ngx_ctx: RefCell<RequestLocalCtx>,
+    access: RefCell<Option<AccessExec>>,
+    content: RefCell<Option<AccessExec>>,
+}
+
+impl RequestPhaseCtx {
+    fn ngx_ctx_ptr(&self) -> *mut RequestLocalCtx {
+        self.ngx_ctx.as_ptr()
+    }
+
+    fn slot(&self, slot: PhaseSlot) -> &RefCell<Option<AccessExec>> {
+        match slot {
+            PhaseSlot::Access => &self.access,
+            PhaseSlot::Content => &self.content,
+        }
+    }
+
+    fn matching_slot(&self, identity: RequestIdentity) -> Option<PhaseSlot> {
+        if self
+            .access
+            .borrow()
+            .as_ref()
+            .is_some_and(|exec| exec.identity() == identity)
+        {
+            return Some(PhaseSlot::Access);
+        }
+        if self
+            .content
+            .borrow()
+            .as_ref()
+            .is_some_and(|exec| exec.identity() == identity)
+        {
+            return Some(PhaseSlot::Content);
+        }
+        None
+    }
+
+    fn with_attached_exec_mut<R>(
+        &self,
+        slot: PhaseSlot,
+        f: impl FnOnce(&mut AccessExec) -> R,
+    ) -> Option<R> {
+        let ptr = self.ngx_ctx_ptr();
+        let mut exec = self.slot(slot).borrow_mut();
+        let exec = exec.as_mut()?;
+        exec.attach_request_ctx_ptr(ptr);
+        Some(f(exec))
+    }
 }
 
 struct WorkerAccess {
@@ -85,13 +136,18 @@ impl Drop for HandlerGuard {
     }
 }
 
-impl Drop for AccessCtx {
+impl Drop for RequestPhaseCtx {
     fn drop(&mut self) {
         // `Pool::allocate` registers this Drop as `ngx_pool_cleanup_add`.
         // NGINX 1.30.4 runs it from `ngx_destroy_pool` inside
         // `ngx_http_free_request`, after `r->cleanup` handlers and after
         // `r->pool = NULL`. Invalidate identity first, then drop the VM.
-        cleanup_access_ctx(self.exec.get_mut());
+        if let Some(exec) = self.access.get_mut() {
+            cleanup_access_ctx(exec);
+        }
+        if let Some(exec) = self.content.get_mut() {
+            cleanup_access_ctx(exec);
+        }
     }
 }
 
@@ -129,28 +185,18 @@ fn mark_cached_clock_event_boundary() {
     crate::host::notify_cached_clock_event_boundary();
 }
 
-fn enter_access_scope<R>(
+fn enter_phase_scope<R>(
     raw: *mut ngx_http_request_t,
     identity: RequestIdentity,
+    phase: NgxPhase,
     f: impl FnOnce() -> R,
 ) -> R {
     mark_cached_clock_event_boundary();
-    with_request_scope(
-        raw,
-        identity,
-        NgxPhase::Access,
-        AllowedOps::for_phase(NgxPhase::Access),
-        f,
-    )
+    with_request_scope(raw, identity, phase, AllowedOps::for_phase(phase), f)
 }
 
-fn enter_access_vm<R>(identity: RequestIdentity, f: impl FnOnce() -> R) -> R {
-    with_vm_request_scope(
-        identity,
-        NgxPhase::Access,
-        AllowedOps::for_phase(NgxPhase::Access),
-        f,
-    )
+fn enter_phase_vm<R>(identity: RequestIdentity, phase: NgxPhase, f: impl FnOnce() -> R) -> R {
+    with_vm_request_scope(identity, phase, AllowedOps::for_phase(phase), f)
 }
 
 fn allocate_scope_identity() -> RequestIdentity {
@@ -187,111 +233,174 @@ impl HttpRequestHandler for AccessHandler {
     type Output = Status;
 
     fn handler(request: &mut Request) -> Self::Output {
-        let _guard = HandlerGuard::enter();
-        let Some(conf) = Module::location_conf(request) else {
-            return Status::NGX_DECLINED;
-        };
-        run_configured_access(request, conf)
+        run_phase_handler(request, PhaseSlot::Access)
     }
 }
 
-fn run_configured_access(request: &mut Request, conf: &LocationConf) -> Status {
-    let Some(program) = conf.program() else {
+pub(crate) fn run_phase_handler(request: &mut Request, slot: PhaseSlot) -> Status {
+    let _guard = HandlerGuard::enter();
+    let Some(conf) = Module::location_conf(request) else {
         return Status::NGX_DECLINED;
     };
+    run_configured_phase(request, conf, slot)
+}
+
+fn run_configured_phase(request: &mut Request, conf: &LocationConf, slot: PhaseSlot) -> Status {
+    let Some(program) = (match slot {
+        PhaseSlot::Access => conf.access_program(),
+        PhaseSlot::Content => conf.content_program(),
+    }) else {
+        return Status::NGX_DECLINED;
+    };
+    let phase = slot.phase();
+    let directive = slot.directive();
     if !config::program_requires_request_state(program) {
         // Pool fast path: no Async and no RequestCtx. Keep ctx-null VM scope;
         // do not wrap a pooled VM with a stack ctx.
         let raw = request.as_mut() as *mut ngx_http_request_t;
         let identity = allocate_scope_identity();
-        return enter_access_scope(raw, identity, || {
-            enter_access_vm(identity, || match run_access_program(program) {
-                Ok(VmStatus::Halted) => Status::NGX_OK,
+        return enter_phase_scope(raw, identity, phase, || {
+            enter_phase_vm(identity, phase, || match run_access_program(program) {
+                Ok(VmStatus::Halted) => complete_sync_ok(raw, slot),
                 Ok(status) => {
                     ngx_log_error!(
                         NGX_LOG_ERR,
                         request.log(),
-                        "access_by_rss_file: unexpected VM status {status:?}"
+                        "{directive}: unexpected VM status {status:?}"
                     );
                     HTTPStatus::INTERNAL_SERVER_ERROR.into()
                 }
                 Err(err) => {
-                    ngx_log_error!(NGX_LOG_ERR, request.log(), "access_by_rss_file: {err}");
+                    ngx_log_error!(NGX_LOG_ERR, request.log(), "{directive}: {err}");
                     HTTPStatus::INTERNAL_SERVER_ERROR.into()
                 }
             })
         });
     }
-    run_request_owned_access(request, program)
+    run_request_owned_phase(request, program, slot)
 }
 
-fn run_request_owned_access(request: &mut Request, program: &Arc<Program>) -> Status {
+fn complete_sync_ok(raw: *mut ngx_http_request_t, slot: PhaseSlot) -> Status {
+    if slot == PhaseSlot::Content {
+        return send_empty_last(raw);
+    }
+    Status::NGX_OK
+}
+
+fn send_empty_last(raw: *mut ngx_http_request_t) -> Status {
+    let rc = unsafe { ngx_rustscript_c_send_last_response(raw, 200) };
+    if rc == Status::NGX_ERROR.0 || rc > Status::NGX_OK.0 {
+        return Status(rc);
+    }
+    Status::NGX_OK
+}
+
+fn run_request_owned_phase(
+    request: &mut Request,
+    program: &Arc<Program>,
+    slot: PhaseSlot,
+) -> Status {
     let raw = request.as_mut() as *mut ngx_http_request_t;
+    let directive = slot.directive();
     if request
-        .get_module_ctx::<AccessCtx>(Module::module())
-        .is_none()
+        .get_module_ctx::<RequestPhaseCtx>(Module::module())
+        .is_none_or(|ctx| ctx.slot(slot).borrow().is_none())
     {
         let request_id = next_request_id();
-        let exec = match crate::runtime::with_worker(|worker| {
-            worker.bind_access_exec(Arc::clone(program), request_id)
+        let mut exec = match crate::runtime::with_worker(|worker| {
+            worker.bind_phase_exec(Arc::clone(program), request_id, slot.phase())
         }) {
             Some(Ok(exec)) => exec,
             Some(Err(err)) => {
-                ngx_log_error!(NGX_LOG_ERR, request.log(), "access_by_rss_file: {err}");
+                ngx_log_error!(NGX_LOG_ERR, request.log(), "{directive}: {err}");
                 return HTTPStatus::INTERNAL_SERVER_ERROR.into();
             }
             None => {
                 ngx_log_error!(
                     NGX_LOG_ERR,
                     request.log(),
-                    "access_by_rss_file: worker runtime is not started"
+                    "{directive}: worker runtime is not started"
                 );
                 return HTTPStatus::INTERNAL_SERVER_ERROR.into();
             }
         };
-        let ctx_ptr = request.pool().allocate(AccessCtx {
-            exec: RefCell::new(exec),
-        });
-        if ctx_ptr.is_null() {
-            ngx_log_error!(
-                NGX_LOG_ERR,
-                request.log(),
-                "access_by_rss_file: no memory for request state"
-            );
-            return HTTPStatus::INTERNAL_SERVER_ERROR.into();
+        if let Some(ctx) = request.get_module_ctx::<RequestPhaseCtx>(Module::module()) {
+            exec.attach_request_ctx_ptr(ctx.ngx_ctx_ptr());
+            *ctx.slot(slot).borrow_mut() = Some(exec);
+        } else {
+            let phase_ctx = RequestPhaseCtx {
+                ngx_ctx: RefCell::new(RequestLocalCtx::new()),
+                access: RefCell::new(None),
+                content: RefCell::new(None),
+            };
+            let ctx_ptr = request.pool().allocate(phase_ctx);
+            if ctx_ptr.is_null() {
+                ngx_log_error!(
+                    NGX_LOG_ERR,
+                    request.log(),
+                    "{directive}: no memory for request state"
+                );
+                return HTTPStatus::INTERNAL_SERVER_ERROR.into();
+            }
+            request.set_module_ctx(ctx_ptr.cast(), Module::module());
+            let Some(ctx) = request.get_module_ctx::<RequestPhaseCtx>(Module::module()) else {
+                ngx_log_error!(
+                    NGX_LOG_ERR,
+                    request.log(),
+                    "{directive}: missing request module ctx after allocate"
+                );
+                return HTTPStatus::INTERNAL_SERVER_ERROR.into();
+            };
+            exec.attach_request_ctx_ptr(ctx.ngx_ctx_ptr());
+            *ctx.slot(slot).borrow_mut() = Some(exec);
         }
-        request.set_module_ctx(ctx_ptr.cast(), Module::module());
     }
-    finish_from_raw(raw)
+    finish_from_raw(raw, slot)
 }
 
-fn finish_from_raw(raw: *mut ngx_http_request_t) -> Status {
-    // SAFETY: `raw` is the current access request on the worker main thread.
+fn finish_from_raw(raw: *mut ngx_http_request_t, slot: PhaseSlot) -> Status {
+    // SAFETY: `raw` is the current phase request on the worker main thread.
     let request = unsafe { Request::from_ngx_http_request(raw) };
-    let Some(ctx) = request.get_module_ctx::<AccessCtx>(Module::module()) else {
+    let directive = slot.directive();
+    let Some(ctx) = request.get_module_ctx::<RequestPhaseCtx>(Module::module()) else {
         ngx_log_error!(
             NGX_LOG_ERR,
             request.log(),
-            "access_by_rss_file: missing request state"
+            "{directive}: missing request state"
         );
         return HTTPStatus::INTERNAL_SERVER_ERROR.into();
     };
+    let exec = ctx.slot(slot);
+    if exec.borrow().is_none() {
+        ngx_log_error!(
+            NGX_LOG_ERR,
+            request.log(),
+            "{directive}: missing request state"
+        );
+        return HTTPStatus::INTERNAL_SERVER_ERROR.into();
+    }
     let status = {
-        let identity = ctx.exec.borrow().identity();
-        enter_access_scope(raw, identity, || {
+        let identity = exec.borrow().as_ref().expect("checked above").identity();
+        enter_phase_scope(raw, identity, slot.phase(), || {
             crate::runtime::with_worker(|worker| {
                 WORKER_ACCESS.with(|state| {
                     let mut state = state.borrow_mut();
-                    ctx.exec.borrow_mut().handle_access(&mut state.ids, worker)
+                    ctx.with_attached_exec_mut(slot, |exec| {
+                        exec.handle_access(&mut state.ids, worker)
+                    })
+                    .unwrap_or(AccessStatus::Error500)
                 })
             })
             .unwrap_or(AccessStatus::Error500)
         })
     };
     if status == AccessStatus::Again {
-        let identity = ctx.exec.borrow().current_identity();
+        let identity = exec
+            .borrow()
+            .as_ref()
+            .and_then(AccessExec::current_identity);
         if let Some(identity) = identity {
-            let request_id = ctx.exec.borrow().request_id();
+            let request_id = exec.borrow().as_ref().expect("checked above").request_id();
             let inserted =
                 WORKER_ACCESS.with(|state| state.borrow_mut().live.try_insert(identity, raw));
             if inserted.is_err() {
@@ -299,7 +408,7 @@ fn finish_from_raw(raw: *mut ngx_http_request_t) -> Status {
                 ngx_log_error!(
                     NGX_LOG_ERR,
                     request.log(),
-                    "access_by_rss_file: duplicate async wait mapping"
+                    "{directive}: duplicate async wait mapping"
                 );
                 return HTTPStatus::INTERNAL_SERVER_ERROR.into();
             }
@@ -308,23 +417,39 @@ fn finish_from_raw(raw: *mut ngx_http_request_t) -> Status {
                 ngx_log_error!(
                     NGX_LOG_ERR,
                     request.log(),
-                    "access_by_rss_file: failed to arm client-close read handler"
+                    "{directive}: failed to arm client-close read handler"
                 );
                 return HTTPStatus::INTERNAL_SERVER_ERROR.into();
             }
-            ctx.exec.borrow_mut().commit_suspend();
+            exec.borrow_mut()
+                .as_mut()
+                .expect("checked above")
+                .commit_suspend();
         }
     } else if status == AccessStatus::Error500 {
         ngx_log_error!(
             NGX_LOG_ERR,
             request.log(),
-            "access_by_rss_file: async access failed"
+            "{directive}: async execution failed"
         );
     }
-    if let AccessStatus::Finalize(code) = status {
-        return apply_finalize_send(raw, code);
+    complete_phase_status(raw, slot, status)
+}
+
+fn complete_phase_status(
+    raw: *mut ngx_http_request_t,
+    slot: PhaseSlot,
+    status: AccessStatus,
+) -> Status {
+    match status {
+        AccessStatus::Again if slot == PhaseSlot::Content => {
+            unsafe { ngx_rustscript_c_request_main_count_inc(raw) };
+            Status::NGX_DONE
+        }
+        AccessStatus::Ok if slot == PhaseSlot::Content => send_empty_last(raw),
+        AccessStatus::Finalize(code) => apply_finalize_send(raw, code),
+        other => other.as_nginx(),
     }
-    status.as_nginx()
 }
 
 fn apply_finalize_send(raw: *mut ngx_http_request_t, code: i32) -> Status {
@@ -439,19 +564,28 @@ fn apply_on_request(
     // SAFETY: both worker-local maps contained this exact identity, so `raw`
     // is the live request that armed it. Stale/unknown identities never reach here.
     let request = unsafe { Request::from_ngx_http_request(raw) };
-    let Some(ctx) = request.get_module_ctx::<AccessCtx>(Module::module()) else {
+    let Some(ctx) = request.get_module_ctx::<RequestPhaseCtx>(Module::module()) else {
         return ReadyEffect::Ignored;
     };
-    if ctx.exec.borrow().request_id() != request_id || ctx.exec.borrow().is_cancelled() {
+    let Some(slot) = ctx.matching_slot(identity) else {
+        return ReadyEffect::Ignored;
+    };
+    let exec = ctx.slot(slot);
+    if exec
+        .borrow()
+        .as_ref()
+        .is_none_or(|exec| exec.request_id() != request_id || exec.is_cancelled())
+    {
         return ReadyEffect::Ignored;
     }
     crate::runtime::with_worker(|worker| {
         WORKER_ACCESS.with(|state| {
             let mut state = state.borrow_mut();
-            enter_access_scope(raw, identity, || {
-                ctx.exec
-                    .borrow_mut()
-                    .apply_ready(identity, &mut state.ids, worker)
+            enter_phase_scope(raw, identity, slot.phase(), || {
+                ctx.with_attached_exec_mut(slot, |exec| {
+                    exec.apply_ready(identity, &mut state.ids, worker)
+                })
+                .unwrap_or(ReadyEffect::Ignored)
             })
         })
     })
@@ -461,8 +595,19 @@ fn apply_on_request(
 fn current_identity_on_request(raw: *mut ngx_http_request_t) -> Option<RequestIdentity> {
     // SAFETY: same liveness as [`apply_on_request`].
     let request = unsafe { Request::from_ngx_http_request(raw) };
-    let ctx = request.get_module_ctx::<AccessCtx>(Module::module())?;
-    ctx.exec.borrow().current_identity()
+    let ctx = request.get_module_ctx::<RequestPhaseCtx>(Module::module())?;
+    if let Some(identity) = ctx
+        .access
+        .borrow()
+        .as_ref()
+        .and_then(AccessExec::current_identity)
+    {
+        return Some(identity);
+    }
+    ctx.content
+        .borrow()
+        .as_ref()
+        .and_then(AccessExec::current_identity)
 }
 
 /// Install the module read-close handler and re-arm like auth delay / limit_req.

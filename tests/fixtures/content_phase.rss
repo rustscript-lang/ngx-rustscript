@@ -1,0 +1,2 @@
+use ngx;
+ngx::log(ngx::log_level::notice(), "CONTENT_PHASE=" + ngx::get_phase());

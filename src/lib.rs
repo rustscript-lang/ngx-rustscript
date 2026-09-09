@@ -1,14 +1,16 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-use ngx::core::Status;
+use ngx::core::{NGX_CONF_ERROR, Status};
 use ngx::ffi::{NGX_HTTP_MODULE, ngx_conf_t, ngx_http_module_t, ngx_int_t, ngx_module_t};
-use ngx::http::{self, HttpModule, HttpModuleLocationConf};
+use ngx::http::{self, HttpModule, HttpModuleLocationConf, Merge};
 
 pub mod access;
 pub mod async_bridge;
 pub mod config;
+pub mod content;
 pub mod host;
 pub mod notify;
+pub mod phase;
 pub mod read_close;
 pub mod request_state;
 pub mod runtime;
@@ -32,6 +34,23 @@ impl HttpModule for Module {
         http::add_phase_handler::<access::AccessHandler>(cf)
             .map_or(Status::NGX_ERROR, |_| Status::NGX_OK)
             .into()
+    }
+
+    unsafe extern "C" fn merge_loc_conf(
+        cf: *mut ngx_conf_t,
+        prev: *mut core::ffi::c_void,
+        conf: *mut core::ffi::c_void,
+    ) -> *mut core::ffi::c_char {
+        // SAFETY: NGINX merge_loc_conf always passes live parent/child location confs.
+        let prev = unsafe { &*prev.cast::<config::LocationConf>() };
+        let loc = unsafe { &mut *conf.cast::<config::LocationConf>() };
+        if loc.merge(prev).is_err() {
+            return NGX_CONF_ERROR;
+        }
+        if content::install_configured_content(cf, loc).is_err() {
+            return NGX_CONF_ERROR;
+        }
+        core::ptr::null_mut()
     }
 }
 

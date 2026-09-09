@@ -1,4 +1,4 @@
-// Request-local ngx.ctx. Owned by AccessExec; hosts clone values out.
+// Request-local ngx.ctx. Request-owned across access and content; hosts clone values out.
 //
 // Limits (also documented in docs/ngx-api-compatibility.md):
 // - MAX_CTX_KEYS 256

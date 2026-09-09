@@ -568,6 +568,14 @@ void ngx_rustscript_c_headers_in_apply_connection(ngx_http_request_t *r, ngx_tab
     }
 }
 
+void ngx_rustscript_c_request_main_count_inc(ngx_http_request_t *r)
+{
+    if (r == NULL || r->main == NULL) {
+        return;
+    }
+    r->main->count++;
+}
+
 #ifndef NGX_RUSTSCRIPT_NO_C_PUBLIC_ALIAS
 unsigned int ngx_rustscript_request_is_internal(const ngx_http_request_t *r)
 {

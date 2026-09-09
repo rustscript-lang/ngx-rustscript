@@ -6,6 +6,7 @@
 //! A wake during the initial poll only queues for a later NGINX event turn.
 
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::task::{Context, Poll, Waker};
 
 use ngx::core::Status;
@@ -22,14 +23,15 @@ use crate::notify::{CompletionPermit, RequestIdentity};
 
 fn with_vm_entry<T>(
     identity: RequestIdentity,
+    phase: NgxPhase,
     ctx: *mut RequestLocalCtx,
     disposition: *mut RequestDisposition,
     f: impl FnOnce() -> T,
 ) -> T {
     with_vm_request_scope_full(
         identity,
-        NgxPhase::Access,
-        AllowedOps::for_phase(NgxPhase::Access),
+        phase,
+        AllowedOps::for_phase(phase),
         ctx,
         disposition,
         f,
@@ -207,7 +209,9 @@ pub struct AccessExec {
     vm: Option<Vm>,
     request_id: u64,
     identity: RequestIdentity,
+    phase: NgxPhase,
     ctx: RequestLocalCtx,
+    shared_ctx: Option<NonNull<RequestLocalCtx>>,
     disposition: RequestDisposition,
     final_status: Option<AccessStatus>,
     state: ExecState,
@@ -224,6 +228,16 @@ impl AccessExec {
         generation: u64,
         runtime: Handle,
     ) -> Result<Self, String> {
+        Self::bind_program_in_phase(program, request_id, generation, runtime, NgxPhase::Access)
+    }
+
+    pub fn bind_program_in_phase(
+        program: std::sync::Arc<Program>,
+        request_id: u64,
+        generation: u64,
+        runtime: Handle,
+        phase: NgxPhase,
+    ) -> Result<Self, String> {
         let mut vm = Vm::new_shared(program);
         bind_ngx_hosts(&mut vm);
         vm.set_async_bridge(Box::new(NgxAsyncBridge::new(runtime)))
@@ -232,7 +246,9 @@ impl AccessExec {
             vm: Some(vm),
             request_id,
             identity: RequestIdentity::new(generation, request_id),
+            phase,
             ctx: RequestLocalCtx::new(),
+            shared_ctx: None,
             disposition: RequestDisposition::Continue,
             final_status: None,
             state: ExecState::New,
@@ -241,6 +257,40 @@ impl AccessExec {
             permit: None,
             last_status: None,
         })
+    }
+
+    pub fn phase(&self) -> NgxPhase {
+        self.phase
+    }
+
+    /// Attach this exec to a request-owned `ngx.ctx` store.
+    ///
+    /// The store must outlive the exec. Access and content on the same request
+    /// share one store; VM execution, identity, and disposition stay independent.
+    pub fn attach_request_ctx(&mut self, ctx: &mut RequestLocalCtx) {
+        self.shared_ctx = Some(NonNull::from(ctx));
+    }
+
+    /// Attach using a stable pointer into request-owned module ctx.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` must remain valid and unmoved until this exec is dropped.
+    pub(crate) fn attach_request_ctx_ptr(&mut self, ctx: *mut RequestLocalCtx) {
+        self.shared_ctx = NonNull::new(ctx);
+    }
+
+    fn ctx_ptr(&mut self) -> *mut RequestLocalCtx {
+        match self.shared_ctx {
+            Some(ptr) => ptr.as_ptr(),
+            None => std::ptr::addr_of_mut!(self.ctx),
+        }
+    }
+
+    fn release_owned_ctx(&mut self) {
+        if self.shared_ctx.is_none() {
+            self.ctx.clear();
+        }
     }
 
     pub fn request_id(&self) -> u64 {
@@ -322,6 +372,9 @@ impl AccessExec {
         registry: &mut IdentityRegistry<u64>,
         waiter: &impl AsyncWait,
     ) -> AccessStatus {
+        let identity = self.identity;
+        let ctx = self.ctx_ptr();
+        let disp = std::ptr::addr_of_mut!(self.disposition);
         let vm = match self.vm.as_mut() {
             Some(vm) => vm,
             None => {
@@ -329,10 +382,7 @@ impl AccessExec {
                 return AccessStatus::Error500;
             }
         };
-        let identity = self.identity;
-        let ctx = &mut self.ctx as *mut RequestLocalCtx;
-        let disp = &mut self.disposition as *mut RequestDisposition;
-        match with_vm_entry(identity, ctx, disp, || vm.run()) {
+        match with_vm_entry(identity, self.phase, ctx, disp, || vm.run()) {
             Ok(VmStatus::Halted) => self.finish_from_disposition(false),
             Ok(VmStatus::Waiting(op_id)) => {
                 self.last_status = Some(VmStatus::Waiting(op_id));
@@ -368,7 +418,7 @@ impl AccessExec {
         let identity = self.identity;
         let disp = &mut self.disposition as *mut RequestDisposition;
         let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
-        match with_vm_entry(identity, std::ptr::null_mut(), disp, || {
+        match with_vm_entry(identity, self.phase, std::ptr::null_mut(), disp, || {
             vm.poll_waiting_host_op(&mut cx)
         }) {
             Poll::Pending => {
@@ -399,10 +449,10 @@ impl AccessExec {
         waiter: &impl AsyncWait,
     ) -> Result<AccessStatus, AccessStatus> {
         let identity = self.identity;
-        let ctx = &mut self.ctx as *mut RequestLocalCtx;
-        let disp = &mut self.disposition as *mut RequestDisposition;
+        let ctx = self.ctx_ptr();
+        let disp = std::ptr::addr_of_mut!(self.disposition);
         let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
-        match with_vm_entry(identity, ctx, disp, || vm.resume()) {
+        match with_vm_entry(identity, self.phase, ctx, disp, || vm.resume()) {
             Ok(VmStatus::Halted) => Ok(self.finish_from_disposition(false)),
             Ok(VmStatus::Waiting(op_id)) => {
                 self.last_status = Some(VmStatus::Waiting(op_id));
@@ -472,7 +522,7 @@ impl AccessExec {
         let waker = waiter.waker(identity);
         let mut cx = Context::from_waker(&waker);
         let disp = &mut self.disposition as *mut RequestDisposition;
-        match with_vm_entry(identity, std::ptr::null_mut(), disp, || {
+        match with_vm_entry(identity, self.phase, std::ptr::null_mut(), disp, || {
             vm.poll_waiting_host_op(&mut cx)
         }) {
             Poll::Pending => ReadyEffect::Ignored,
@@ -500,7 +550,7 @@ impl AccessExec {
             return None;
         }
         if matches!(self.state, ExecState::Halted | ExecState::Failed) {
-            self.ctx.clear();
+            self.release_owned_ctx();
             self.vm = None;
             self.permit = None;
             return None;
@@ -509,7 +559,7 @@ impl AccessExec {
         self.state = ExecState::Cancelled;
         self.deferred = false;
         self.permit = None;
-        self.ctx.clear();
+        self.release_owned_ctx();
         self.vm = None;
         identity
     }
@@ -697,5 +747,157 @@ ngx::ctx::set("k", 1);
             drop(driver);
         }
         assert_eq!(live_owned_entry_count(), baseline);
+    }
+
+    fn wait_readable(fd: std::os::unix::io::RawFd) {
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let rc = unsafe { libc::poll(&mut pollfd, 1, 1_000) };
+        assert!(rc > 0, "sleep timer was not readable");
+    }
+
+    fn wait_ready(
+        worker: &mut WorkerRuntime,
+        exec: &mut AccessExec,
+        registry: &mut IdentityRegistry<u64>,
+    ) {
+        let fd = worker.raw_fd().expect("eventfd");
+        wait_readable(fd);
+        let ready = worker.drain_ready().unwrap();
+        assert_eq!(ready, vec![exec.identity()]);
+        let effect = exec.apply_ready(exec.identity(), registry, worker);
+        assert_eq!(effect, ReadyEffect::Halted);
+    }
+
+    fn ctx_debug(ctx: &RequestLocalCtx, key: &str) -> String {
+        format!("{:?}", ctx.get(key))
+    }
+
+    #[test]
+    fn request_owned_access_and_content_share_ctx_with_independent_identities() {
+        let mut worker = WorkerRuntime::start().unwrap();
+        let mut shared = RequestLocalCtx::new();
+        let mut access = worker
+            .bind_phase_exec(
+                compile("use ngx;\nngx::ctx::set(\"k\", \"from-access\");\nngx::sleep_ms(5);\n"),
+                1,
+                NgxPhase::Access,
+            )
+            .expect("bind access");
+        let mut content = worker
+            .bind_phase_exec(
+                compile(
+                    "use ngx;\nngx::ctx::set(\"c\", ngx::ctx::get(\"k\"));\nngx::sleep_ms(5);\n",
+                ),
+                1,
+                NgxPhase::Content,
+            )
+            .expect("bind content");
+        assert_ne!(access.identity(), content.identity());
+        assert_eq!(access.phase(), NgxPhase::Access);
+        assert_eq!(content.phase(), NgxPhase::Content);
+        access.attach_request_ctx(&mut shared);
+        content.attach_request_ctx(&mut shared);
+
+        let mut registry = IdentityRegistry::with_capacity(8);
+        assert_eq!(
+            access.handle_access(&mut registry, &worker),
+            AccessStatus::Again
+        );
+        access.commit_suspend();
+        wait_ready(&mut worker, &mut access, &mut registry);
+        assert_eq!(
+            access.handle_access(&mut registry, &worker),
+            AccessStatus::Ok
+        );
+        assert!(access.is_finished());
+        assert!(!content.is_finished());
+        assert!(
+            ctx_debug(&shared, "k").contains("from-access"),
+            "access must write the request-owned ngx.ctx: {}",
+            ctx_debug(&shared, "k")
+        );
+
+        assert_eq!(
+            content.handle_access(&mut registry, &worker),
+            AccessStatus::Again
+        );
+        content.commit_suspend();
+        wait_ready(&mut worker, &mut content, &mut registry);
+        assert_eq!(
+            content.handle_access(&mut registry, &worker),
+            AccessStatus::Ok
+        );
+        assert!(content.is_finished());
+        assert!(
+            ctx_debug(&shared, "c").contains("from-access"),
+            "content must read the same ngx.ctx: {}",
+            ctx_debug(&shared, "c")
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn access_and_content_finalize_independently_on_shared_ctx() {
+        let mut worker = WorkerRuntime::start().unwrap();
+        let mut shared = RequestLocalCtx::new();
+        let mut access = worker
+            .bind_phase_exec(
+                compile("use ngx;\nngx::ctx::set(\"k\", \"from-access\");\nngx::exit(403);\n"),
+                7,
+                NgxPhase::Access,
+            )
+            .expect("bind access");
+        let mut content = worker
+            .bind_phase_exec(
+                compile("use ngx;\nngx::ctx::set(\"c\", ngx::ctx::get(\"k\"));\n"),
+                7,
+                NgxPhase::Content,
+            )
+            .expect("bind content");
+        access.attach_request_ctx(&mut shared);
+        content.attach_request_ctx(&mut shared);
+        let mut registry = IdentityRegistry::with_capacity(8);
+        assert_eq!(
+            access.handle_access(&mut registry, &worker),
+            AccessStatus::Finalize(403)
+        );
+        assert!(access.is_finished());
+        assert!(!content.is_finished());
+        assert_eq!(
+            content.handle_access(&mut registry, &worker),
+            AccessStatus::Ok
+        );
+        assert!(content.is_finished());
+        assert!(ctx_debug(&shared, "k").contains("from-access"));
+        assert!(ctx_debug(&shared, "c").contains("from-access"));
+        worker.shutdown();
+    }
+
+    #[test]
+    fn content_phase_cancelled_wait_is_ignored_on_stale_wake() {
+        let mut worker = WorkerRuntime::start().unwrap();
+        let mut exec = worker
+            .bind_phase_exec(
+                compile("use ngx;\nngx::sleep_ms(80);\n"),
+                8,
+                NgxPhase::Content,
+            )
+            .expect("bind content");
+        let mut registry = IdentityRegistry::with_capacity(8);
+        assert_eq!(
+            exec.handle_access(&mut registry, &worker),
+            AccessStatus::Again
+        );
+        exec.commit_suspend();
+        let identity = exec.identity();
+        let _ = registry.remove_exact(identity, &8);
+        assert_eq!(exec.cleanup_wait(&worker), Some(identity));
+        let effect = exec.apply_ready(identity, &mut registry, &worker);
+        assert_eq!(effect, ReadyEffect::Ignored);
+        worker.shutdown();
     }
 }

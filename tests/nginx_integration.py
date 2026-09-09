@@ -218,6 +218,15 @@ def location(path, script):
 """
 
 
+def content_location(path, script):
+    script_q = quote_nginx_path(script)
+    return f"""
+        location {path} {{
+            content_by_rss_file {script_q};
+        }}
+"""
+
+
 def runtime_conf(module, prefix, port):
     locations = "".join(
         [
@@ -236,6 +245,7 @@ def runtime_conf(module, prefix, port):
             location("/task7-exit/", fixture("task7_exit403.rss")),
             location("/task7-redirect/", fixture("task7_redirect.rss")),
             location("/task7-sleep-exit/", fixture("task7_exit_sleep.rss")),
+            content_location("/content/", fixture("content_phase.rss")),
             """
         location /task7-mut/ {
             set $writable "";
@@ -479,7 +489,27 @@ def run_invalid_fixtures(nginx, prefix, module):
         "exec",
         any_needles=["ngx::exec", "unsupported import"],
     )
-    return ("missing", "syntax", "import", "arity", "exec")
+    expect_t_fail(
+        nginx,
+        prefix,
+        module,
+        content_location("/", missing),
+        ["script file not found"],
+        "content-missing",
+    )
+    expect_t_fail(
+        nginx,
+        prefix,
+        module,
+        content_location("/", fixture("print.rss")),
+        [],
+        "content-import",
+        any_needles=(
+            "script imports are not supported",
+            "failed to compile script",
+        ),
+    )
+    return ("missing", "syntax", "import", "arity", "exec", "content")
 
 
 def spawn_nginx(nginx, prefix, handles):
@@ -584,6 +614,7 @@ def run_acceptance(nginx, module):
         write_index(prefix, "ctx-persist/index.html", "ctx-persist\n")
         write_index(prefix, "task7-iso-a/index.html", "task7-iso-a\n")
         write_index(prefix, "task7-iso-b/index.html", "task7-iso-b\n")
+        write_index(prefix, "content/index.html", "content-static\n")
 
         write_text(
             os.path.join(prefix, "conf", "nginx.conf"),
@@ -591,6 +622,7 @@ def run_acceptance(nginx, module):
                 module,
                 prefix,
                 location("/", fixture("ngx_sleep.rss"))
+                + content_location("/content-t/", fixture("content_phase.rss"))
                 + """
         location /plain/ {
             return 200 "ok\\n";
@@ -627,6 +659,20 @@ def run_acceptance(nginx, module):
             ) from err
 
         access_log = os.path.join(prefix, "logs", "access.log")
+
+        content_status, _content_body, content_raw = http_get(port, "/content/", timeout=5.0)
+        if content_status != 200:
+            raise CheckError(
+                "content_by_rss_file must return HTTP 200",
+                dump_owned(prefix, proc, content_raw),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        if "CONTENT_PHASE=content" not in error_text:
+            raise CheckError(
+                "content script must log CONTENT_PHASE=content",
+                dump_owned(prefix, proc, error_text),
+            )
+        summary["content"] = "200 CONTENT_PHASE=content"
 
         # Non-blocking: 2s sleep must not hold /plain/.
         sent = threading.Event()
@@ -1244,6 +1290,7 @@ def format_summary(summary):
     lines = [
         "nginx-integration ok",
         f"nginx-t: valid={summary['nginx-t-valid']} invalid={summary['nginx-t-invalid']}",
+        f"content: {summary['content']}",
         f"nonblock: {summary['nonblock']}",
         f"continue: {summary['continue']}",
         f"concurrent: {summary['concurrent']}",
