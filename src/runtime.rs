@@ -172,6 +172,7 @@ impl WorkerRuntime {
             return;
         }
         self.stopped = true;
+        crate::socket::pool::shutdown_current();
         self.notify.reject_new();
         let _ = self.notify.reclaim_all();
         if let Some(runtime) = self.runtime.take() {

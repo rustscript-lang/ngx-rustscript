@@ -234,6 +234,21 @@ ngx::socket::tcp::receive(sock, 4);
 ngx::socket::tcp::close(sock);
 ```
 
+TCP keepalive (worker-local pool) and TLS handshake (Tokio/rustls):
+
+```rss
+use ngx;
+let sock = ngx::socket::tcp();
+ngx::socket::tcp::settimeout(sock, 1000);
+ngx::socket::tcp::connect(sock, "127.0.0.1", 8080);
+let store = ngx::socket::tcp::trustedstore(ca_pem);
+ngx::socket::tcp::settrustedstore(sock, store);
+ngx::socket::tcp::sslhandshake(sock, null, "localhost", true, null);
+ngx::socket::tcp::send(sock, "ping");
+ngx::socket::tcp::receive(sock, 4);
+ngx::socket::tcp::setkeepalive(sock, 60000, 30);
+```
+
 `ngx::sleep` is a `pd-host-function` async host (`seconds:number -> null`).
 `seconds` is an OpenResty-style integer or float; negative, NaN, infinity,
 and duration overflow are rejected. `ngx::sleep_ms` is the millisecond

@@ -22,6 +22,10 @@ use vm::{
 };
 
 use crate::host::{NGX_SOCKET_TCP_NAME, NGX_SOCKET_TCP_RESOURCE_KEY};
+use crate::socket::pool::{
+    self, DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_POOL_SIZE, MAX_POOL_SIZE, MAX_REUSE, PoolEndpoint,
+    PoolKey, PooledConnection, PooledIo, TlsIdentity, TlsTcpStream, TlsUnixStream, insert_pooled,
+};
 
 pub(crate) const MAX_DNS_HOST_BYTES: usize = 255;
 pub(crate) const MAX_UNIX_PATH_BYTES: usize = 107;
@@ -35,6 +39,8 @@ const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 enum ReadHalf {
     Tcp(tokio::net::tcp::OwnedReadHalf),
     Unix(tokio::net::unix::OwnedReadHalf),
+    TlsTcp(tokio::io::ReadHalf<TlsTcpStream>),
+    TlsUnix(tokio::io::ReadHalf<TlsUnixStream>),
     #[cfg(test)]
     Test(TestReader),
 }
@@ -42,6 +48,8 @@ enum ReadHalf {
 enum WriteHalf {
     Tcp(tokio::net::tcp::OwnedWriteHalf),
     Unix(tokio::net::unix::OwnedWriteHalf),
+    TlsTcp(tokio::io::WriteHalf<TlsTcpStream>),
+    TlsUnix(tokio::io::WriteHalf<TlsUnixStream>),
     #[cfg(test)]
     Test(TestWriter),
 }
@@ -153,6 +161,8 @@ impl AsyncRead for ReadHalf {
         match self.get_mut() {
             ReadHalf::Tcp(half) => Pin::new(half).poll_read(cx, buf),
             ReadHalf::Unix(half) => Pin::new(half).poll_read(cx, buf),
+            ReadHalf::TlsTcp(half) => Pin::new(half).poll_read(cx, buf),
+            ReadHalf::TlsUnix(half) => Pin::new(half).poll_read(cx, buf),
             #[cfg(test)]
             ReadHalf::Test(reader) => {
                 let mut chunks = lock(&reader.state.chunks);
@@ -180,6 +190,8 @@ impl AsyncWrite for WriteHalf {
         match self.get_mut() {
             WriteHalf::Tcp(half) => Pin::new(half).poll_write(cx, buf),
             WriteHalf::Unix(half) => Pin::new(half).poll_write(cx, buf),
+            WriteHalf::TlsTcp(half) => Pin::new(half).poll_write(cx, buf),
+            WriteHalf::TlsUnix(half) => Pin::new(half).poll_write(cx, buf),
             #[cfg(test)]
             WriteHalf::Test(writer) => {
                 if buf.is_empty() {
@@ -202,6 +214,8 @@ impl AsyncWrite for WriteHalf {
         match self.get_mut() {
             WriteHalf::Tcp(half) => Pin::new(half).poll_flush(cx),
             WriteHalf::Unix(half) => Pin::new(half).poll_flush(cx),
+            WriteHalf::TlsTcp(half) => Pin::new(half).poll_flush(cx),
+            WriteHalf::TlsUnix(half) => Pin::new(half).poll_flush(cx),
             #[cfg(test)]
             WriteHalf::Test(_) => Poll::Ready(Ok(())),
         }
@@ -211,6 +225,8 @@ impl AsyncWrite for WriteHalf {
         match self.get_mut() {
             WriteHalf::Tcp(half) => Pin::new(half).poll_shutdown(cx),
             WriteHalf::Unix(half) => Pin::new(half).poll_shutdown(cx),
+            WriteHalf::TlsTcp(half) => Pin::new(half).poll_shutdown(cx),
+            WriteHalf::TlsUnix(half) => Pin::new(half).poll_shutdown(cx),
             #[cfg(test)]
             WriteHalf::Test(_) => Poll::Ready(Ok(())),
         }
@@ -218,20 +234,45 @@ impl AsyncWrite for WriteHalf {
 }
 
 #[derive(Clone)]
-struct IoHalves {
+pub(crate) struct IoHalves {
     reader: Arc<tokio::sync::Mutex<ReadHalf>>,
     writer: Arc<tokio::sync::Mutex<WriteHalf>>,
 }
 
-struct TcpInner {
-    io: Mutex<Option<IoHalves>>,
-    unread: Mutex<Vec<u8>>,
-    timeout_ms: AtomicU64,
-    closed: AtomicBool,
-    pending_read: AtomicBool,
-    pending_write: AtomicBool,
-    generation: AtomicU64,
-    cancel: tokio::sync::Notify,
+pub(crate) struct TcpInner {
+    pub(crate) io: Mutex<Option<IoHalves>>,
+    pub(crate) unread: Mutex<Vec<u8>>,
+    pub(crate) timeout_ms: AtomicU64,
+    pub(crate) closed: AtomicBool,
+    pub(crate) pending_read: AtomicBool,
+    pub(crate) pending_write: AtomicBool,
+    pub(crate) generation: AtomicU64,
+    pub(crate) cancel: tokio::sync::Notify,
+    pub(crate) endpoint: Mutex<Option<PoolEndpoint>>,
+    pub(crate) tls: Mutex<Option<TlsIdentity>>,
+    pub(crate) reused_times: AtomicU64,
+    pub(crate) trusted_store: Mutex<Option<Arc<crate::socket::tls::TrustedStoreInner>>>,
+    pub(crate) client_cert: Mutex<Option<Arc<crate::socket::tls::ClientCertInner>>>,
+}
+
+impl TcpInner {
+    pub(crate) fn new() -> Self {
+        Self {
+            io: Mutex::new(None),
+            unread: Mutex::new(Vec::new()),
+            timeout_ms: AtomicU64::new(DEFAULT_TIMEOUT_MS),
+            closed: AtomicBool::new(false),
+            pending_read: AtomicBool::new(false),
+            pending_write: AtomicBool::new(false),
+            generation: AtomicU64::new(1),
+            cancel: tokio::sync::Notify::new(),
+            endpoint: Mutex::new(None),
+            tls: Mutex::new(None),
+            reused_times: AtomicU64::new(0),
+            trusted_store: Mutex::new(None),
+            client_cert: Mutex::new(None),
+        }
+    }
 }
 
 pub(crate) struct TcpCosocket {
@@ -241,16 +282,7 @@ pub(crate) struct TcpCosocket {
 impl TcpCosocket {
     pub(crate) fn new() -> Self {
         Self {
-            inner: Arc::new(TcpInner {
-                io: Mutex::new(None),
-                unread: Mutex::new(Vec::new()),
-                timeout_ms: AtomicU64::new(DEFAULT_TIMEOUT_MS),
-                closed: AtomicBool::new(false),
-                pending_read: AtomicBool::new(false),
-                pending_write: AtomicBool::new(false),
-                generation: AtomicU64::new(1),
-                cancel: tokio::sync::Notify::new(),
-            }),
+            inner: Arc::new(TcpInner::new()),
         }
     }
 }
@@ -276,6 +308,10 @@ impl HostResource for TcpCosocket {
         self.inner.pending_write.store(false, Ordering::SeqCst);
         *lock(&self.inner.io) = None;
         lock(&self.inner.unread).clear();
+        *lock(&self.inner.tls) = None;
+        *lock(&self.inner.endpoint) = None;
+        *lock(&self.inner.trusted_store) = None;
+        *lock(&self.inner.client_cert) = None;
         self.inner.cancel.notify_waiters();
         Ok(CloseProgress::Ready)
     }
@@ -320,6 +356,13 @@ pub(crate) struct TcpConnectOwnedContext {
     _pending: PendingWriteGuard,
 }
 
+pub(crate) struct TcpHandshakeOpContext {
+    pub(crate) inner: Arc<TcpInner>,
+    pub(crate) generation: u64,
+    _read: PendingReadGuard,
+    _write: PendingWriteGuard,
+}
+
 impl TcpReadOpContext {
     fn check_identity(&self, name: &str) -> VmResult<()> {
         check_generation(&self.inner, self.generation, name)
@@ -339,6 +382,12 @@ impl TcpConnectOwnedContext {
 
     pub(crate) fn handle_raw(&self) -> i64 {
         self.handle_raw
+    }
+}
+
+impl TcpHandshakeOpContext {
+    pub(crate) fn check_identity(&self, name: &str) -> VmResult<()> {
+        check_generation(&self.inner, self.generation, name)
     }
 }
 
@@ -413,6 +462,37 @@ impl CaptureAsyncHostContext for TcpConnectOwnedContext {
     }
 }
 
+impl CaptureAsyncHostContext for TcpHandshakeOpContext {
+    fn capture(_vm: &mut Vm) -> VmResult<Self> {
+        Err(VmError::HostError(
+            "ngx::socket::tcp::sslhandshake context requires a socket handle".into(),
+        ))
+    }
+
+    fn capture_with_args(vm: &mut Vm, args: &[Value]) -> VmResult<Self> {
+        let (inner, generation) = capture_socket(vm, args)?;
+        if inner.pending_read.swap(true, Ordering::SeqCst) {
+            return Err(VmError::HostError(
+                "ngx::socket::tcp already has a pending read".into(),
+            ));
+        }
+        if inner.pending_write.swap(true, Ordering::SeqCst) {
+            inner.pending_read.store(false, Ordering::SeqCst);
+            return Err(VmError::HostError(
+                "ngx::socket::tcp already has a pending write".into(),
+            ));
+        }
+        Ok(Self {
+            inner: Arc::clone(&inner),
+            generation,
+            _read: PendingReadGuard {
+                inner: Arc::clone(&inner),
+            },
+            _write: PendingWriteGuard { inner },
+        })
+    }
+}
+
 pub(crate) fn timeout_duration(ms: u64) -> Option<Duration> {
     if ms == 0 {
         None
@@ -454,7 +534,7 @@ fn check_generation(inner: &TcpInner, generation: u64, name: &str) -> VmResult<(
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|err| err.into_inner())
 }
 
@@ -521,7 +601,7 @@ fn unix_path<'a>(host: &'a str, port: i64, name: &str) -> VmResult<Option<&'a Pa
     Ok(Some(Path::new(path)))
 }
 
-fn payload_bytes(data: &Value, name: &str) -> VmResult<Vec<u8>> {
+pub(crate) fn payload_bytes(data: &Value, name: &str) -> VmResult<Vec<u8>> {
     match data {
         Value::String(text) => Ok(text.as_bytes().to_vec()),
         Value::Bytes(bytes) => Ok((**bytes).clone()),
@@ -698,7 +778,12 @@ where
     }
 }
 
-async fn with_timeout<T, F>(inner: &TcpInner, generation: u64, name: &str, work: F) -> VmResult<T>
+pub(crate) async fn with_timeout<T, F>(
+    inner: &TcpInner,
+    generation: u64,
+    name: &str,
+    work: F,
+) -> VmResult<T>
 where
     F: Future<Output = Result<T, io::Error>>,
 {
@@ -749,7 +834,13 @@ async fn lookup_host_addrs(host: String, port: u16) -> io::Result<Vec<SocketAddr
         .map(|addrs| addrs.collect())
 }
 
-async fn connect_inner(inner: &TcpInner, generation: u64, host: String, port: i64) -> VmResult<()> {
+pub(crate) async fn connect_inner(
+    inner: &TcpInner,
+    generation: u64,
+    host: String,
+    port: i64,
+    use_pool: bool,
+) -> VmResult<()> {
     let name = "ngx::socket::tcp::connect";
     check_generation(inner, generation, name)?;
     if lock(&inner.io).is_some() {
@@ -757,42 +848,68 @@ async fn connect_inner(inner: &TcpInner, generation: u64, host: String, port: i6
             "{name} socket is already connected"
         )));
     }
-    if let Some(path) = unix_path(&host, port, name)? {
-        let path = path.to_path_buf();
-        let stream = with_timeout(inner, generation, name, unix_connect_path(path))
-            .await
-            .inspect_err(|_| drop_io(inner))?;
-        check_generation(inner, generation, name)?;
-        let (reader, writer) = stream.into_split();
-        store_connected(inner, ReadHalf::Unix(reader), WriteHalf::Unix(writer));
+
+    let endpoint = if let Some(path) = unix_path(&host, port, name)? {
+        PoolEndpoint::Unix {
+            path: path.to_string_lossy().into_owned(),
+        }
+    } else {
+        check_dns_host(&host, name)?;
+        PoolEndpoint::Tcp {
+            host: host.clone(),
+            port: port_u16(port, name)?,
+        }
+    };
+
+    if use_pool && let Some(conn) = pool::checkout_for_connect(&endpoint) {
+        install_pooled(inner, conn, endpoint);
         return Ok(());
     }
-    check_dns_host(&host, name)?;
-    let port = port_u16(port, name)?;
-    let stream = with_timeout(inner, generation, name, async move {
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            return tcp_connect_socket(SocketAddr::new(ip, port)).await;
+
+    match &endpoint {
+        PoolEndpoint::Unix { path } => {
+            let path = std::path::PathBuf::from(path);
+            let stream = with_timeout(inner, generation, name, unix_connect_path(path))
+                .await
+                .inspect_err(|_| drop_io(inner))?;
+            check_generation(inner, generation, name)?;
+            let (reader, writer) = stream.into_split();
+            store_connected(inner, ReadHalf::Unix(reader), WriteHalf::Unix(writer));
         }
-        let addrs = lookup_host_addrs(host, port).await?;
-        let mut last = None;
-        for addr in addrs {
-            match tcp_connect_socket(addr).await {
-                Ok(stream) => return Ok(stream),
-                Err(error) => last = Some(error),
-            }
+        PoolEndpoint::Tcp { host, port } => {
+            let host = host.clone();
+            let port = *port;
+            let stream = with_timeout(inner, generation, name, async move {
+                if let Ok(ip) = host.parse::<IpAddr>() {
+                    return tcp_connect_socket(SocketAddr::new(ip, port)).await;
+                }
+                let addrs = lookup_host_addrs(host, port).await?;
+                let mut last = None;
+                for addr in addrs {
+                    match tcp_connect_socket(addr).await {
+                        Ok(stream) => return Ok(stream),
+                        Err(error) => last = Some(error),
+                    }
+                }
+                Err(last.unwrap_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "could not resolve")
+                }))
+            })
+            .await
+            .inspect_err(|_| drop_io(inner))?;
+            check_generation(inner, generation, name)?;
+            let (reader, writer) = stream.into_split();
+            store_connected(inner, ReadHalf::Tcp(reader), WriteHalf::Tcp(writer));
         }
-        Err(last.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "could not resolve")))
-    })
-    .await
-    .inspect_err(|_| drop_io(inner))?;
-    check_generation(inner, generation, name)?;
-    let (reader, writer) = stream.into_split();
-    store_connected(inner, ReadHalf::Tcp(reader), WriteHalf::Tcp(writer));
+    }
+    inner.reused_times.store(0, Ordering::SeqCst);
+    *lock(&inner.tls) = None;
+    *lock(&inner.endpoint) = Some(endpoint);
     Ok(())
 }
 
 pub(crate) async fn connect(ctx: &TcpWriteOpContext, host: String, port: i64) -> VmResult<()> {
-    connect_inner(&ctx.inner, ctx.generation, host, port).await
+    connect_inner(&ctx.inner, ctx.generation, host, port, true).await
 }
 
 pub(crate) async fn connect_owned(
@@ -801,7 +918,7 @@ pub(crate) async fn connect_owned(
     port: i64,
 ) -> VmResult<i64> {
     ctx.check_identity("ngx::socket::connect")?;
-    connect_inner(&ctx.inner, ctx.generation, host, port).await?;
+    connect_inner(&ctx.inner, ctx.generation, host, port, true).await?;
     Ok(ctx.handle_raw())
 }
 
@@ -1018,6 +1135,258 @@ pub(crate) fn settimeout(vm: &mut Vm, sock: i64, ms: i64) -> VmResult<()> {
     Ok(())
 }
 
+pub(crate) fn inner_from_sock(vm: &mut Vm, sock: i64, name: &str) -> VmResult<Arc<TcpInner>> {
+    let handle = parse_handle(sock)?;
+    let ctx = vm.host_context();
+    let resource = ctx
+        .borrow_resource::<TcpCosocket>(handle)
+        .map_err(host_ctx)?;
+    let inner = Arc::clone(&resource.get().inner);
+    if inner.closed.load(Ordering::SeqCst) {
+        return Err(closed_error(name));
+    }
+    Ok(inner)
+}
+
+pub(crate) fn take_pooled_io(inner: &TcpInner) -> VmResult<PooledIo> {
+    if !lock(&inner.unread).is_empty() {
+        return Err(VmError::HostError(
+            "ngx::socket::tcp::setkeepalive refuses unread buffered data".into(),
+        ));
+    }
+    let io = lock(&inner.io)
+        .take()
+        .ok_or_else(|| VmError::HostError("ngx::socket::tcp socket is not connected".into()))?;
+    let IoHalves { reader, writer } = io;
+    let reader = match Arc::try_unwrap(reader) {
+        Ok(mutex) => mutex.into_inner(),
+        Err(reader) => {
+            *lock(&inner.io) = Some(IoHalves { reader, writer });
+            return Err(VmError::HostError(
+                "ngx::socket::tcp::setkeepalive never pools a pending operation".into(),
+            ));
+        }
+    };
+    let writer = match Arc::try_unwrap(writer) {
+        Ok(mutex) => mutex.into_inner(),
+        Err(writer) => {
+            *lock(&inner.io) = Some(IoHalves {
+                reader: Arc::new(tokio::sync::Mutex::new(reader)),
+                writer,
+            });
+            return Err(VmError::HostError(
+                "ngx::socket::tcp::setkeepalive never pools a pending operation".into(),
+            ));
+        }
+    };
+    match (reader, writer) {
+        (ReadHalf::Tcp(reader), WriteHalf::Tcp(writer)) => match reader.reunite(writer) {
+            Ok(stream) => Ok(PooledIo::Tcp(stream)),
+            Err(err) => {
+                store_connected(inner, ReadHalf::Tcp(err.0), WriteHalf::Tcp(err.1));
+                Err(VmError::HostError(
+                    "ngx::socket::tcp::setkeepalive failed to reunite tcp halves".into(),
+                ))
+            }
+        },
+        (ReadHalf::Unix(reader), WriteHalf::Unix(writer)) => match reader.reunite(writer) {
+            Ok(stream) => Ok(PooledIo::Unix(stream)),
+            Err(err) => {
+                store_connected(inner, ReadHalf::Unix(err.0), WriteHalf::Unix(err.1));
+                Err(VmError::HostError(
+                    "ngx::socket::tcp::setkeepalive failed to reunite unix halves".into(),
+                ))
+            }
+        },
+        (ReadHalf::TlsTcp(reader), WriteHalf::TlsTcp(writer)) => {
+            Ok(PooledIo::TlsTcp(reader.unsplit(writer)))
+        }
+        (ReadHalf::TlsUnix(reader), WriteHalf::TlsUnix(writer)) => {
+            Ok(PooledIo::TlsUnix(reader.unsplit(writer)))
+        }
+        #[cfg(test)]
+        (ReadHalf::Test(reader), WriteHalf::Test(writer)) => {
+            store_connected(inner, ReadHalf::Test(reader), WriteHalf::Test(writer));
+            Err(VmError::HostError(
+                "ngx::socket::tcp::setkeepalive does not pool test sockets".into(),
+            ))
+        }
+        (reader, writer) => {
+            store_connected(inner, reader, writer);
+            Err(VmError::HostError(
+                "ngx::socket::tcp::setkeepalive mismatched io halves".into(),
+            ))
+        }
+    }
+}
+
+pub(crate) fn fail_closed(inner: &TcpInner) {
+    inner.closed.store(true, Ordering::SeqCst);
+    inner.generation.fetch_add(1, Ordering::SeqCst);
+    inner.pending_read.store(false, Ordering::SeqCst);
+    inner.pending_write.store(false, Ordering::SeqCst);
+    drop_io(inner);
+    *lock(&inner.tls) = None;
+    inner.cancel.notify_waiters();
+}
+
+pub(crate) fn install_pooled(inner: &TcpInner, conn: PooledConnection, endpoint: PoolEndpoint) {
+    install_pooled_io_only(inner, conn.io);
+    inner
+        .reused_times
+        .store(conn.reused_times, Ordering::SeqCst);
+    *lock(&inner.tls) = conn.tls;
+    *lock(&inner.endpoint) = Some(endpoint);
+}
+
+pub(crate) fn install_pooled_io_only(inner: &TcpInner, io: PooledIo) {
+    match io {
+        PooledIo::Tcp(stream) => {
+            let (reader, writer) = stream.into_split();
+            store_connected(inner, ReadHalf::Tcp(reader), WriteHalf::Tcp(writer));
+        }
+        PooledIo::Unix(stream) => {
+            let (reader, writer) = stream.into_split();
+            store_connected(inner, ReadHalf::Unix(reader), WriteHalf::Unix(writer));
+        }
+        PooledIo::TlsTcp(stream) => {
+            let (reader, writer) = tokio::io::split(stream);
+            store_connected(inner, ReadHalf::TlsTcp(reader), WriteHalf::TlsTcp(writer));
+        }
+        PooledIo::TlsUnix(stream) => {
+            let (reader, writer) = tokio::io::split(stream);
+            store_connected(inner, ReadHalf::TlsUnix(reader), WriteHalf::TlsUnix(writer));
+        }
+    }
+}
+
+pub(crate) fn setkeepalive(
+    vm: &mut Vm,
+    sock: i64,
+    timeout: Value,
+    pool_size: Value,
+) -> VmResult<()> {
+    let name = "ngx::socket::tcp::setkeepalive";
+    let idle = parse_idle_timeout(&timeout, name)?;
+    let size = parse_pool_size(&pool_size, name)?;
+    let handle = parse_handle(sock)?;
+    enum Outcome {
+        Pooled,
+        ClosedOk,
+        FailClosed(VmError),
+        FailLive(VmError),
+    }
+    let outcome = {
+        let ctx = vm.host_context();
+        let resource = ctx
+            .borrow_resource::<TcpCosocket>(handle)
+            .map_err(host_ctx)?;
+        let inner = &resource.get().inner;
+        if inner.closed.load(Ordering::SeqCst) {
+            Outcome::FailLive(closed_error(name))
+        } else if inner.pending_read.load(Ordering::SeqCst)
+            || inner.pending_write.load(Ordering::SeqCst)
+        {
+            Outcome::FailLive(VmError::HostError(format!(
+                "{name} never pools a pending operation"
+            )))
+        } else if !lock(&inner.unread).is_empty() {
+            Outcome::FailLive(VmError::HostError(format!(
+                "{name} refuses unread buffered data"
+            )))
+        } else {
+            match lock(&inner.endpoint).clone() {
+                None => Outcome::FailLive(VmError::HostError(format!(
+                    "{name} socket is not connected"
+                ))),
+                Some(endpoint) => {
+                    let tls = lock(&inner.tls).clone();
+                    let reused = inner.reused_times.load(Ordering::SeqCst);
+                    if reused >= MAX_REUSE {
+                        drop_io(inner);
+                        Outcome::ClosedOk
+                    } else {
+                        match take_pooled_io(inner) {
+                            Ok(mut io) => {
+                                if !io.is_alive_and_clean() {
+                                    install_pooled_io_only(inner, io);
+                                    Outcome::FailLive(VmError::HostError(format!(
+                                        "{name} refuses a stale, closed, or dirty socket"
+                                    )))
+                                } else {
+                                    insert_pooled(
+                                        PoolKey { endpoint, tls },
+                                        io,
+                                        reused,
+                                        idle,
+                                        size,
+                                    );
+                                    Outcome::Pooled
+                                }
+                            }
+                            Err(error) => {
+                                if lock(&inner.io).is_none() {
+                                    Outcome::FailClosed(error)
+                                } else {
+                                    Outcome::FailLive(error)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    match outcome {
+        Outcome::Pooled | Outcome::ClosedOk => {
+            vm.host_context()
+                .close_resource::<TcpCosocket>(handle, ResourceCloseReason::Requested)
+                .map_err(|error| VmError::HostError(format!("{name}: {error}")))?;
+            Ok(())
+        }
+        Outcome::FailClosed(error) => {
+            let _ = vm
+                .host_context()
+                .close_resource::<TcpCosocket>(handle, ResourceCloseReason::Requested);
+            Err(error)
+        }
+        Outcome::FailLive(error) => Err(error),
+    }
+}
+
+pub(crate) fn getreusedtimes(vm: &mut Vm, sock: i64) -> VmResult<i64> {
+    let inner = inner_from_sock(vm, sock, "ngx::socket::tcp::getreusedtimes")?;
+    Ok(inner.reused_times.load(Ordering::SeqCst) as i64)
+}
+
+fn parse_idle_timeout(value: &Value, name: &str) -> VmResult<Option<Duration>> {
+    match value {
+        Value::Null => Ok(Some(Duration::from_millis(DEFAULT_IDLE_TIMEOUT_MS))),
+        Value::Int(0) => Ok(None),
+        Value::Int(ms) if *ms > 0 => Ok(Some(Duration::from_millis(*ms as u64))),
+        Value::Int(ms) => Err(VmError::HostError(format!(
+            "{name} timeout must be non-negative, got {ms}"
+        ))),
+        _ => Err(VmError::TypeMismatch("keepalive timeout")),
+    }
+}
+
+fn parse_pool_size(value: &Value, name: &str) -> VmResult<usize> {
+    match value {
+        Value::Null => Ok(DEFAULT_POOL_SIZE),
+        Value::Int(size) if *size > 0 && (*size as u64) <= MAX_POOL_SIZE as u64 => {
+            Ok(*size as usize)
+        }
+        Value::Int(0) => Err(VmError::HostError(format!(
+            "{name} pool size must be greater than zero"
+        ))),
+        Value::Int(size) => Err(VmError::HostError(format!(
+            "{name} pool size {size} exceeds the {MAX_POOL_SIZE} cap"
+        ))),
+        _ => Err(VmError::TypeMismatch("keepalive pool size")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1174,16 +1543,7 @@ mod tests {
 
     #[test]
     fn pending_read_and_write_are_independent() {
-        let inner = TcpInner {
-            io: Mutex::new(None),
-            unread: Mutex::new(Vec::new()),
-            timeout_ms: AtomicU64::new(1_000),
-            closed: AtomicBool::new(false),
-            pending_read: AtomicBool::new(false),
-            pending_write: AtomicBool::new(false),
-            generation: AtomicU64::new(1),
-            cancel: tokio::sync::Notify::new(),
-        };
+        let inner = TcpInner::new();
         assert!(!inner.pending_read.swap(true, Ordering::SeqCst));
         assert!(
             inner.pending_read.swap(true, Ordering::SeqCst),
@@ -1206,16 +1566,8 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let inner = TcpInner {
-                io: Mutex::new(None),
-                unread: Mutex::new(Vec::new()),
-                timeout_ms: AtomicU64::new(1_000),
-                closed: AtomicBool::new(false),
-                pending_read: AtomicBool::new(false),
-                pending_write: AtomicBool::new(false),
-                generation: AtomicU64::new(1),
-                cancel: tokio::sync::Notify::new(),
-            };
+            let inner = TcpInner::new();
+            inner.timeout_ms.store(1_000, Ordering::SeqCst);
             inner.generation.fetch_add(1, Ordering::SeqCst);
             let err = with_timeout(&inner, 1, "ngx::socket::tcp::receive", async { Ok(1u8) })
                 .await
@@ -1233,16 +1585,9 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let inner = Arc::new(TcpInner {
-                io: Mutex::new(None),
-                unread: Mutex::new(Vec::new()),
-                timeout_ms: AtomicU64::new(0),
-                closed: AtomicBool::new(false),
-                pending_read: AtomicBool::new(true),
-                pending_write: AtomicBool::new(false),
-                generation: AtomicU64::new(1),
-                cancel: tokio::sync::Notify::new(),
-            });
+            let inner = Arc::new(TcpInner::new());
+            inner.timeout_ms.store(0, Ordering::SeqCst);
+            inner.pending_read.store(true, Ordering::SeqCst);
             let cancel_inner = Arc::clone(&inner);
             let cancel = async move {
                 tokio::time::sleep(Duration::from_millis(15)).await;

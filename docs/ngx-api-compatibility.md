@@ -5,7 +5,7 @@ This matrix is the authoritative current ngx host surface for
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **170** names in the same order.
+Those three lists contain the same **177** names in the same order.
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and documents only
@@ -62,10 +62,10 @@ argument.
 | Control | 2 | sync |
 | Shared dict | 22 | sync |
 | Cosocket (UDP) | 7 | mixed |
-| Cosocket (TCP) | 9 | mixed |
+| Cosocket (TCP) | 16 | mixed |
 | Constants | 65 | sync |
 | of which HTTP status | 35 | sync |
-| **Production total** | **170** | |
+| **Production total** | **177** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
 the production manifest, catalog, or `bind_ngx_hosts`.
@@ -555,8 +555,9 @@ acceptance is `tests/nginx_integration.py`.
 
 ## TCP cosocket
 
-`ngx.socket.tcp` is adapted as a typed VM resource plus nine explicit
-hosts (eight methods plus convenience `ngx.socket.connect`). The
+`ngx.socket.tcp` is adapted as a typed VM resource plus sixteen explicit
+hosts (methods plus convenience `ngx.socket.connect` and TLS credential
+constructors). The
 constructor returns a `resource` handle (`ngx.socket.tcp`). Async I/O
 futures hold only Tokio TCP/Unix stream halves, owned unread buffer,
 timeout, generation, and cancel identity — never a request, pool, VM,
@@ -590,11 +591,20 @@ resolver. The raw fd is never exposed.
 | `tcpsock:receiveuntil` | `ngx::socket::tcp::receiveuntil(sock, delimiter) -> bytes` | adapted | `PHASE_SOCKET_UDP` | Waiting | delimiter 1–256 bytes | Single-shot, exclusive delimiter, unread preserved. | `tests/ngx_tcp_socket.rs` |
 | `tcpsock:close` | `ngx::socket::tcp::close(sock) -> null` | adapted | `PHASE_SOCKET_UDP` | sync | — | Double close is HostError. Cosocket request-owned. | `tests/ngx_tcp_socket.rs` |
 | `tcpsock:settimeout` | `ngx::socket::tcp::settimeout(sock, ms) -> null` | adapted | `PHASE_SOCKET_UDP` | sync | non-negative ms; `0` = no timer | Applies to subsequent ops; default 60000. | `tests/ngx_tcp_socket.rs` |
+| `tcpsock:setkeepalive` | `ngx::socket::tcp::setkeepalive(sock, timeout, pool_size) -> null` | adapted | `PHASE_SOCKET_UDP` | sync | timeout ms (`null`=60000, `0`=never); pool_size `null`=30, 1–256; max 32 keys / 256 conns / 1000 reuse | Worker-local LRU pool keyed by endpoint+TLS identity. Detaches IO from the request so cancel/close cannot drop a pooled socket. Rejects pending ops, unread buffers, EOF, and dirty sockets. | `tests/ngx_tcp_keepalive.rs` |
+| `tcpsock:getreusedtimes` | `ngx::socket::tcp::getreusedtimes(sock) -> int` | adapted | `PHASE_SOCKET_UDP` | sync | — | 0 until checkout; closed is HostError. | `tests/ngx_tcp_keepalive.rs` |
+| `tcpsock:sslhandshake` | `ngx::socket::tcp::sslhandshake(sock, reused_session, server_name, ssl_verify, send_status_req) -> null` | adapted | `PHASE_SOCKET_UDP` | Waiting | SNI ≤255; verify defaults true | Tokio/rustls only. No NGINX SSL FFI. Session userdata is not returned; `reused_session` session handles are a structured unsupported error. `null`/`true` keep automatic same-identity rustls resumption; `false` disables it. rustls always sends OCSP `status_request`; `send_status_req=false` is unsupported. TLS pool checkout happens only during handshake after endpoint+SNI+verify+trust+client identity match. | `tests/ngx_tcp_tls.rs` |
+| — | `ngx::socket::tcp::trustedstore(pem) -> resource` | adapted | `PHASE_SOCKET_UDP` | sync | PEM ≤65536 | Parses PEM into a VM-owned trusted-store resource. PEM is never logged. | `tests/ngx_tcp_tls.rs` |
+| `tcpsock:settrustedstore` | `ngx::socket::tcp::settrustedstore(sock, store) -> null` | adapted | `PHASE_SOCKET_UDP` | sync | typed store or `null` | Attaches a trusted-store resource (or clears). Default is system roots then webpki-roots. | `tests/ngx_tcp_tls.rs` |
+| — | `ngx::socket::tcp::clientcert(cert, pkey) -> resource` | adapted | `PHASE_SOCKET_UDP` | sync | PEM ≤65536 each | Parses cert+key into a VM-owned resource. Private key is parsed through zeroizing storage and retained only as rustls `PrivateKeyDer`. Cert/key mismatch fails at construction. | `tests/ngx_tcp_tls.rs` |
+| `tcpsock:setclientcert` | `ngx::socket::tcp::setclientcert(sock, cert) -> null` | adapted | `PHASE_SOCKET_UDP` | sync | typed clientcert or `null` | Attaches a client-cert resource (or clears). OpenResty two-PEM method is adapted to one typed resource. | `tests/ngx_tcp_tls.rs` |
 
 TCP programs are request-owned (`HostFamily::Cosocket`). Lifecycle,
 timeout, cancel, shutdown, DNS, IPv4/IPv6/Unix, concurrent
 read+write / duplicate same-direction ops, and handle reuse are covered
-by `tests/ngx_tcp_socket.rs` and `tests/socket_lifecycle.rs`. NGINX
+by `tests/ngx_tcp_socket.rs` and `tests/socket_lifecycle.rs`. Keepalive
+pool, worker isolation, and TLS verification are covered by
+`tests/ngx_tcp_keepalive.rs` and `tests/ngx_tcp_tls.rs`. NGINX
 acceptance is `tests/nginx_integration.py`.
 
 ## Out of scope
@@ -605,6 +615,7 @@ Not production hosts in this matrix (do not import them):
 - `ngx.exec` / internal redirect (`set_uri jump=true`)
 - Timer callbacks, light threads
 - Stream subsystem, `ndk.set_var.*`, Lua `coroutine.*`
+- `tcpsock:getsslpointer` / `tcpsock:getsslctx` (no NGINX SSL FFI)
 - `print`, `runtime::sleep`, and test hosts `ngx::probe` / `ngx::ready` /
   `ngx::fail`
 

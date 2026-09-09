@@ -326,15 +326,15 @@ fn tcp_hosts_are_cosocket_family_in_openresty_phases() {
 }
 
 #[test]
-fn production_host_count_adds_nine_tcp_hosts() {
+fn production_host_count_includes_tcp_pool_and_tls_hosts() {
     let runtime: BTreeSet<&str> = production_runtime_host_names().iter().copied().collect();
     assert_eq!(
         production_runtime_host_names().len(),
-        170,
-        "161 integrated hosts plus 9 TCP cosocket hosts"
+        177,
+        "170 integrated hosts plus 7 keepalive/TLS hosts"
     );
-    assert_eq!(ngx_host_catalog().functions().len(), 170);
-    assert_eq!(ngx_rustscript::host::ngx_host_manifest().len(), 170);
+    assert_eq!(ngx_host_catalog().functions().len(), 177);
+    assert_eq!(ngx_rustscript::host::ngx_host_manifest().len(), 177);
     for name in [
         NGX_SOCKET_TCP_NAME,
         NGX_SOCKET_TCP_CONNECT_NAME,

@@ -88,7 +88,16 @@ pub const NGX_SOCKET_TCP_RECEIVEANY_NAME: &str = "ngx::socket::tcp::receiveany";
 pub const NGX_SOCKET_TCP_RECEIVEUNTIL_NAME: &str = "ngx::socket::tcp::receiveuntil";
 pub const NGX_SOCKET_TCP_CLOSE_NAME: &str = "ngx::socket::tcp::close";
 pub const NGX_SOCKET_TCP_SETTIMEOUT_NAME: &str = "ngx::socket::tcp::settimeout";
+pub const NGX_SOCKET_TCP_SETKEEPALIVE_NAME: &str = "ngx::socket::tcp::setkeepalive";
+pub const NGX_SOCKET_TCP_GETREUSEDTIMES_NAME: &str = "ngx::socket::tcp::getreusedtimes";
+pub const NGX_SOCKET_TCP_SSLHANDSHAKE_NAME: &str = "ngx::socket::tcp::sslhandshake";
+pub const NGX_SOCKET_TCP_SETTRUSTEDSTORE_NAME: &str = "ngx::socket::tcp::settrustedstore";
+pub const NGX_SOCKET_TCP_SETCLIENTCERT_NAME: &str = "ngx::socket::tcp::setclientcert";
+pub const NGX_SOCKET_TCP_TRUSTEDSTORE_NAME: &str = "ngx::socket::tcp::trustedstore";
+pub const NGX_SOCKET_TCP_CLIENTCERT_NAME: &str = "ngx::socket::tcp::clientcert";
 pub const NGX_SOCKET_TCP_RESOURCE_KEY: &str = "ngx.socket.tcp";
+pub const NGX_SOCKET_TLS_TRUSTEDSTORE_RESOURCE_KEY: &str = "ngx.socket.tls.trustedstore";
+pub const NGX_SOCKET_TLS_CLIENTCERT_RESOURCE_KEY: &str = "ngx.socket.tls.clientcert";
 
 pub const NGX_SHARED_DICT_NAME: &str = "ngx::shared::dict";
 pub const NGX_SHARED_GET_NAME: &str = "ngx::shared::get";
@@ -1204,6 +1213,41 @@ const MANIFEST: &[HostManifestEntry] = &[
         HostSyncKind::Sync,
         "ngx.socket.tcp",
     ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_SETKEEPALIVE_NAME,
+        HostSyncKind::Sync,
+        "ngx.socket.tcp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_GETREUSEDTIMES_NAME,
+        HostSyncKind::Sync,
+        "ngx.socket.tcp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_SSLHANDSHAKE_NAME,
+        HostSyncKind::Async,
+        "ngx.socket.tcp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_SETTRUSTEDSTORE_NAME,
+        HostSyncKind::Sync,
+        "ngx.socket.tcp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_SETCLIENTCERT_NAME,
+        HostSyncKind::Sync,
+        "ngx.socket.tcp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_TRUSTEDSTORE_NAME,
+        HostSyncKind::Sync,
+        "ngx.socket.tcp",
+    ),
+    cosocket_entry(
+        NGX_SOCKET_TCP_CLIENTCERT_NAME,
+        HostSyncKind::Sync,
+        "ngx.socket.tcp",
+    ),
 ];
 
 const fn codec_entry(
@@ -1390,6 +1434,16 @@ pub fn udp_socket_resource_key() -> ResourceTypeKey {
 pub fn tcp_socket_resource_key() -> ResourceTypeKey {
     ResourceTypeKey::new(NGX_SOCKET_TCP_RESOURCE_KEY)
         .expect("ngx.socket.tcp is a valid resource type key")
+}
+
+pub fn tls_trustedstore_resource_key() -> ResourceTypeKey {
+    ResourceTypeKey::new(NGX_SOCKET_TLS_TRUSTEDSTORE_RESOURCE_KEY)
+        .expect("ngx.socket.tls.trustedstore is a valid resource type key")
+}
+
+pub fn tls_clientcert_resource_key() -> ResourceTypeKey {
+    ResourceTypeKey::new(NGX_SOCKET_TLS_CLIENTCERT_RESOURCE_KEY)
+        .expect("ngx.socket.tls.clientcert is a valid resource type key")
 }
 
 fn udp_sock_param() -> HostParamSchema {
@@ -1924,6 +1978,68 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             ],
             HostTypeSchema::Null,
         ),
+        NGX_SOCKET_TCP_SETKEEPALIVE_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_SETKEEPALIVE_NAME,
+            vec![
+                tcp_sock_param(),
+                HostParamSchema::value("timeout", HostTypeSchema::Unknown),
+                HostParamSchema::value("pool_size", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_SOCKET_TCP_GETREUSEDTIMES_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_GETREUSEDTIMES_NAME,
+            vec![tcp_sock_param()],
+            HostTypeSchema::Int,
+        ),
+        NGX_SOCKET_TCP_SSLHANDSHAKE_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_SSLHANDSHAKE_NAME,
+            vec![
+                tcp_sock_param(),
+                HostParamSchema::value("reused_session", HostTypeSchema::Unknown),
+                HostParamSchema::value("server_name", HostTypeSchema::Unknown),
+                HostParamSchema::value("ssl_verify", HostTypeSchema::Unknown),
+                HostParamSchema::value("send_status_req", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_SOCKET_TCP_SETTRUSTEDSTORE_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_SETTRUSTEDSTORE_NAME,
+            vec![
+                tcp_sock_param(),
+                HostParamSchema::with_passing(
+                    "store",
+                    HostTypeSchema::Resource(tls_trustedstore_resource_key()),
+                    HostParamPassing::Borrow,
+                ),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_SOCKET_TCP_SETCLIENTCERT_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_SETCLIENTCERT_NAME,
+            vec![
+                tcp_sock_param(),
+                HostParamSchema::with_passing(
+                    "cert",
+                    HostTypeSchema::Resource(tls_clientcert_resource_key()),
+                    HostParamPassing::Borrow,
+                ),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_SOCKET_TCP_TRUSTEDSTORE_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_TRUSTEDSTORE_NAME,
+            vec![HostParamSchema::value("pem", HostTypeSchema::Unknown)],
+            HostTypeSchema::Resource(tls_trustedstore_resource_key()),
+        ),
+        NGX_SOCKET_TCP_CLIENTCERT_NAME => HostFunctionSchema::with_return(
+            NGX_SOCKET_TCP_CLIENTCERT_NAME,
+            vec![
+                HostParamSchema::value("cert", HostTypeSchema::Unknown),
+                HostParamSchema::value("pkey", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Resource(tls_clientcert_resource_key()),
+        ),
         other => metadata_schema(other)
             .unwrap_or_else(|| panic!("ngx host catalog has no schema for {other}")),
     }
@@ -2045,6 +2161,14 @@ pub fn ngx_host_catalog() -> HostApiCatalog {
     builder.resource(ResourceTypeSchema::new(
         tcp_socket_resource_key(),
         "OpenResty ngx.socket.tcp handle",
+    ));
+    builder.resource(ResourceTypeSchema::new(
+        tls_trustedstore_resource_key(),
+        "VM-owned TLS trusted-store (parsed rustls RootCertStore)",
+    ));
+    builder.resource(ResourceTypeSchema::new(
+        tls_clientcert_resource_key(),
+        "VM-owned TLS client certificate and private key",
     ));
     for entry in MANIFEST {
         builder.function(schema_for(entry.name));

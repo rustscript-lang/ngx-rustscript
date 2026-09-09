@@ -205,6 +205,20 @@ def write_tcp_echo_script(path, peer_port):
     )
 
 
+def write_tcp_keepalive_script(path, peer_port):
+    write_text(
+        path,
+        "use ngx;\n"
+        "let sock = ngx::socket::tcp();\n"
+        "ngx::socket::tcp::settimeout(sock, 1000);\n"
+        f'ngx::socket::tcp::connect(sock, "127.0.0.1", {int(peer_port)});\n'
+        'ngx::socket::tcp::send(sock, "ping");\n'
+        "ngx::socket::tcp::receive(sock, 4);\n"
+        "ngx::socket::tcp::setkeepalive(sock, 60000, 8);\n"
+        'ngx::log(ngx::log_level::notice(), "TCP_KA=ok");\n',
+    )
+
+
 def start_udp_echo():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", 0))
@@ -277,6 +291,53 @@ def start_tcp_echo():
     return port, stop, thread
 
 
+def start_tcp_keepalive_echo():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(8)
+    sock.settimeout(0.2)
+    port = sock.getsockname()[1]
+    stop = threading.Event()
+    accepts = {"n": 0}
+
+    def run():
+        conn = None
+        try:
+            while not stop.is_set():
+                try:
+                    conn, _addr = sock.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                accepts["n"] += 1
+                try:
+                    conn.settimeout(2.0)
+                    while not stop.is_set():
+                        data = b""
+                        while len(data) < 4:
+                            chunk = conn.recv(16)
+                            if not chunk:
+                                return
+                            data += chunk
+                        if data == b"ping":
+                            conn.sendall(b"pong")
+                except OSError:
+                    return
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+            sock.close()
+
+    thread = threading.Thread(target=run, name="tcp-ka", daemon=True)
+    thread.start()
+    return port, stop, thread, accepts
+
+
 def skeleton_conf(module, prefix, locations, port=18080, access_log=False, error="emerg"):
     module_q = quote_nginx_path(module)
     pid_q = quote_nginx_path(os.path.join(prefix, "logs", "nginx.pid"))
@@ -327,7 +388,7 @@ def content_location(path, script):
 """
 
 
-def runtime_conf(module, prefix, port, udp_script=None, tcp_script=None):
+def runtime_conf(module, prefix, port, udp_script=None, tcp_script=None, keepalive_script=None):
     locations = [
             location("/sleep/", fixture("sleep_30ms.rss")),
             location("/two/", fixture("two_sleeps_access.rss")),
@@ -369,6 +430,8 @@ def runtime_conf(module, prefix, port, udp_script=None, tcp_script=None):
         locations.append(location("/udp/", udp_script))
     if tcp_script:
         locations.append(location("/tcp/", tcp_script))
+    if keepalive_script:
+        locations.append(location("/tcp-ka/", keepalive_script))
     locations.append(
             """
         location /plain/ {
@@ -701,6 +764,7 @@ def run_acceptance(nginx, module):
     summary = {}
     udp_stop = None
     tcp_stop = None
+    ka_stop = None
     try:
         for child in ("logs", "conf", "html"):
             os.makedirs(os.path.join(prefix, child), exist_ok=True)
@@ -723,6 +787,7 @@ def run_acceptance(nginx, module):
         write_index(prefix, "content/index.html", "content-static\n")
         write_index(prefix, "udp/index.html", "udp-ok\n")
         write_index(prefix, "tcp/index.html", "tcp-ok\n")
+        write_index(prefix, "tcp-ka/index.html", "tcp-ok\n")
 
         write_text(
             os.path.join(prefix, "conf", "nginx.conf"),
@@ -755,10 +820,18 @@ def run_acceptance(nginx, module):
         tcp_script = os.path.join(prefix, "html", "tcp_echo.rss")
         write_udp_echo_script(udp_script, udp_port)
         write_tcp_echo_script(tcp_script, tcp_port)
+        ka_port, ka_stop, _ka_thread, ka_accepts = start_tcp_keepalive_echo()
+        ka_script = os.path.join(prefix, "html", "tcp_ka.rss")
+        write_tcp_keepalive_script(ka_script, ka_port)
         write_text(
             os.path.join(prefix, "conf", "nginx.conf"),
             runtime_conf(
-                module, prefix, port, udp_script=udp_script, tcp_script=tcp_script
+                module,
+                prefix,
+                port,
+                udp_script=udp_script,
+                tcp_script=tcp_script,
+                keepalive_script=ka_script,
             ),
         )
         runtime_t = nginx_test(nginx, prefix)
@@ -911,6 +984,33 @@ def run_acceptance(nginx, module):
                 dump_owned(prefix, proc, error_text),
             )
         summary["tcp"] = "200/tcp-ok TCP_ECHO=ok"
+
+        # Task 18 keepalive/TLS marker against pinned NGINX 1.30.4.
+        ka_status, ka_body, ka_raw = http_get(port, "/tcp-ka/", timeout=5.0)
+        if ka_status != 200 or ka_body != "tcp-ok\n":
+            raise CheckError(
+                "tcp keepalive route must return 200/tcp-ok",
+                dump_owned(prefix, proc, ka_raw),
+            )
+        ka_status2, ka_body2, ka_raw2 = http_get(port, "/tcp-ka/", timeout=5.0)
+        if ka_status2 != 200 or ka_body2 != "tcp-ok\n":
+            raise CheckError(
+                "tcp keepalive reuse must return 200/tcp-ok",
+                dump_owned(prefix, proc, ka_raw2),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        if error_text.count("TCP_KA=ok") < 2:
+            raise CheckError(
+                "tcp keepalive route must log TCP_KA=ok twice",
+                dump_owned(prefix, proc, error_text),
+            )
+        if ka_accepts["n"] != 1:
+            raise CheckError(
+                f"tcp keepalive must reuse one connection, accepts={ka_accepts['n']}",
+                dump_owned(prefix, proc, error_text),
+            )
+        summary["tcp-ka"] = "200/tcp-ok TCP_KA=ok reuse=1 nginx/1.30.4"
+        summary["tcp-tls"] = "rustls-cosocket cargo tests; nginx/1.30.4 marker"
 
         # Concurrent mapping across two routes/durations/bodies.
         jobs = [("/alpha/", "alpha-body\n")] * 6 + [("/beta/", "beta-body\n")] * 6
@@ -1430,6 +1530,8 @@ def run_acceptance(nginx, module):
             udp_stop.set()
         if tcp_stop is not None:
             tcp_stop.set()
+        if ka_stop is not None:
+            ka_stop.set()
         stop_owned(proc, handles)
         shutil.rmtree(prefix, ignore_errors=True)
 
@@ -1443,6 +1545,8 @@ def format_summary(summary):
         f"continue: {summary['continue']}",
         f"udp: {summary['udp']}",
         f"tcp: {summary['tcp']}",
+        f"tcp-ka: {summary['tcp-ka']}",
+        f"tcp-tls: {summary['tcp-tls']}",
         f"concurrent: {summary['concurrent']}",
         f"task7: {summary['task7']}",
         f"disconnect: {summary['disconnect']}",

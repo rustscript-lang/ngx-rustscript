@@ -11,8 +11,10 @@ use super::super::VmResult;
 use super::{CallOutcome, IntoHostCallOutcome};
 
 use crate::socket::tcp::{
-    self, TcpConnectOwnedContext, TcpCosocket, TcpReadOpContext, TcpWriteOpContext,
+    self, TcpConnectOwnedContext, TcpCosocket, TcpHandshakeOpContext, TcpReadOpContext,
+    TcpWriteOpContext,
 };
+use crate::socket::tls;
 use crate::socket::udp::{self, UdpCosocket, UdpOpContext};
 
 fn ret<T: IntoHostCallOutcome>(value: T) -> VmResult<CallOutcome> {
@@ -173,4 +175,65 @@ pub fn tcp_close(vm: &mut Vm, sock: i64) -> VmResult<CallOutcome> {
 pub fn tcp_settimeout(vm: &mut Vm, sock: i64, ms: i64) -> VmResult<CallOutcome> {
     tcp::settimeout(vm, sock, ms)?;
     ret(())
+}
+
+/// Puts a connected TCP/TLS socket into the worker-local keepalive pool.
+#[pd_host_function(name = "ngx::socket::tcp::setkeepalive")]
+pub fn tcp_setkeepalive(
+    vm: &mut Vm,
+    sock: i64,
+    timeout: Value,
+    pool_size: Value,
+) -> VmResult<CallOutcome> {
+    tcp::setkeepalive(vm, sock, timeout, pool_size)?;
+    ret(())
+}
+
+/// Returns how many times this socket was reused from the keepalive pool.
+#[pd_host_function(name = "ngx::socket::tcp::getreusedtimes")]
+pub fn tcp_getreusedtimes(vm: &mut Vm, sock: i64) -> VmResult<CallOutcome> {
+    ret(tcp::getreusedtimes(vm, sock)?)
+}
+
+/// Performs a rustls client handshake on a connected TCP socket.
+#[pd_host_function(name = "ngx::socket::tcp::sslhandshake")]
+pub async fn tcp_sslhandshake(
+    #[pd_host_context] ctx: TcpHandshakeOpContext,
+    _sock: i64,
+    reused_session: Value,
+    server_name: Value,
+    ssl_verify: Value,
+    send_status_req: Value,
+) -> VmResult<()> {
+    tls::sslhandshake(&ctx, reused_session, server_name, ssl_verify, send_status_req).await
+}
+
+/// Installs a typed trusted-store resource on a TCP socket.
+#[pd_host_function(name = "ngx::socket::tcp::settrustedstore")]
+pub fn tcp_settrustedstore(vm: &mut Vm, sock: i64, store: i64) -> VmResult<CallOutcome> {
+    tls::settrustedstore(vm, sock, store)?;
+    ret(())
+}
+
+/// Installs a typed client-cert resource on a TCP socket.
+#[pd_host_function(name = "ngx::socket::tcp::setclientcert")]
+pub fn tcp_setclientcert(vm: &mut Vm, sock: i64, cert: i64) -> VmResult<CallOutcome> {
+    tls::setclientcert(vm, sock, cert)?;
+    ret(())
+}
+
+/// Parses PEM into a VM-owned trusted-store resource.
+#[pd_host_function(name = "ngx::socket::tcp::trustedstore")]
+pub fn tcp_trustedstore(vm: &mut Vm, pem: Value) -> VmResult<CallOutcome> {
+    let store = tls::trustedstore_from_pem(pem)?;
+    let token = vm.host_context().push_resource(store).map_err(host_ctx)?;
+    ret(token.handle().raw() as i64)
+}
+
+/// Parses a client certificate and private key into a VM-owned resource.
+#[pd_host_function(name = "ngx::socket::tcp::clientcert")]
+pub fn tcp_clientcert(vm: &mut Vm, cert: Value, pkey: Value) -> VmResult<CallOutcome> {
+    let client = tls::clientcert_from_pem(cert, pkey)?;
+    let token = vm.host_context().push_resource(client).map_err(host_ctx)?;
+    ret(token.handle().raw() as i64)
 }
