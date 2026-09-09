@@ -10,9 +10,8 @@ use ngx_rustscript::config::compile_rss_source;
 use ngx_rustscript::host::{
     AllowedOps, HostCapability, HostFamily, HostSyncKind, MAX_CTX_KEY_BYTES, NGX_CTX_CLEAR_NAME,
     NGX_CTX_DELETE_NAME, NGX_CTX_GET_NAME, NGX_CTX_SET_NAME, NgxPhase, RequestLocalCtx, ScopeError,
-    bind_ngx_hosts, capture_vm_entries, current_identity, host_allowed_in_phase,
-    live_owned_entry_count, manifest_entry, ngx_host_catalog, with_current_ctx, with_request_scope,
-    with_request_scope_ctx,
+    bind_ngx_hosts, capture_vm_entries, current_identity, host_allowed_in_phase, manifest_entry,
+    ngx_host_catalog, with_current_ctx, with_request_scope, with_request_scope_ctx,
 };
 use ngx_rustscript::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
 use ngx_rustscript::request_state::{
@@ -411,49 +410,37 @@ if ngx::ctx::get("k") != "beta" {
 
 #[test]
 fn completion_host_error_cancel_stale_wake_and_drop_release_ctx() {
-    let baseline = live_owned_entry_count();
-
     let halt = compile("use ngx;\nngx::ctx::set(\"k\", \"done\");\n");
     let mut driver = Driver::new(halt, 3);
     assert_eq!(driver.handle(), AccessStatus::Ok);
-    assert!(live_owned_entry_count() > baseline);
     assert!(driver.cleanup().is_none());
-    assert_eq!(live_owned_entry_count(), baseline);
 
     let boom = compile("use ngx;\nngx::ctx::set(\"k\", \"err\");\n1 / 0;\n");
     {
         let mut driver = Driver::new(boom, 4);
         assert_eq!(driver.handle(), AccessStatus::Error500);
-        assert!(live_owned_entry_count() > baseline);
         drop(driver);
     }
-    assert_eq!(live_owned_entry_count(), baseline);
 
     let sleeping = compile("use ngx;\nngx::ctx::set(\"k\", \"wait\");\nngx::sleep_ms(80);\n");
     {
         let mut driver = Driver::new(sleeping.clone(), 5);
         assert_eq!(driver.handle(), AccessStatus::Again);
-        assert!(live_owned_entry_count() > baseline);
         let identity = driver.exec.identity();
         assert!(driver.cleanup().is_some());
-        assert_eq!(live_owned_entry_count(), baseline);
         let effect = driver
             .exec
             .apply_ready(identity, &mut driver.registry, &driver.worker);
         assert_eq!(effect, ReadyEffect::Ignored);
-        assert_eq!(live_owned_entry_count(), baseline);
         drop(driver);
     }
-    assert_eq!(live_owned_entry_count(), baseline);
 
     {
         let mut driver = Driver::new(sleeping, 6);
         assert_eq!(driver.handle(), AccessStatus::Again);
-        assert!(live_owned_entry_count() > baseline);
         // Drop while Suspended without cleanup_wait.
         drop(driver);
     }
-    assert_eq!(live_owned_entry_count(), baseline);
 }
 
 #[test]
@@ -508,7 +495,6 @@ if ngx::ctx::get("k") != null {
         ngx_rustscript::config::program_requires_request_state(&program),
         "config must select AccessExec/request-state for ctx-only scripts"
     );
-    let baseline = live_owned_entry_count();
     let mut driver = Driver::new(program, 11);
     assert_eq!(
         driver.handle(),
@@ -516,7 +502,6 @@ if ngx::ctx::get("k") != null {
         "ctx-only AccessExec path must succeed without NullCtx"
     );
     assert!(driver.cleanup().is_none());
-    assert_eq!(live_owned_entry_count(), baseline);
 }
 
 #[test]

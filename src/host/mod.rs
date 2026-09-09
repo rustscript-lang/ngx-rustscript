@@ -30,9 +30,11 @@ pub use context::{
     with_current_ctx_mut, with_current_request, with_current_request_mut, with_request_scope,
     with_request_scope_ctx, with_vm_request_scope, with_vm_request_scope_ctx,
 };
+#[cfg(test)]
+pub(crate) use layout::helpers::request_ctx::live_owned_entry_count;
 pub use layout::helpers::request_ctx::{
     MAX_CTX_CONTAINER_ELEMS, MAX_CTX_DEPTH, MAX_CTX_KEY_BYTES, MAX_CTX_KEYS, MAX_CTX_SCALAR_BYTES,
-    MAX_CTX_TOTAL_BYTES, RequestLocalCtx, live_owned_entry_count,
+    MAX_CTX_TOTAL_BYTES, RequestLocalCtx,
 };
 
 /// Override the OS clock sampled by time hosts. Used by tests and by

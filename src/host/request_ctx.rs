@@ -35,12 +35,14 @@ pub const MAX_CTX_SCALAR_BYTES: usize = 8_192;
 
 const NODE_OVERHEAD: usize = 8;
 
+#[cfg(test)]
 thread_local! {
     static LIVE_OWNED_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Live top-level ctx entries on this thread. Used by lifecycle tests.
-pub fn live_owned_entry_count() -> usize {
+/// Live top-level ctx entries on this thread. Used by crate unit tests.
+#[cfg(test)]
+pub(crate) fn live_owned_entry_count() -> usize {
     LIVE_OWNED_ENTRIES.with(|cell| cell.get())
 }
 
@@ -131,9 +133,9 @@ impl RequestLocalCtx {
             },
         );
         self.bytes = new_total;
-        match previous {
-            Some(_) => {}
-            None => account_insert(),
+        if previous.is_none() {
+            #[cfg(test)]
+            account_insert();
         }
         Ok(())
     }
@@ -158,14 +160,17 @@ impl RequestLocalCtx {
             .remove(key)
             .expect("ctx key still present after accounting");
         self.bytes -= released;
+        #[cfg(test)]
         account_remove();
         Ok(out)
     }
 
     pub fn clear(&mut self) {
+        #[cfg(test)]
         let n = self.map.len();
         self.map.clear();
         self.bytes = 0;
+        #[cfg(test)]
         account_remove_n(n);
     }
 }
@@ -176,14 +181,17 @@ impl Drop for RequestLocalCtx {
     }
 }
 
+#[cfg(test)]
 fn account_insert() {
     LIVE_OWNED_ENTRIES.with(|cell| cell.set(cell.get().saturating_add(1)));
 }
 
+#[cfg(test)]
 fn account_remove() {
     account_remove_n(1);
 }
 
+#[cfg(test)]
 fn account_remove_n(n: usize) {
     LIVE_OWNED_ENTRIES.with(|cell| cell.set(cell.get().saturating_sub(n)));
 }

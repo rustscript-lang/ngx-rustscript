@@ -486,3 +486,176 @@ impl AccessExec {
         taken
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::compile_rss_source;
+    use crate::host::live_owned_entry_count;
+    use crate::notify::DEFAULT_MAX_IN_FLIGHT;
+    use crate::runtime::WorkerRuntime;
+    use std::sync::Arc;
+
+    fn compile(source: &str) -> Arc<Program> {
+        compile_rss_source(source).expect("compile with ngx catalog")
+    }
+
+    struct Driver {
+        worker: WorkerRuntime,
+        exec: AccessExec,
+        sink: RecordingSink,
+        registry: IdentityRegistry<u64>,
+    }
+
+    impl Driver {
+        fn new(program: Arc<Program>, request_id: u64) -> Self {
+            let mut worker = WorkerRuntime::start().unwrap();
+            let exec = worker.bind_access_exec(program, request_id).expect("bind");
+            Self {
+                worker,
+                exec,
+                sink: RecordingSink::default(),
+                registry: IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT),
+            }
+        }
+
+        fn handle(&mut self) -> AccessStatus {
+            let status = self.exec.handle_access(&mut self.registry, &self.worker);
+            if status == AccessStatus::Again {
+                self.exec.commit_suspend();
+            }
+            status
+        }
+
+        fn cleanup(&mut self) -> Option<RequestIdentity> {
+            let request_id = self.exec.request_id();
+            let identity = self.exec.identity();
+            let _ = self.registry.remove_exact(identity, &request_id);
+            self.exec.cleanup_wait(&self.worker)
+        }
+    }
+
+    #[test]
+    fn access_exec_live_owned_count_returns_to_baseline_exactly_once() {
+        let baseline = live_owned_entry_count();
+
+        {
+            let mut driver = Driver::new(compile("use ngx;\nngx::ctx::set(\"k\", 1);\n"), 1);
+            assert_eq!(driver.handle(), AccessStatus::Ok);
+            assert!(live_owned_entry_count() > baseline);
+            assert!(driver.cleanup().is_none());
+            assert_eq!(live_owned_entry_count(), baseline);
+        }
+        assert_eq!(live_owned_entry_count(), baseline);
+
+        {
+            let mut driver =
+                Driver::new(compile("use ngx;\nngx::ctx::set(\"k\", 1);\n1 / 0;\n"), 2);
+            assert_eq!(driver.handle(), AccessStatus::Error500);
+            assert!(live_owned_entry_count() > baseline);
+            drop(driver);
+        }
+        assert_eq!(live_owned_entry_count(), baseline);
+
+        let sleeping = compile("use ngx;\nngx::ctx::set(\"k\", 1);\nngx::sleep_ms(80);\n");
+        {
+            let mut driver = Driver::new(sleeping.clone(), 3);
+            assert_eq!(driver.handle(), AccessStatus::Again);
+            assert!(live_owned_entry_count() > baseline);
+            assert!(driver.cleanup().is_some());
+            assert_eq!(live_owned_entry_count(), baseline);
+            let identity = driver.exec.identity();
+            let effect = driver
+                .exec
+                .apply_ready(identity, &mut driver.registry, &driver.worker);
+            assert_eq!(effect, ReadyEffect::Ignored);
+            assert_eq!(live_owned_entry_count(), baseline);
+        }
+        assert_eq!(live_owned_entry_count(), baseline);
+
+        {
+            let mut driver = Driver::new(sleeping, 4);
+            assert_eq!(driver.handle(), AccessStatus::Again);
+            assert!(live_owned_entry_count() > baseline);
+            drop(driver);
+        }
+        assert_eq!(live_owned_entry_count(), baseline);
+    }
+
+    #[test]
+    fn second_access_exec_starts_empty_and_returns_live_owned_count_to_baseline() {
+        let baseline = live_owned_entry_count();
+        let program = compile(
+            r#"
+use ngx;
+if ngx::ctx::get("k") != null {
+    1 / 0;
+}
+ngx::ctx::set("k", 1);
+"#,
+        );
+        let mut first = Driver::new(program.clone(), 7);
+        assert_eq!(first.handle(), AccessStatus::Ok);
+        assert!(live_owned_entry_count() > baseline);
+        assert_eq!(first.handle(), AccessStatus::Ok);
+        assert!(first.cleanup().is_none());
+        assert_eq!(live_owned_entry_count(), baseline);
+
+        let mut second = Driver::new(program, 8);
+        assert_eq!(
+            second.handle(),
+            AccessStatus::Ok,
+            "a new AccessExec must start with empty ctx"
+        );
+        assert!(live_owned_entry_count() > baseline);
+        assert!(second.cleanup().is_none());
+        assert_eq!(live_owned_entry_count(), baseline);
+    }
+
+    #[test]
+    fn completion_host_error_cancel_stale_wake_and_drop_release_ctx_to_baseline() {
+        let baseline = live_owned_entry_count();
+
+        let halt = compile("use ngx;\nngx::ctx::set(\"k\", \"done\");\n");
+        let mut driver = Driver::new(halt, 3);
+        assert_eq!(driver.handle(), AccessStatus::Ok);
+        assert!(live_owned_entry_count() > baseline);
+        assert!(driver.cleanup().is_none());
+        assert_eq!(live_owned_entry_count(), baseline);
+
+        let boom = compile("use ngx;\nngx::ctx::set(\"k\", \"err\");\n1 / 0;\n");
+        {
+            let mut driver = Driver::new(boom, 4);
+            assert_eq!(driver.handle(), AccessStatus::Error500);
+            assert!(live_owned_entry_count() > baseline);
+            drop(driver);
+        }
+        assert_eq!(live_owned_entry_count(), baseline);
+
+        let sleeping = compile("use ngx;\nngx::ctx::set(\"k\", \"wait\");\nngx::sleep_ms(80);\n");
+        {
+            let mut driver = Driver::new(sleeping.clone(), 5);
+            assert_eq!(driver.handle(), AccessStatus::Again);
+            assert!(live_owned_entry_count() > baseline);
+            let identity = driver.exec.identity();
+            assert!(driver.cleanup().is_some());
+            assert_eq!(live_owned_entry_count(), baseline);
+            let effect = driver
+                .exec
+                .apply_ready(identity, &mut driver.registry, &driver.worker);
+            apply_ready_effect(effect, &mut driver.sink);
+            assert_eq!(effect, ReadyEffect::Ignored);
+            assert_eq!(live_owned_entry_count(), baseline);
+            drop(driver);
+        }
+        assert_eq!(live_owned_entry_count(), baseline);
+
+        {
+            let mut driver = Driver::new(sleeping, 6);
+            assert_eq!(driver.handle(), AccessStatus::Again);
+            assert!(live_owned_entry_count() > baseline);
+            drop(driver);
+        }
+        assert_eq!(live_owned_entry_count(), baseline);
+    }
+}
