@@ -24,6 +24,7 @@ const PRODUCTION_SOURCE_FILES: &[&str] = &[
     "src/log.rs",
     "src/access.rs",
     "src/request_state.rs",
+    "src/host/body.rs",
 ];
 
 fn crate_file(rel: &str) -> PathBuf {
@@ -389,6 +390,9 @@ fn hook_strings_are_the_documented_runtime_needles() {
             "NGX_RUSTSCRIPT_TEST_LOG_PANIC",
             "NGX_RUSTSCRIPT_LOG_WAIT_PROOF",
             "LOG_WAIT_PROOF",
+            "NGX_RUSTSCRIPT_BODY_COUNT_PROOF",
+            "BODY_COUNT_PROOF",
+            "BODY_WAIT_ARMED",
         ]
     );
 }

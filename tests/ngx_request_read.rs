@@ -17,7 +17,6 @@ use nginx_sys::{
     NGX_HTTP_VERSION_10, NGX_HTTP_VERSION_11, NGX_HTTP_VERSION_20, NGX_HTTP_VERSION_30, ngx_buf_t,
     ngx_chain_t, ngx_connection_t, ngx_http_connection_t, ngx_http_request_body_t,
     ngx_http_request_t, ngx_http_v2_stream_t, ngx_list_part_t, ngx_str_t, ngx_table_elt_t,
-    ngx_temp_file_t,
 };
 use ngx_rustscript::config::{
     ConfigError, compile_rss_source, reject_program_imports, validate_program_imports_for_phase,
@@ -225,7 +224,7 @@ fn install_busy_header_buffers(
 
 #[allow(clippy::vec_box)]
 struct LiveBody {
-    body: Box<ngx_http_request_body_t>,
+    _body: Box<ngx_http_request_body_t>,
     _bufs: Vec<Box<ngx_buf_t>>,
     _chains: Vec<Box<ngx_chain_t>>,
 }
@@ -262,7 +261,7 @@ fn install_in_memory_body(req: &mut ngx_http_request_t, chunks: &mut [Vec<u8>]) 
     body.temp_file = std::ptr::null_mut();
     req.request_body = body.as_mut() as *mut ngx_http_request_body_t;
     LiveBody {
-        body,
+        _body: body,
         _bufs: bufs,
         _chains: chains,
     }
@@ -978,15 +977,15 @@ fn raw_header_rejects_malformed_ranges_null_cycles_and_caps() {
 }
 
 #[test]
-fn get_post_args_unread_body_is_task10_host_error() {
+fn get_post_args_unread_body_is_host_error() {
     let mut req = dummy_request();
     req.request_body = std::ptr::null_mut();
     let ptr = (&mut *req) as *mut ngx_http_request_t;
     let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
         .expect_err("unread body must fail");
     assert!(
-        err.contains("body") && (err.contains("Task 10") || err.contains("task 10")),
-        "unread body must defer to Task 10, got {err}"
+        err.to_ascii_lowercase().contains("body") && err.to_ascii_lowercase().contains("read"),
+        "unread body must error, got {err}"
     );
 }
 
@@ -1031,18 +1030,7 @@ fn get_post_args_file_backed_still_reading_and_corrupt_are_host_errors() {
     let mut req = dummy_request();
     let mut body = b"a=1".to_vec();
     let mut live = install_in_memory_body(&mut req, std::slice::from_mut(&mut body));
-    live.body.temp_file = std::ptr::dangling_mut::<ngx_temp_file_t>();
     let ptr = (&mut *req) as *mut ngx_http_request_t;
-    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
-        .expect_err("file-backed body must defer");
-    assert!(
-        err.to_ascii_lowercase().contains("file")
-            || err.contains("Task 10")
-            || err.contains("task 10"),
-        "got {err}"
-    );
-
-    live.body.temp_file = std::ptr::null_mut();
     nginx_stubs::write_reading_body(ptr.cast(), true);
     let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
         .expect_err("still-reading body must error");
@@ -1586,8 +1574,8 @@ if ngx::req::is_internal() {
         "configured empty variable must be empty, not missing, got {vars}"
     );
     assert!(
-        log.contains("get_post_args") || log.contains("Task 10") || log.contains("body"),
-        "unread body must surface a Task 10 host error; got:\n{log}"
+        log.contains("get_post_args") || log.contains("body"),
+        "unread body must surface a host error; got:\n{log}"
     );
 }
 

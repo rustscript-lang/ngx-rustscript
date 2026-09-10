@@ -48,6 +48,10 @@ pub const NGX_REQ_RAW_HEADER_NAME: &str = "ngx::req::raw_header";
 pub const NGX_REQ_GET_HEADERS_NAME: &str = "ngx::req::get_headers";
 pub const NGX_REQ_GET_URI_ARGS_NAME: &str = "ngx::req::get_uri_args";
 pub const NGX_REQ_GET_POST_ARGS_NAME: &str = "ngx::req::get_post_args";
+pub const NGX_REQ_READ_BODY_NAME: &str = "ngx::req::read_body";
+pub const NGX_REQ_DISCARD_BODY_NAME: &str = "ngx::req::discard_body";
+pub const NGX_REQ_GET_BODY_DATA_NAME: &str = "ngx::req::get_body_data";
+pub const NGX_REQ_GET_BODY_FILE_NAME: &str = "ngx::req::get_body_file";
 pub const NGX_REQ_IS_INTERNAL_NAME: &str = "ngx::req::is_internal";
 pub const NGX_REQ_START_TIME_NAME: &str = "ngx::req::start_time";
 pub const NGX_IS_SUBREQUEST_NAME: &str = "ngx::is_subrequest";
@@ -416,6 +420,21 @@ const PHASE_REQ_GET_POST_ARGS: &[NgxPhase] = &[
     NgxPhase::BodyFilter,
     NgxPhase::Log,
 ];
+
+/// `ngx.req.read_body` / `ngx.req.discard_body`.
+const PHASE_REQ_READ_BODY: &[NgxPhase] = &[NgxPhase::Rewrite, NgxPhase::Access, NgxPhase::Content];
+
+/// `ngx.req.get_body_data`.
+const PHASE_REQ_GET_BODY_DATA: &[NgxPhase] = &[
+    NgxPhase::Rewrite,
+    NgxPhase::Access,
+    NgxPhase::Content,
+    NgxPhase::Log,
+];
+
+/// `ngx.req.get_body_file`.
+const PHASE_REQ_GET_BODY_FILE: &[NgxPhase] =
+    &[NgxPhase::Rewrite, NgxPhase::Access, NgxPhase::Content];
 
 /// `ngx.req.get_headers`.
 const PHASE_REQ_GET_HEADERS: &[NgxPhase] = &[
@@ -995,6 +1014,26 @@ const MANIFEST: &[HostManifestEntry] = &[
         "ngx.req.get_post_args",
         PHASE_REQ_GET_POST_ARGS,
     ),
+    request_async_entry(
+        NGX_REQ_READ_BODY_NAME,
+        "ngx.req.read_body",
+        PHASE_REQ_READ_BODY,
+    ),
+    request_entry(
+        NGX_REQ_DISCARD_BODY_NAME,
+        "ngx.req.discard_body",
+        PHASE_REQ_READ_BODY,
+    ),
+    request_entry(
+        NGX_REQ_GET_BODY_DATA_NAME,
+        "ngx.req.get_body_data",
+        PHASE_REQ_GET_BODY_DATA,
+    ),
+    request_entry(
+        NGX_REQ_GET_BODY_FILE_NAME,
+        "ngx.req.get_body_file",
+        PHASE_REQ_GET_BODY_FILE,
+    ),
     request_entry(
         NGX_REQ_IS_INTERNAL_NAME,
         "ngx.req.is_internal",
@@ -1363,6 +1402,21 @@ const fn request_entry(
     }
 }
 
+const fn request_async_entry(
+    name: &'static str,
+    openresty_name: &'static str,
+    phases: &'static [NgxPhase],
+) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::Request,
+        sync: HostSyncKind::Async,
+        phases,
+        capabilities: REQUEST_READ_CAPABILITIES,
+        openresty_name,
+    }
+}
+
 const fn request_write_entry(
     name: &'static str,
     openresty_name: &'static str,
@@ -1691,6 +1745,16 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             NGX_REQ_GET_POST_ARGS_NAME,
             vec![HostParamSchema::value("max_args", HostTypeSchema::Unknown)],
             HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+        ),
+        NGX_REQ_READ_BODY_NAME => nullary(NGX_REQ_READ_BODY_NAME, HostTypeSchema::Null),
+        NGX_REQ_DISCARD_BODY_NAME => nullary(NGX_REQ_DISCARD_BODY_NAME, HostTypeSchema::Null),
+        NGX_REQ_GET_BODY_DATA_NAME => nullary(
+            NGX_REQ_GET_BODY_DATA_NAME,
+            HostTypeSchema::Optional(Box::new(HostTypeSchema::String)),
+        ),
+        NGX_REQ_GET_BODY_FILE_NAME => nullary(
+            NGX_REQ_GET_BODY_FILE_NAME,
+            HostTypeSchema::Optional(Box::new(HostTypeSchema::String)),
         ),
         NGX_REQ_IS_INTERNAL_NAME => nullary(NGX_REQ_IS_INTERNAL_NAME, HostTypeSchema::Bool),
         NGX_REQ_START_TIME_NAME => nullary(NGX_REQ_START_TIME_NAME, HostTypeSchema::Float),
@@ -2428,6 +2492,7 @@ pub const LOG_ALLOWED_NAMES: &[&str] = &[
     NGX_REQ_GET_HEADERS_NAME,
     NGX_REQ_GET_URI_ARGS_NAME,
     NGX_REQ_GET_POST_ARGS_NAME,
+    NGX_REQ_GET_BODY_DATA_NAME,
     NGX_REQ_IS_INTERNAL_NAME,
     NGX_REQ_START_TIME_NAME,
     NGX_IS_SUBREQUEST_NAME,

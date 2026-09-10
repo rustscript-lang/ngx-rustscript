@@ -852,3 +852,41 @@ ngx_uint_t ngx_rustscript_test_cmcf_variables_nelts(void)
 {
     return test_cmcf.variables.nelts;
 }
+
+ngx_int_t ngx_http_read_client_request_body(
+    ngx_http_request_t *r,
+    ngx_http_client_body_handler_pt handler
+)
+{
+    if (r == NULL) {
+        return NGX_ERROR;
+    }
+    if (r->main == NULL) {
+        r->main = r;
+    }
+    r->main->count++;
+    if (handler) {
+        handler(r);
+    }
+    return NGX_OK;
+}
+
+ngx_int_t ngx_http_discard_request_body(ngx_http_request_t *r)
+{
+    if (r == NULL) {
+        return NGX_ERROR;
+    }
+    r->discard_body = 1;
+    return NGX_OK;
+}
+
+void ngx_http_read_client_request_body_handler(ngx_http_request_t *r)
+{
+    (void) r;
+}
+
+void ngx_http_finalize_request(ngx_http_request_t *r, ngx_int_t rc)
+{
+    (void) r;
+    (void) rc;
+}

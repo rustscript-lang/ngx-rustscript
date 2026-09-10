@@ -20,6 +20,9 @@ pub const HOOK_STRINGS: &[&str] = &[
     "NGX_RUSTSCRIPT_TEST_LOG_PANIC",
     "NGX_RUSTSCRIPT_LOG_WAIT_PROOF",
     "LOG_WAIT_PROOF",
+    "NGX_RUSTSCRIPT_BODY_COUNT_PROOF",
+    "BODY_COUNT_PROOF",
+    "BODY_WAIT_ARMED",
 ];
 
 pub const HOOK_SOURCE_IDENTS: &[&str] = &[
@@ -35,6 +38,10 @@ pub const HOOK_SOURCE_IDENTS: &[&str] = &[
     "WAIT_EVENTFD_ARMS",
     "WAIT_COUNT_INCS",
     "WAIT_TIMER_ARMS",
+    "NGX_RUSTSCRIPT_BODY_COUNT_PROOF",
+    "BODY_COUNT_PROOF",
+    "BODY_WAIT_ARMED",
+    "proof_body_count",
 ];
 
 const CARGO_BUILD_TIMEOUT: Duration = Duration::from_secs(1500);

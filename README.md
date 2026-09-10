@@ -234,6 +234,15 @@ use ngx;
 ngx::sleep_ms(30);
 ```
 
+Read a request body (nullary like OpenResty; `get_post_args` still takes explicit `null` for the max-args adaptation):
+
+```rss
+use ngx;
+ngx::req::read_body();
+let data = ngx::req::get_body_data();
+ngx::say(data);
+```
+
 Two sequential sleeps:
 
 ```rss

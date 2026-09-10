@@ -1172,6 +1172,7 @@ fn log_proof_env_is_inert_on_ordinary_module() {
             &[
                 ("NGX_RUSTSCRIPT_TEST_LOG_PANIC", "1"),
                 ("NGX_RUSTSCRIPT_LOG_WAIT_PROOF", "1"),
+                ("NGX_RUSTSCRIPT_BODY_COUNT_PROOF", "1"),
             ],
         ),
     );
@@ -1207,6 +1208,10 @@ fn log_proof_env_is_inert_on_ordinary_module() {
     assert!(
         !error_text.contains("LOG_WAIT_PROOF"),
         "runtime wait-proof env must do nothing without compile-time hooks:\n{error_text}"
+    );
+    assert!(
+        !error_text.contains("BODY_COUNT_PROOF") && !error_text.contains("BODY_WAIT_ARMED"),
+        "runtime body-count-proof env must do nothing without compile-time hooks:\n{error_text}"
     );
     let (status, response) = http_get(port, "/follow/");
     assert_eq!(status, 200, "follow-up request must succeed:\n{response}");

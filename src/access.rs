@@ -13,8 +13,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use nginx_sys::{
-    ngx_handle_read_event, ngx_http_block_reading, ngx_http_request_t, ngx_int_t, ngx_post_event,
-    ngx_posted_events,
+    ngx_handle_read_event, ngx_http_block_reading, ngx_http_event_handler_pt, ngx_http_request_t,
+    ngx_int_t, ngx_post_event, ngx_posted_events,
 };
 use ngx::core::Status;
 use ngx::ffi::NGX_LOG_ERR;
@@ -39,6 +39,16 @@ unsafe extern "C" {
     ) -> ngx_int_t;
     fn ngx_rustscript_c_request_main_count_inc(r: *mut ngx_http_request_t);
     fn ngx_rustscript_c_test_reading_and_note_client_closed(r: *mut ngx_http_request_t);
+    fn ngx_rustscript_c_block_reading(r: *mut ngx_http_request_t);
+}
+
+/// Request-owned body-wait callback metadata. The generic nginx_op cell never
+/// stores NGINX read handlers.
+#[derive(Default)]
+pub(crate) struct BodyWaitState {
+    pub orig_read_handler: ngx_http_event_handler_pt,
+    pub armed: bool,
+    pub finalized: bool,
 }
 
 struct RequestPhaseCtx {
@@ -47,6 +57,8 @@ struct RequestPhaseCtx {
     access: RefCell<Option<AccessExec>>,
     content: RefCell<Option<AccessExec>>,
     output: RefCell<Option<crate::host::OutputState>>,
+    nginx_op: RefCell<crate::nginx_op::NginxOpState>,
+    body_wait: RefCell<BodyWaitState>,
 }
 
 impl RequestPhaseCtx {
@@ -134,6 +146,66 @@ pub(crate) fn try_with_module_output<R>(
     Some(f(&mut ctx.output.borrow_mut()))
 }
 
+pub(crate) fn try_with_module_nginx_op<R>(
+    raw: *mut ngx_http_request_t,
+    f: impl FnOnce(&mut crate::nginx_op::NginxOpState) -> R,
+) -> Option<R> {
+    if raw.is_null() {
+        return None;
+    }
+    unsafe {
+        if (*raw).ctx.is_null() {
+            return None;
+        }
+    }
+    let module = Module::module();
+    if module.ctx_index == nginx_sys::ngx_uint_t::MAX {
+        return None;
+    }
+    // SAFETY: `raw` is a live request with a non-null ctx array and a valid
+    // module ctx_index. Body callbacks run only while the request is live.
+    let request = unsafe { Request::from_ngx_http_request(raw) };
+    let ctx = request.get_module_ctx::<RequestPhaseCtx>(module)?;
+    Some(f(&mut ctx.nginx_op.borrow_mut()))
+}
+
+pub(crate) fn try_with_module_body_wait<R>(
+    raw: *mut ngx_http_request_t,
+    f: impl FnOnce(&mut BodyWaitState) -> R,
+) -> Option<R> {
+    if raw.is_null() {
+        return None;
+    }
+    unsafe {
+        if (*raw).ctx.is_null() {
+            return None;
+        }
+    }
+    let module = Module::module();
+    if module.ctx_index == nginx_sys::ngx_uint_t::MAX {
+        return None;
+    }
+    // SAFETY: `raw` is a live request with a non-null ctx array and a valid
+    // module ctx_index. Body-wait callbacks run only while the request is live.
+    let request = unsafe { Request::from_ngx_http_request(raw) };
+    let ctx = request.get_module_ctx::<RequestPhaseCtx>(module)?;
+    Some(f(&mut ctx.body_wait.borrow_mut()))
+}
+
+pub(crate) fn disarm_body_wait(raw: *mut ngx_http_request_t) {
+    try_with_module_body_wait(raw, |wait| {
+        wait.armed = false;
+        wait.orig_read_handler = None;
+    });
+    unsafe {
+        ngx_rustscript_c_block_reading(raw);
+    }
+}
+
+pub(crate) fn nginx_op_owns_read_event(raw: *mut ngx_http_request_t) -> bool {
+    try_with_module_body_wait(raw, |wait| wait.armed).unwrap_or(false)
+}
+
 struct WorkerAccess {
     ids: IdentityRegistry<u64>,
     live: IdentityRegistry<*mut ngx_http_request_t>,
@@ -193,6 +265,8 @@ pub(crate) fn ensure_shared_ngx_ctx(
         access: RefCell::new(None),
         content: RefCell::new(None),
         output: RefCell::new(None),
+        nginx_op: RefCell::new(crate::nginx_op::NginxOpState::new()),
+        body_wait: RefCell::new(BodyWaitState::default()),
     };
     let ctx_ptr = request.pool().allocate(phase_ctx);
     if ctx_ptr.is_null() {
@@ -213,6 +287,7 @@ impl Drop for RequestPhaseCtx {
         // `r->pool = NULL`. Cancel flush wait and restore the write handler
         // while `r` is still the request being freed, then drop the VM.
         crate::host::cleanup_output_slot(self.raw, self.output.get_mut());
+        self.nginx_op.get_mut().cancel();
         if let Some(exec) = self.access.get_mut() {
             cleanup_access_ctx(exec);
         }
@@ -408,6 +483,8 @@ fn run_request_owned_phase(
                 access: RefCell::new(None),
                 content: RefCell::new(None),
                 output: RefCell::new(None),
+                nginx_op: RefCell::new(crate::nginx_op::NginxOpState::new()),
+                body_wait: RefCell::new(BodyWaitState::default()),
             };
             let ctx_ptr = request.pool().allocate(phase_ctx);
             if ctx_ptr.is_null() {
@@ -488,7 +565,7 @@ fn finish_from_raw(raw: *mut ngx_http_request_t, slot: PhaseSlot) -> Status {
                 );
                 return HTTPStatus::INTERNAL_SERVER_ERROR.into();
             }
-            if !arm_read_close(raw) {
+            if !nginx_op_owns_read_event(raw) && !arm_read_close(raw) {
                 unregister_exact(identity, request_id, Some(raw));
                 ngx_log_error!(
                     NGX_LOG_ERR,
@@ -522,7 +599,14 @@ fn complete_phase_status(
             #[cfg(ngx_rustscript_integration_hooks)]
             crate::request_state::record_wait_count_inc();
             unsafe { ngx_rustscript_c_request_main_count_inc(raw) };
+            #[cfg(ngx_rustscript_integration_hooks)]
+            crate::request_state::proof_body_count(raw, "content_suspend", None);
             Status::NGX_DONE
+        }
+        AccessStatus::Again if slot == PhaseSlot::Access => {
+            #[cfg(ngx_rustscript_integration_hooks)]
+            crate::request_state::proof_body_count(raw, "access_suspend", None);
+            Status::NGX_AGAIN
         }
         AccessStatus::Ok if slot == PhaseSlot::Content => {
             let rc = send_empty_last(raw);
@@ -670,7 +754,7 @@ fn apply_on_request(
     {
         return ReadyEffect::Ignored;
     }
-    crate::runtime::with_worker(|worker| {
+    let effect = crate::runtime::with_worker(|worker| {
         WORKER_ACCESS.with(|state| {
             let mut state = state.borrow_mut();
             enter_phase_scope(raw, identity, slot.phase(), || {
@@ -681,7 +765,19 @@ fn apply_on_request(
             })
         })
     })
-    .unwrap_or(ReadyEffect::Ignored)
+    .unwrap_or(ReadyEffect::Ignored);
+    #[cfg(ngx_rustscript_integration_hooks)]
+    if matches!(
+        effect,
+        ReadyEffect::Halted | ReadyEffect::Failed | ReadyEffect::WaitingAgain
+    ) {
+        let stage = match slot {
+            PhaseSlot::Content => "content_resume",
+            PhaseSlot::Access => "access_resume",
+        };
+        crate::request_state::proof_body_count(raw, stage, None);
+    }
+    effect
 }
 
 fn current_identity_on_request(raw: *mut ngx_http_request_t) -> Option<RequestIdentity> {

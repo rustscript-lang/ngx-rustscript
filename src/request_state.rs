@@ -12,7 +12,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use ngx::core::Status;
+#[cfg(ngx_rustscript_integration_hooks)]
+use ngx::ffi::NGX_LOG_ERR;
 use ngx::http::HTTPStatus;
+#[cfg(ngx_rustscript_integration_hooks)]
+use ngx::http::Request;
+#[cfg(ngx_rustscript_integration_hooks)]
+use ngx::ngx_log_error;
 use tokio::runtime::Handle;
 use vm::{Program, Vm, VmError, VmStatus};
 
@@ -59,6 +65,63 @@ pub fn record_wait_count_inc() {
 #[allow(dead_code)]
 pub fn record_wait_timer_arm() {
     WAIT_TIMER_ARMS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record `r->main->count` around the body-read lease. Compiled out of ordinary artifacts.
+#[cfg(ngx_rustscript_integration_hooks)]
+pub(crate) fn proof_body_count(
+    raw: *mut nginx_sys::ngx_http_request_t,
+    stage: &'static str,
+    rc: Option<nginx_sys::ngx_int_t>,
+) {
+    if std::env::var_os("NGX_RUSTSCRIPT_BODY_COUNT_PROOF").is_none() || raw.is_null() {
+        return;
+    }
+    unsafe extern "C" {
+        fn ngx_rustscript_c_request_main_count(r: *const nginx_sys::ngx_http_request_t) -> u32;
+    }
+    // SAFETY: hook sites run on the worker thread with a live request.
+    let count = unsafe { ngx_rustscript_c_request_main_count(raw) };
+    let request = unsafe { Request::from_ngx_http_request(raw) };
+    let uri = request
+        .unparsed_uri()
+        .to_str()
+        .unwrap_or("-")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_graphic() && c != ',' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let extra = match rc {
+        None => String::new(),
+        Some(code) if code == nginx_sys::NGX_OK as nginx_sys::ngx_int_t => " rc=OK".to_string(),
+        Some(code) if code == nginx_sys::NGX_AGAIN as nginx_sys::ngx_int_t => {
+            " rc=AGAIN".to_string()
+        }
+        Some(code) if code == nginx_sys::NGX_ERROR as nginx_sys::ngx_int_t => {
+            " rc=ERROR".to_string()
+        }
+        Some(code) if code == nginx_sys::NGX_HTTP_CLIENT_CLOSED_REQUEST as nginx_sys::ngx_int_t => {
+            " rc=499".to_string()
+        }
+        Some(code) if code == nginx_sys::NGX_HTTP_REQUEST_TIME_OUT as nginx_sys::ngx_int_t => {
+            " rc=408".to_string()
+        }
+        Some(code) => format!(" rc={code}"),
+    };
+    let msg = format!("BODY_COUNT_PROOF stage={stage} count={count} uri={uri}{extra}");
+    ngx_log_error!(NGX_LOG_ERR, request.log(), "{msg}");
+    if stage == "wait_armed" {
+        ngx_log_error!(
+            NGX_LOG_ERR,
+            request.log(),
+            "BODY_WAIT_ARMED count={count} uri={uri}"
+        );
+    }
 }
 
 /// Map a VM result onto the log-phase synchronous fail-closed policy.

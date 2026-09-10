@@ -990,6 +990,185 @@ void ngx_rustscript_c_set_content_length(ngx_http_request_t *r, off_t n)
     r->headers_out.content_length_n = n;
 }
 
+unsigned int ngx_rustscript_c_request_main_count(const ngx_http_request_t *r)
+{
+    if (r == NULL || r->main == NULL) {
+        return 0;
+    }
+    return r->main->count;
+}
+
+void ngx_rustscript_c_request_main_count_dec(ngx_http_request_t *r)
+{
+    if (r == NULL || r->main == NULL) {
+        return;
+    }
+    if (r->main->count > 0) {
+        r->main->count--;
+    }
+}
+
+ngx_int_t ngx_rustscript_c_read_client_request_body(
+    ngx_http_request_t *r,
+    void (*handler)(ngx_http_request_t *r)
+)
+{
+    ngx_int_t rc;
+
+    if (r == NULL) {
+        return NGX_ERROR;
+    }
+#ifndef NGX_RUSTSCRIPT_ABI_PROBE
+    rc = ngx_http_read_client_request_body(r, handler);
+    /* Core maps premature EOF to 400 + c->error. Confirmed client close is 499. */
+    if (rc == NGX_HTTP_BAD_REQUEST && r->connection != NULL && r->connection->error) {
+        return NGX_HTTP_CLIENT_CLOSED_REQUEST;
+    }
+    return rc;
+#else
+    (void)handler;
+    return NGX_ERROR;
+#endif
+}
+
+ngx_int_t ngx_rustscript_c_discard_request_body(ngx_http_request_t *r)
+{
+    if (r == NULL) {
+        return NGX_ERROR;
+    }
+#ifndef NGX_RUSTSCRIPT_ABI_PROBE
+    return ngx_http_discard_request_body(r);
+#else
+    return NGX_ERROR;
+#endif
+}
+
+ngx_http_event_handler_pt
+ngx_rustscript_c_get_read_event_handler(ngx_http_request_t *r)
+{
+    if (r == NULL) {
+        return NULL;
+    }
+    return r->read_event_handler;
+}
+
+void ngx_rustscript_c_set_read_event_handler(ngx_http_request_t *r,
+                                            ngx_http_event_handler_pt handler)
+{
+    if (r == NULL) {
+        return;
+    }
+    r->read_event_handler = handler;
+}
+
+unsigned int ngx_rustscript_c_connection_error(const ngx_http_request_t *r)
+{
+    if (r == NULL || r->connection == NULL) {
+        return 0;
+    }
+    return r->connection->error != 0;
+}
+
+unsigned int ngx_rustscript_c_request_terminated(const ngx_http_request_t *r)
+{
+    if (r == NULL || r->main == NULL || r->connection == NULL) {
+        return 1;
+    }
+    return 0;
+}
+
+void ngx_rustscript_c_block_reading(ngx_http_request_t *r)
+{
+    if (r == NULL) {
+        return;
+    }
+#ifndef NGX_RUSTSCRIPT_ABI_PROBE
+    r->read_event_handler = ngx_http_block_reading;
+#endif
+}
+
+#ifndef NGX_RUSTSCRIPT_ABI_PROBE
+void ngx_rustscript_continue_body_read(ngx_http_request_t *r);
+void ngx_rustscript_on_body_wait_closed(ngx_http_request_t *r);
+
+static void ngx_rustscript_c_body_wait_read_handler(ngx_http_request_t *r)
+{
+    ngx_connection_t *c;
+    ngx_event_t *rev;
+    char buf[1];
+    ssize_t n;
+    ngx_err_t err;
+
+    if (r == NULL) {
+        return;
+    }
+    c = r->connection;
+    rev = (c != NULL) ? c->read : NULL;
+
+    /* Timeout must reach NGINX's body handler so the status stays 408. */
+    if (rev != NULL && rev->timedout) {
+        ngx_rustscript_continue_body_read(r);
+        return;
+    }
+
+    if (c != NULL && (c->error || (rev != NULL && (rev->error || rev->pending_eof)))) {
+        ngx_rustscript_on_body_wait_closed(r);
+        return;
+    }
+
+    if (c != NULL && c->fd != (ngx_socket_t) -1) {
+        n = recv(c->fd, buf, 1, MSG_PEEK);
+        err = ngx_socket_errno;
+        if (n == 0 || (n == -1 && err != NGX_EAGAIN && err != NGX_EINTR)) {
+            ngx_rustscript_on_body_wait_closed(r);
+            return;
+        }
+    }
+
+    ngx_rustscript_continue_body_read(r);
+}
+
+ngx_int_t ngx_rustscript_c_arm_body_wait(ngx_http_request_t *r)
+{
+    ngx_event_t *rev;
+
+    if (r == NULL || r->connection == NULL || r->connection->read == NULL) {
+        return NGX_ERROR;
+    }
+    r->read_event_handler = ngx_rustscript_c_body_wait_read_handler;
+    rev = r->connection->read;
+    if (rev->ready) {
+        ngx_post_event(rev, &ngx_posted_events);
+        return NGX_OK;
+    }
+    if (ngx_handle_read_event(rev, 0) != NGX_OK) {
+        return NGX_ERROR;
+    }
+    return NGX_OK;
+}
+
+void ngx_rustscript_c_finalize_client_closed(ngx_http_request_t *r)
+{
+    if (r == NULL) {
+        return;
+    }
+    r->lingering_close = 1;
+    ngx_rustscript_c_note_log_status(r, NGX_HTTP_CLIENT_CLOSED_REQUEST);
+    ngx_http_finalize_request(r, NGX_HTTP_CLIENT_CLOSED_REQUEST);
+}
+#else
+ngx_int_t ngx_rustscript_c_arm_body_wait(ngx_http_request_t *r)
+{
+    (void)r;
+    return NGX_ERROR;
+}
+
+void ngx_rustscript_c_finalize_client_closed(ngx_http_request_t *r)
+{
+    (void)r;
+}
+#endif
+
 #ifndef NGX_RUSTSCRIPT_NO_C_PUBLIC_ALIAS
 unsigned int ngx_rustscript_request_is_internal(const ngx_http_request_t *r)
 {

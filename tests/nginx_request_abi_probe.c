@@ -19,6 +19,12 @@ void ngx_rustscript_c_request_set_uri_flags(ngx_http_request_t *r, unsigned int 
 void ngx_rustscript_c_headers_out_reset_specials(ngx_http_request_t *r);
 time_t ngx_rustscript_c_parse_http_time(const u_char *data, size_t len);
 unsigned int ngx_rustscript_c_variable_not_found(const ngx_http_variable_value_t *vv);
+unsigned int ngx_rustscript_c_request_main_count(const ngx_http_request_t *r);
+void ngx_rustscript_c_request_main_count_inc(ngx_http_request_t *r);
+void ngx_rustscript_c_request_main_count_dec(ngx_http_request_t *r);
+ngx_int_t ngx_rustscript_c_read_client_request_body(
+    ngx_http_request_t *r, void (*handler)(ngx_http_request_t *r));
+ngx_int_t ngx_rustscript_c_discard_request_body(ngx_http_request_t *r);
 
 static void fail(const char *msg)
 {
@@ -293,6 +299,26 @@ int main(void)
         {
             fail("valid Content-Length must parse");
         }
+    }
+
+    r.main = &r;
+    r.count = 1;
+    if (ngx_rustscript_c_request_main_count(&r) != 1) {
+        fail("main count getter must read r->main->count");
+    }
+    ngx_rustscript_c_request_main_count_inc(&r);
+    if (ngx_rustscript_c_request_main_count(&r) != 2) {
+        fail("main count inc must add one");
+    }
+    ngx_rustscript_c_request_main_count_dec(&r);
+    if (ngx_rustscript_c_request_main_count(&r) != 1) {
+        fail("main count dec must subtract one");
+    }
+    if (ngx_rustscript_c_read_client_request_body(NULL, NULL) != NGX_ERROR) {
+        fail("NULL read_body must be NGX_ERROR");
+    }
+    if (ngx_rustscript_c_discard_request_body(NULL) != NGX_ERROR) {
+        fail("NULL discard_body must be NGX_ERROR");
     }
 
     puts("ok");

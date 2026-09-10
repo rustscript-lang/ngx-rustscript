@@ -10,6 +10,7 @@ pub mod config;
 pub mod content;
 pub mod host;
 pub mod log;
+pub mod nginx_op;
 pub mod notify;
 pub mod phase;
 pub mod read_close;

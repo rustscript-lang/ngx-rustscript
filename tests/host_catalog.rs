@@ -50,8 +50,8 @@ fn runtime_host_names_are_unique() {
     );
     assert_eq!(
         names.len(),
-        182,
-        "production runtime host count must stay 182"
+        186,
+        "production runtime host count must stay 186"
     );
 }
 
@@ -177,7 +177,11 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
                 );
             }
             HostFamily::Request => {
-                assert_eq!(entry.sync, HostSyncKind::Sync);
+                if entry.name == "ngx::req::read_body" {
+                    assert_eq!(entry.sync, HostSyncKind::Async);
+                } else {
+                    assert_eq!(entry.sync, HostSyncKind::Sync);
+                }
                 assert!(
                     entry.capabilities.contains(&HostCapability::RequestRead)
                         || entry.capabilities.contains(&HostCapability::RequestWrite),

@@ -721,3 +721,78 @@ fn graceful_quit_with_long_sleep_exits_within_bound() {
         start.elapsed()
     );
 }
+
+#[test]
+fn nginx_op_cancel_and_stale_callback_are_exactly_once() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    use ngx_rustscript::nginx_op::{NginxOpOutcome, NginxOpState};
+
+    fn poll_once<F: Future>(fut: Pin<&mut F>) -> Poll<F::Output> {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        fut.poll(&mut cx)
+    }
+
+    let identity = RequestIdentity::new(9, 3);
+    let mut state = NginxOpState::new();
+    let _cell = state.begin(identity);
+    let mut fut = state.observe().expect("observe");
+    assert!(matches!(poll_once(Pin::new(&mut fut)), Poll::Pending));
+    assert!(state.complete_from_callback(NginxOpOutcome::Done));
+    assert!(!state.complete_from_callback(NginxOpOutcome::Special(499)));
+    match poll_once(Pin::new(&mut fut)) {
+        Poll::Ready(Ok(NginxOpOutcome::Done)) => {}
+        other => panic!("expected Done, got {other:?}"),
+    }
+
+    let mut state = NginxOpState::new();
+    let _cell = state.begin(identity);
+    let mut fut = state.observe().expect("observe");
+    state.cancel();
+    assert!(!state.complete_from_callback(NginxOpOutcome::Done));
+    match poll_once(Pin::new(&mut fut)) {
+        Poll::Ready(Ok(NginxOpOutcome::Cancelled)) => {}
+        other => panic!("expected Cancelled, got {other:?}"),
+    }
+}
+
+/// Helper-only saturating arithmetic on a zeroed request.
+///
+/// This is not the NGINX 1.30.4 body-read main-count lease. That contract is
+/// asserted by `tests/body_hooks.rs` against a pinned worker.
+#[test]
+fn request_main_count_c_helpers_are_saturating_and_not_the_body_lease() {
+    use std::mem::MaybeUninit;
+
+    use nginx_sys::ngx_http_request_t;
+
+    unsafe extern "C" {
+        fn ngx_rustscript_c_request_main_count(r: *const ngx_http_request_t) -> u32;
+        fn ngx_rustscript_c_request_main_count_inc(r: *mut ngx_http_request_t);
+        fn ngx_rustscript_c_request_main_count_dec(r: *mut ngx_http_request_t);
+    }
+
+    let mut req = Box::new(unsafe { MaybeUninit::<ngx_http_request_t>::zeroed().assume_init() });
+    let ptr = (&mut *req) as *mut ngx_http_request_t;
+    req.main = ptr;
+    unsafe {
+        assert_eq!(ngx_rustscript_c_request_main_count(ptr), 0);
+        ngx_rustscript_c_request_main_count_inc(ptr);
+        assert_eq!(ngx_rustscript_c_request_main_count(ptr), 1);
+        ngx_rustscript_c_request_main_count_inc(ptr);
+        assert_eq!(ngx_rustscript_c_request_main_count(ptr), 2);
+        ngx_rustscript_c_request_main_count_dec(ptr);
+        assert_eq!(ngx_rustscript_c_request_main_count(ptr), 1);
+        ngx_rustscript_c_request_main_count_dec(ptr);
+        assert_eq!(ngx_rustscript_c_request_main_count(ptr), 0);
+        ngx_rustscript_c_request_main_count_dec(ptr);
+        assert_eq!(
+            ngx_rustscript_c_request_main_count(ptr),
+            0,
+            "count must not underflow"
+        );
+    }
+}

@@ -88,8 +88,8 @@ const LIST_HOSTS: &[&str] = &[
 fn list_and_maintenance_hosts_are_catalogued() {
     assert_eq!(
         production_runtime_host_names().len(),
-        182,
-        "Tasks 8/14/16/17/18 plus 5 output hosts"
+        186,
+        "182 previous hosts plus 4 request-body hosts"
     );
     let key = ResourceTypeKey::new("ngx.shared.dict").unwrap();
     let catalog = ngx_host_catalog();

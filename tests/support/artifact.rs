@@ -63,6 +63,9 @@ pub const FORBIDDEN_DEFINED_NGINX_STUBS: &[&str] = &[
     "ngx_http_output_filter",
     "ngx_http_set_content_type",
     "ngx_handle_write_event",
+    "ngx_http_read_client_request_body",
+    "ngx_http_discard_request_body",
+    "ngx_http_finalize_request",
 ];
 
 /// Production cdylib/add-dynamic module must define these C ABI shims.
@@ -71,6 +74,8 @@ pub const REQUIRED_DEFINED_REQUEST_SHIMS: &[&str] = &[
     "ngx_rustscript_request_headers_sent",
     "ngx_rustscript_request_reading_body",
     "ngx_rustscript_request_discard_body",
+    "ngx_rustscript_continue_body_read",
+    "ngx_rustscript_on_body_wait_closed",
 ];
 
 /// Test-only C setters must never appear in production artifacts.

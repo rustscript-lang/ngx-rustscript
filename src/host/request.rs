@@ -4,14 +4,12 @@
 use core::ffi::c_uint;
 
 use nginx_sys::{
-    ngx_buf_t, ngx_chain_t, ngx_http_connection_t, ngx_http_request_body_t, ngx_http_request_t,
-    ngx_int_t, ngx_list_part_t, ngx_list_push, ngx_list_t, ngx_palloc, ngx_pool_t, ngx_str_t,
-    ngx_table_elt_t, ngx_uint_t, off_t, NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD,
-    NGX_HTTP_LOCK,
-    NGX_HTTP_MKCOL, NGX_HTTP_MOVE, NGX_HTTP_OPTIONS, NGX_HTTP_PATCH, NGX_HTTP_POST,
-    NGX_HTTP_PROPFIND, NGX_HTTP_PROPPATCH, NGX_HTTP_PUT, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK,
-    NGX_HTTP_VERSION_10, NGX_HTTP_VERSION_11, NGX_HTTP_VERSION_20, NGX_HTTP_VERSION_30,
-    NGX_HTTP_VERSION_9,
+    ngx_buf_t, ngx_chain_t, ngx_http_connection_t, ngx_http_request_t, ngx_int_t, ngx_list_part_t,
+    ngx_list_push, ngx_list_t, ngx_palloc, ngx_pool_t, ngx_str_t, ngx_table_elt_t, ngx_uint_t, off_t,
+    NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD, NGX_HTTP_LOCK, NGX_HTTP_MKCOL,
+    NGX_HTTP_MOVE, NGX_HTTP_OPTIONS, NGX_HTTP_PATCH, NGX_HTTP_POST, NGX_HTTP_PROPFIND,
+    NGX_HTTP_PROPPATCH, NGX_HTTP_PUT, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK, NGX_HTTP_VERSION_10,
+    NGX_HTTP_VERSION_11, NGX_HTTP_VERSION_20, NGX_HTTP_VERSION_30, NGX_HTTP_VERSION_9,
 };
 use ngx::http::Request;
 use pd_host_function::pd_host_function;
@@ -665,58 +663,6 @@ fn copy_raw_header(raw: &ngx_http_request_t, no_request_line: bool) -> VmResult<
     Ok(bytes_as_string(data))
 }
 
-fn post_args_error(message: &str) -> VmError {
-    VmError::HostError(format!("ngx::req::get_post_args {message}"))
-}
-
-fn copy_in_memory_body(body: &ngx_http_request_body_t) -> VmResult<Vec<u8>> {
-    if !body.temp_file.is_null() {
-        return Err(post_args_error(
-            "file-backed request body is deferred to Task 10",
-        ));
-    }
-    if body.rest > 0 {
-        return Err(post_args_error(
-            "incomplete request body is deferred to Task 10",
-        ));
-    }
-    let mut out = Vec::new();
-    let mut seen: Vec<*mut ngx_chain_t> = Vec::new();
-    let mut cl = body.bufs;
-    while !cl.is_null() {
-        if seen.iter().any(|&ptr| std::ptr::eq(ptr, cl)) {
-            return Err(post_args_error("malformed cyclic body buffer chain"));
-        }
-        if seen.len() >= MAX_LIST_PARTS {
-            return Err(post_args_error("body buffer chain exceeds the safety cap"));
-        }
-        seen.push(cl);
-        // SAFETY: cl is a non-null, acyclic request-body chain node.
-        let chain = unsafe { &*cl };
-        if chain.buf.is_null() {
-            return Err(post_args_error("malformed null body buffer"));
-        }
-        let buf = unsafe { &*chain.buf };
-        if buf.pos.is_null() || buf.last.is_null() {
-            return Err(post_args_error("malformed body buffer"));
-        }
-        let pos = buf.pos as usize;
-        let last = buf.last as usize;
-        if last < pos {
-            return Err(post_args_error("inverted body buffer range"));
-        }
-        let len = last - pos;
-        if out.len().saturating_add(len) > MAX_COPY_BYTES {
-            return Err(post_args_error("exceeds the 65536-byte copy limit"));
-        }
-        if len > 0 {
-            out.extend_from_slice(unsafe { std::slice::from_raw_parts(buf.pos, len) });
-        }
-        cl = chain.next;
-    }
-    Ok(out)
-}
-
 /// Current request method name. Custom methods keep the textual token.
 #[pd_host_function(name = "ngx::req::get_method")]
 pub fn get_method() -> VmResult<CallOutcome> {
@@ -772,7 +718,7 @@ pub fn get_uri_args(max_args: &Value) -> VmResult<CallOutcome> {
     })
 }
 
-/// POST args from an already-read in-memory body. Async/file reads are Task 10.
+/// POST args from a completed request body (memory or bounded temp file).
 #[pd_host_function(name = "ngx::req::get_post_args")]
 pub fn get_post_args(max_args: &Value) -> VmResult<CallOutcome> {
     let max = clamp_count(
@@ -782,21 +728,12 @@ pub fn get_post_args(max_args: &Value) -> VmResult<CallOutcome> {
         HARD_MAX_ARGS,
     )?;
     with_request(|request| {
-        let raw = request.as_ref();
-        if raw.request_body.is_null() {
-            return Err(post_args_error(
-                "requires the request body to be read first (Task 10)",
+        if super::body::body_was_discarded(request.as_ref()) {
+            return Err(VmError::HostError(
+                "ngx::req::get_post_args request body was discarded".to_string(),
             ));
         }
-        if request_flag(raw, ngx_rustscript_request_reading_body) {
-            return Err(post_args_error("request body is still being read (Task 10)"));
-        }
-        if request_flag(raw, ngx_rustscript_request_discard_body) {
-            return Err(post_args_error("discarded request body is deferred to Task 10"));
-        }
-        // SAFETY: request_body is non-null after the unread check.
-        let body = unsafe { &*raw.request_body };
-        let bytes = copy_in_memory_body(body)?;
+        let bytes = super::body::copy_completed_body(request.as_ref(), "ngx::req::get_post_args")?;
         let (args, truncated) = super::codec::decode_query_args(&bytes, max);
         ret(result_map("args", args, truncated))
     })

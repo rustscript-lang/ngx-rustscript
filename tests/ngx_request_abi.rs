@@ -133,9 +133,7 @@ fn c_headers_sent_reading_body_and_discard_body_follow_c_fields() {
     let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
         .expect_err("discard_body must error");
     assert!(
-        err.to_ascii_lowercase().contains("discard")
-            || err.to_ascii_lowercase().contains("body")
-            || err.contains("Task 10"),
+        err.to_ascii_lowercase().contains("discard") || err.to_ascii_lowercase().contains("body"),
         "got {err}"
     );
     assert!(!expect_bool(
