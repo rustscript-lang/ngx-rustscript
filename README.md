@@ -136,6 +136,48 @@ export NGINX_SOURCE_DIR
 bash tests/verify_add_dynamic.sh
 ```
 
+### Release packages
+
+Pushing a `v*` tag whose version matches `Cargo.toml` creates a GitHub Release.
+The Release workflow can also be started manually with an existing `v*` tag.
+Linux amd64 releases provide:
+
+- `ngx-rustscript-module-<version>-linux-amd64.tgz`
+- `ngx-rustscript-nginx-<version>-nginx-1.30.4-linux-amd64.tgz`
+- `nginx-module-rustscript_<version>_amd64.deb`
+- `SHA256SUMS`
+
+The module tgz contains `lib/ngx_http_rustscript_module.so`, the README, the
+API compatibility matrix, and the deployment examples. The NGINX bundle adds
+the pinned NGINX 1.30.4 executable, a ready module-loading configuration,
+static pages, temporary directories, and `bin/nginx-rustscript`, which runs the
+included NGINX with the extracted directory as its prefix:
+
+```sh
+tar -xzf ngx-rustscript-nginx-<version>-nginx-1.30.4-linux-amd64.tgz
+cd ngx-rustscript-nginx-<version>-nginx-1.30.4-linux-amd64
+bin/nginx-rustscript -t
+bin/nginx-rustscript
+```
+
+The deb installs the module at
+`/usr/lib/nginx/modules/ngx_http_rustscript_module.so`. It does not edit NGINX
+configuration or restart NGINX. Add an explicit top-level directive after
+confirming that the target NGINX matches the documented 1.30.4 ABI and build
+flags:
+
+```nginx
+load_module /usr/lib/nginx/modules/ngx_http_rustscript_module.so;
+```
+
+Verify downloaded assets before installation:
+
+```sh
+sha256sum --check SHA256SUMS
+dpkg-deb --info nginx-module-rustscript_<version>_amd64.deb
+dpkg-deb --contents nginx-module-rustscript_<version>_amd64.deb
+```
+
 ## NGINX configuration and usage
 
 Load the cdylib and attach a script to a location:

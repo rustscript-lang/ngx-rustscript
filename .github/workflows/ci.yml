@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to check out and verify
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ inputs.ref == '' }}
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  NGINX_VERSION: "1.30.4"
+  NGINX_SHA256: "4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b"
+  NGINX_SOURCE_DIR: ${{ github.workspace }}/.ci/nginx-1.30.4
+  NGINX_BUILD_DIR: ${{ github.workspace }}/.ci/nginx-1.30.4/objs
+  NGX_RUSTSCRIPT_NGINX: ${{ github.workspace }}/.ci/nginx-1.30.4/objs/nginx
+  NGX_RUSTSCRIPT_TASK_TMP: ${{ github.workspace }}/.ci/tmp
+  TMPDIR: ${{ github.workspace }}/.ci/tmp
+
+jobs:
+  test:
+    name: Rust and NGINX acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential ca-certificates clang curl dpkg-dev file libclang-dev \
+            libpcre2-dev libssl-dev python3-yaml zlib1g-dev
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Configure pinned NGINX
+        run: |
+          mkdir -p .ci/download "$NGX_RUSTSCRIPT_TASK_TMP"
+          curl --fail --location --retry 3 \
+            --output ".ci/download/nginx-${NGINX_VERSION}.tar.gz" \
+            "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+          printf '%s  %s\n' "$NGINX_SHA256" ".ci/download/nginx-${NGINX_VERSION}.tar.gz" \
+            | sha256sum --check --strict
+          tar -C .ci -xzf ".ci/download/nginx-${NGINX_VERSION}.tar.gz"
+          unset CFLAGS CPPFLAGS BINDGEN_EXTRA_CLANG_ARGS
+          cd "$NGINX_SOURCE_DIR"
+          ./configure --with-compat --with-http_ssl_module
+          make -j"$(nproc)"
+          "$NGX_RUSTSCRIPT_NGINX" -V
+
+      - name: Check release packaging contracts
+        run: python3 -m unittest -v tests/test_release_packaging.py
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check compilation
+        run: cargo check --locked
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build debug module
+        run: cargo build --locked --lib
+
+      - name: Run complete test suite
+        run: cargo test --locked --all-targets -- --test-threads=1
+
+      - name: Build release module
+        run: cargo build --locked --release --lib
+
+      - name: Verify NGINX add-dynamic-module build
+        run: bash tests/verify_add_dynamic.sh
+
+      - name: Run real NGINX integration
+        run: |
+          python3 tests/nginx_integration.py \
+            --nginx "$NGX_RUSTSCRIPT_NGINX" \
+            --module "$CARGO_TARGET_DIR/debug/libngx_rustscript.so"

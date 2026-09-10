@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import hashlib
+import os
+from pathlib import Path
+import subprocess
+import tarfile
+import tempfile
+import tomllib
+import unittest
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_SCRIPT = ROOT / "scripts" / "package_release.sh"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+
+
+def run(
+    *args: str,
+    env: dict[str, str] | None = None,
+    cwd: Path = ROOT,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+class ReleasePackagingTests(unittest.TestCase):
+    def test_workflows_parse_and_cover_ci_cd_contract(self) -> None:
+        self.assertTrue(CI_WORKFLOW.is_file())
+        self.assertTrue(RELEASE_WORKFLOW.is_file())
+
+        ci = yaml.load(CI_WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+        release = yaml.load(RELEASE_WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+
+        self.assertEqual(ci["permissions"]["contents"], "read")
+        self.assertIn("pull_request", ci["on"])
+        self.assertIn("workflow_call", ci["on"])
+        self.assertIsInstance(ci["on"]["workflow_call"], dict)
+        call_inputs = ci["on"]["workflow_call"]["inputs"]
+        self.assertEqual(call_inputs["ref"]["type"], "string")
+        self.assertEqual(ci["on"]["push"]["branches"], ["master"])
+        self.assertIn("inputs.ref || github.ref", ci["concurrency"]["group"])
+        self.assertIn("inputs.ref == ''", ci["concurrency"]["cancel-in-progress"])
+
+        metadata = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["metadata"]["ngx-rustscript"]
+        self.assertEqual(ci["env"]["NGINX_VERSION"], metadata["nginx-version"])
+        self.assertEqual(ci["env"]["NGINX_SHA256"], metadata["nginx-tarball-sha256"])
+        self.assertEqual(release["env"]["NGINX_VERSION"], metadata["nginx-version"])
+        self.assertEqual(release["env"]["NGINX_SHA256"], metadata["nginx-tarball-sha256"])
+
+        ci_text = CI_WORKFLOW.read_text()
+        for required in (
+            "cargo fmt --all -- --check",
+            "cargo check --locked",
+            "cargo clippy --locked --all-targets -- -D warnings",
+            "--test-threads=1",
+            "tests/verify_add_dynamic.sh",
+            "tests/nginx_integration.py",
+            "tests/test_release_packaging.py",
+            "4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b",
+        ):
+            self.assertIn(required, ci_text)
+
+        self.assertEqual(release["permissions"]["contents"], "write")
+        self.assertEqual(release["on"]["push"]["tags"], ["v*"])
+        dispatch = release["on"]["workflow_dispatch"]
+        self.assertEqual(dispatch["inputs"]["tag"]["required"], "true")
+        self.assertEqual(release["jobs"]["verify"]["uses"], "./.github/workflows/ci.yml")
+        self.assertEqual(release["jobs"]["verify"]["permissions"]["contents"], "read")
+        self.assertIn("inputs.tag", release["jobs"]["verify"]["with"]["ref"])
+        self.assertEqual(release["jobs"]["publish"]["needs"], "verify")
+        publish_steps = release["jobs"]["publish"]["steps"]
+        checkout = next(step for step in publish_steps if step.get("name") == "Check out release tag")
+        self.assertEqual(checkout["with"]["persist-credentials"], "false")
+        upload = next(step for step in publish_steps if step.get("name") == "Upload workflow artifact")
+        self.assertEqual(upload["with"]["overwrite"], "true")
+        release_text = RELEASE_WORKFLOW.read_text()
+        for required in (
+            "scripts/package_release.sh",
+            "--nginx \"$NGX_RUSTSCRIPT_NGINX\"",
+            "--nginx-source \"$NGINX_SOURCE_DIR\"",
+            "gh release create",
+            "gh release upload",
+            "--clobber",
+            "SHA256SUMS",
+            "ngx-rustscript-module-${VERSION}-linux-amd64.tgz",
+            "ngx-rustscript-nginx-${VERSION}-nginx-${NGINX_VERSION}-linux-amd64.tgz",
+            "nginx-module-rustscript_${VERSION}_amd64.deb",
+        ):
+            self.assertIn(required, release_text)
+
+    def test_packaging_outputs_expected_reproducible_assets(self) -> None:
+        self.assertTrue(PACKAGE_SCRIPT.is_file())
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            module = tmp_path / "libngx_rustscript.so"
+            module.write_bytes(b"\x7fELFngx-rustscript-test\n")
+            nginx = tmp_path / "nginx"
+            nginx.write_text("#!/bin/sh\nexit 0\n")
+            nginx.chmod(0o755)
+            nginx_source = tmp_path / "nginx-source"
+            (nginx_source / "conf").mkdir(parents=True)
+            (nginx_source / "html").mkdir()
+            (nginx_source / "conf" / "mime.types").write_text("types {}\n")
+            (nginx_source / "html" / "index.html").write_text("index\n")
+            (nginx_source / "html" / "50x.html").write_text("error\n")
+            (nginx_source / "LICENSE").write_text("nginx license\n")
+            first = tmp_path / "first"
+            second = tmp_path / "second"
+            env = os.environ.copy()
+            env["SOURCE_DATE_EPOCH"] = "1700000000"
+
+            for output in (first, second):
+                result = run(
+                    str(PACKAGE_SCRIPT),
+                    "--version",
+                    "0.1.0",
+                    "--arch",
+                    "amd64",
+                    "--module",
+                    str(module),
+                    "--nginx",
+                    str(nginx),
+                    "--nginx-source",
+                    str(nginx_source),
+                    "--output-dir",
+                    str(output),
+                    env=env,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout)
+
+            module_tgz_name = "ngx-rustscript-module-0.1.0-linux-amd64.tgz"
+            bundle_tgz_name = "ngx-rustscript-nginx-0.1.0-nginx-1.30.4-linux-amd64.tgz"
+            deb_name = "nginx-module-rustscript_0.1.0_amd64.deb"
+            expected = {module_tgz_name, bundle_tgz_name, deb_name, "SHA256SUMS"}
+            self.assertEqual({path.name for path in first.iterdir()}, expected)
+
+            module_top = "ngx-rustscript-module-0.1.0-linux-amd64"
+            with tarfile.open(first / module_tgz_name, "r:gz") as archive:
+                member_list = archive.getmembers()
+                members = {member.name: member for member in member_list}
+            self.assertTrue(all(not member.issym() and not member.islnk() for member in member_list))
+            self.assertTrue(all(".." not in Path(member.name).parts for member in member_list))
+            for name in (
+                f"{module_top}/lib/ngx_http_rustscript_module.so",
+                f"{module_top}/README.md",
+                f"{module_top}/docs/ngx-api-compatibility.md",
+                f"{module_top}/examples/rate-limit.rss",
+                f"{module_top}/examples/key-auth.rss",
+            ):
+                self.assertIn(name, members)
+            self.assertEqual(
+                members[f"{module_top}/lib/ngx_http_rustscript_module.so"].mode,
+                0o644,
+            )
+
+            bundle_top = "ngx-rustscript-nginx-0.1.0-nginx-1.30.4-linux-amd64"
+            with tarfile.open(first / bundle_tgz_name, "r:gz") as archive:
+                bundle_member_list = archive.getmembers()
+                bundle_members = {member.name: member for member in bundle_member_list}
+                bundle_conf_file = archive.extractfile(f"{bundle_top}/conf/nginx.conf")
+                self.assertIsNotNone(bundle_conf_file)
+                bundle_conf = bundle_conf_file.read() if bundle_conf_file is not None else b""
+            self.assertTrue(
+                all(not member.issym() and not member.islnk() for member in bundle_member_list)
+            )
+            self.assertTrue(all(".." not in Path(member.name).parts for member in bundle_member_list))
+            for name in (
+                f"{bundle_top}/bin/nginx-rustscript",
+                f"{bundle_top}/sbin/nginx",
+                f"{bundle_top}/modules/ngx_http_rustscript_module.so",
+                f"{bundle_top}/conf/nginx.conf",
+                f"{bundle_top}/conf/mime.types",
+                f"{bundle_top}/html/index.html",
+                f"{bundle_top}/licenses/nginx/LICENSE",
+                f"{bundle_top}/examples/rate-limit.rss",
+            ):
+                self.assertIn(name, bundle_members)
+            self.assertEqual(bundle_members[f"{bundle_top}/bin/nginx-rustscript"].mode, 0o755)
+            self.assertEqual(bundle_members[f"{bundle_top}/sbin/nginx"].mode, 0o755)
+            self.assertEqual(bundle_members[f"{bundle_top}/modules/ngx_http_rustscript_module.so"].mode, 0o644)
+            self.assertIn(
+                b"load_module modules/ngx_http_rustscript_module.so;",
+                bundle_conf,
+            )
+            self.assertIn(b"include mime.types;", bundle_conf)
+            self.assertNotIn(b"include conf/mime.types;", bundle_conf)
+
+            deb = first / deb_name
+            self.assertEqual(run("dpkg-deb", "-f", str(deb), "Package").stdout.strip(), "nginx-module-rustscript")
+            self.assertEqual(run("dpkg-deb", "-f", str(deb), "Version").stdout.strip(), "0.1.0")
+            self.assertEqual(run("dpkg-deb", "-f", str(deb), "Architecture").stdout.strip(), "amd64")
+            self.assertEqual(run("dpkg-deb", "-f", str(deb), "Depends").stdout.strip(), "libc6, libgcc-s1")
+            self.assertEqual(
+                run("dpkg-deb", "-f", str(deb), "X-Ngx-Rustscript-Nginx-Version").stdout.strip(),
+                "1.30.4",
+            )
+            contents = run("dpkg-deb", "-c", str(deb)).stdout
+            self.assertIn("./usr/lib/nginx/modules/ngx_http_rustscript_module.so", contents)
+            self.assertIn("./usr/share/doc/nginx-module-rustscript/examples/rate-limit.rss", contents)
+            self.assertNotIn("../", contents)
+            self.assertFalse(any(line.startswith("l") for line in contents.splitlines()))
+
+            checksum_check = run("sha256sum", "--check", "--strict", "SHA256SUMS", cwd=first)
+            self.assertEqual(checksum_check.returncode, 0, checksum_check.stdout)
+            sums = {}
+            for line in (first / "SHA256SUMS").read_text().splitlines():
+                digest, filename = line.split("  ", 1)
+                sums[filename] = digest
+            self.assertEqual(set(sums), {module_tgz_name, bundle_tgz_name, deb_name})
+            self.assertEqual(sums[module_tgz_name], sha256(first / module_tgz_name))
+            self.assertEqual(sums[bundle_tgz_name], sha256(first / bundle_tgz_name))
+            self.assertEqual(sums[deb_name], sha256(first / deb_name))
+
+            for name in expected:
+                self.assertEqual(sha256(first / name), sha256(second / name), name)
+
+    def test_packaging_rejects_unsafe_version(self) -> None:
+        self.assertTrue(PACKAGE_SCRIPT.is_file())
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            module = tmp_path / "module.so"
+            module.write_bytes(b"module")
+            result = run(
+                str(PACKAGE_SCRIPT),
+                "--version",
+                "../bad",
+                "--arch",
+                "amd64",
+                "--module",
+                str(module),
+                "--nginx",
+                str(module),
+                "--nginx-source",
+                str(tmp_path),
+                "--output-dir",
+                str(tmp_path / "out"),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid version", result.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
