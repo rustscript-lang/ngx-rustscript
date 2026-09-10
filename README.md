@@ -214,6 +214,11 @@ nginx -t -p /path/to/prefix -c conf/nginx.conf
 
 ## RustScript examples
 
+Complete deployment examples:
+
+- [Shared-dict fixed-window rate limiter](docs/examples/rate-limit.md) — [RSS](examples/rate-limit.rss) / [NGINX config](examples/rate-limit.nginx.conf)
+- [HMAC API-key authentication](docs/examples/key-auth.md) — [RSS](examples/key-auth.rss) / [NGINX config](examples/key-auth.nginx.conf) / [secret include template](examples/key-auth-secrets.conf.example)
+
 Import-free access script (runs to `Halted`, then the content phase):
 
 ```rss
