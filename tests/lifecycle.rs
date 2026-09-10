@@ -32,7 +32,10 @@ use ngx_rustscript::request_state::{
 };
 use ngx_rustscript::runtime::WorkerRuntime;
 use support::artifact::module_cdylib;
-use support::nginx::{combined, nginx_binary, nginx_quote_path, nginx_test};
+use support::nginx::{
+    combined, nginx_binary, nginx_process_group_command, nginx_quote_path, nginx_test,
+    terminate_process_group,
+};
 use support::temp::isolated_prefix;
 use vm::{Program, VmStatus};
 
@@ -405,8 +408,7 @@ struct RunningNginx {
 
 impl Drop for RunningNginx {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        terminate_process_group(&mut self.child, Duration::from_secs(2));
     }
 }
 
@@ -431,7 +433,7 @@ fn write_index(prefix: &Path, rel: &str, body: &str) {
 }
 
 fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
-    let child = Command::new(nginx)
+    let child = nginx_process_group_command(nginx)
         .arg("-p")
         .arg(prefix)
         .arg("-c")

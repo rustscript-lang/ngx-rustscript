@@ -28,7 +28,10 @@ use vm::{HostTypeSchema, Program, Value, Vm, VmMap, VmStatus};
 
 mod support;
 use support::artifact::module_cdylib;
-use support::nginx::{combined, nginx_binary, nginx_quote_path, nginx_test};
+use support::nginx::{
+    combined, nginx_binary, nginx_process_group_command, nginx_quote_path, nginx_test,
+    terminate_process_group,
+};
 use support::temp::isolated_prefix;
 
 const SET_BODY_DATA: &str = "ngx::req::set_body_data";
@@ -649,8 +652,7 @@ struct RunningNginx {
 
 impl Drop for RunningNginx {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        terminate_process_group(&mut self.child, Duration::from_secs(2));
     }
 }
 
@@ -692,7 +694,7 @@ fn free_port() -> u16 {
 
 fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
     let stderr = fs::File::create(prefix.join("logs/nginx.spawn.err")).unwrap();
-    let child = Command::new(nginx)
+    let child = nginx_process_group_command(nginx)
         .arg("-p")
         .arg(prefix)
         .arg("-c")

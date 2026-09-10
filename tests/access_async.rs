@@ -9,11 +9,14 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use support::artifact::module_cdylib;
-use support::nginx::{combined, nginx_binary, nginx_escape_quoted, nginx_quote_path, nginx_test};
+use support::nginx::{
+    combined, nginx_binary, nginx_escape_quoted, nginx_process_group_command, nginx_quote_path,
+    nginx_test, terminate_process_group,
+};
 use support::temp::isolated_prefix;
 
 fn fixture(name: &str) -> PathBuf {
@@ -40,8 +43,7 @@ struct RunningNginx {
 
 impl Drop for RunningNginx {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        terminate_process_group(&mut self.child, Duration::from_secs(2));
     }
 }
 
@@ -54,7 +56,7 @@ fn free_port() -> u16 {
 }
 
 fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
-    let child = Command::new(nginx)
+    let child = nginx_process_group_command(nginx)
         .arg("-p")
         .arg(prefix)
         .arg("-c")

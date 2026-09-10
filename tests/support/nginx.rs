@@ -5,8 +5,10 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 use super::temp::{env_path, isolated_prefix};
 
@@ -16,6 +18,56 @@ use shell_words::split_shell_words;
 
 pub const PINNED_NGINX_VERSION_BANNER: &str = "nginx/1.30.4";
 pub const REQUIRED_NGINX_CONFIGURE_ARGS: &[&str] = &["--with-compat", "--with-http_ssl_module"];
+
+pub fn configure_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+pub fn nginx_process_group_command(nginx: &Path) -> Command {
+    let mut command = Command::new(nginx);
+    configure_process_group(&mut command);
+    command
+}
+
+fn process_group_exists(pgid: i32) -> bool {
+    let rc = unsafe { libc::kill(-pgid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn signal_process_group(pgid: i32, signal: i32) {
+    let _ = unsafe { libc::kill(-pgid, signal) };
+}
+
+pub fn terminate_process_group(child: &mut Child, timeout: Duration) {
+    let pgid = child.id() as i32;
+    if process_group_exists(pgid) {
+        signal_process_group(pgid, libc::SIGQUIT);
+    }
+
+    let deadline = Instant::now() + timeout;
+    while process_group_exists(pgid) && Instant::now() < deadline {
+        let _ = child.try_wait();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if process_group_exists(pgid) {
+        signal_process_group(pgid, libc::SIGKILL);
+    }
+
+    let reap_deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if Instant::now() < reap_deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    }
+}
 
 pub fn nginx_binary() -> PathBuf {
     let source_dir = env_path("NGINX_SOURCE_DIR").unwrap_or_else(|| {

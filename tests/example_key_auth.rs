@@ -19,7 +19,10 @@ use vm::{Value, Vm, VmStatus};
 
 mod support;
 use support::artifact::module_cdylib;
-use support::nginx::{combined, nginx_binary, nginx_quote_path, nginx_test};
+use support::nginx::{
+    combined, nginx_binary, nginx_process_group_command, nginx_quote_path, nginx_test,
+    terminate_process_group,
+};
 use support::temp::isolated_prefix;
 
 const EXAMPLE_RSS: &str = include_str!("../examples/key-auth.rss");
@@ -170,13 +173,12 @@ struct RunningNginx {
 
 impl Drop for RunningNginx {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        terminate_process_group(&mut self.child, Duration::from_secs(2));
     }
 }
 
 fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
-    let child = Command::new(nginx)
+    let child = nginx_process_group_command(nginx)
         .arg("-p")
         .arg(prefix)
         .arg("-c")
@@ -376,7 +378,24 @@ fn write_prefix_example(prefix: &Path, conf: &str, script: &str) -> PathBuf {
     script_path
 }
 
-fn reload_nginx(nginx: &Path, prefix: &Path) {
+fn nginx_worker_pids(master_pid: u32) -> Vec<u32> {
+    let children = format!("/proc/{master_pid}/task/{master_pid}/children");
+    fs::read_to_string(&children)
+        .unwrap_or_else(|err| panic!("read {children}: {err}"))
+        .split_whitespace()
+        .map(|pid| {
+            pid.parse::<u32>()
+                .unwrap_or_else(|err| panic!("parse nginx worker pid {pid}: {err}"))
+        })
+        .collect()
+}
+
+fn reload_nginx(nginx: &Path, prefix: &Path, master_pid: u32) {
+    let old_workers = nginx_worker_pids(master_pid);
+    assert!(
+        !old_workers.is_empty(),
+        "nginx master has no workers before reload"
+    );
     let out = nginx_test(nginx, prefix);
     let text = combined(&out);
     assert!(
@@ -397,7 +416,20 @@ fn reload_nginx(nginx: &Path, prefix: &Path) {
         "reload failed: {}",
         combined(&reload)
     );
-    std::thread::sleep(Duration::from_millis(400));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let current = nginx_worker_pids(master_pid);
+        if !current.is_empty() && old_workers.iter().all(|pid| !current.contains(pid)) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "old nginx workers {old_workers:?} did not retire within 5s; current={current:?}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn assert_upstream_stripped(raw: &str, secrets: &[String]) {
@@ -672,7 +704,7 @@ fn run_pinned_example_once() {
     }
 
     write_secrets_include(&secrets_path, &secrets_conf(PEPPER, &digest_c, &digest_a));
-    reload_nginx(&nginx, &prefix);
+    reload_nginx(&nginx, &prefix, running.child.id());
 
     let (status, response) = get_with_api_keys(listen, "/", &[TOKEN_NEXT]);
     assert_ok_200("rotation current C", status, &response, &secret_list);
@@ -686,7 +718,7 @@ fn run_pinned_example_once() {
     );
 
     write_secrets_include(&secrets_path, &secrets_conf(PEPPER, &digest_c, ""));
-    reload_nginx(&nginx, &prefix);
+    reload_nginx(&nginx, &prefix, running.child.id());
 
     let (status, response) = get_with_api_keys(listen, "/", &[TOKEN_NEXT]);
     assert_ok_200(
