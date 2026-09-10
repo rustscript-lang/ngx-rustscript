@@ -1,0 +1,39 @@
+// HMAC-SHA1 API-key check for access_by_rss_file.
+//
+// HMAC-SHA1 is the only keyed digest host. This construction verifies an
+// opaque high-entropy token (HMAC-SHA1(pepper, token) as standard Base64
+// without padding). It is not a message signature scheme.
+//
+// Do not log the token, pepper, or digest. String `==` is not constant-time.
+// Only the X-API-Key header is accepted; query-string tokens are ignored.
+// Duplicate X-API-Key headers are joined by NGINX into $http_x_api_key and
+// fail the digest check (403).
+
+use ngx;
+
+let pepper = ngx::var::get("rss_api_key_pepper").unwrap_or("");
+let expected = ngx::var::get("rss_api_key_digest").unwrap_or("");
+if pepper == "" || expected == "" {
+    ngx::log(ngx::log_level::error(), "api key auth is not configured");
+    ngx::exit(500);
+}
+
+let raw = ngx::var::get("http_x_api_key");
+if raw == null {
+    ngx::header::set("WWW-Authenticate", "ApiKey realm=\"api\"");
+    ngx::exit(401);
+}
+let token = raw.unwrap_or("");
+if token == "" {
+    ngx::exit(403);
+}
+
+let digest = ngx::encode_base64(ngx::hmac_sha1(pepper, token), true);
+if digest == expected {
+    ngx::exit(ngx::core::ok());
+}
+let previous = ngx::var::get("rss_api_key_digest_prev").unwrap_or("");
+if previous != "" && digest == previous {
+    ngx::exit(ngx::core::ok());
+}
+ngx::exit(403);
