@@ -50,11 +50,50 @@ fn write_conf(prefix: &Path, body: &str) {
     fs::write(prefix.join("conf/nginx.conf"), body).unwrap();
 }
 
+/// RustScript declarations for the ngx shared-dict fixed-shape results.
+///
+/// The host catalog exposes every fixed multi-return shared-dict call as
+/// `unknown`, so a script that consumes one must declare the matching struct
+/// and annotate the binding; field access is then the only member access.
+/// Declaring them once here keeps the embedded scripts focused on behavior.
+const RSS_SHARED_RESULT_STRUCTS: &str = r#"
+struct SharedGetResult<T> {
+    value: T?,
+    flags: int,
+    stale: bool,
+    error: string?
+}
+
+struct SharedStoreResult {
+    ok: bool,
+    error: string?,
+    forcible: bool
+}
+
+struct SharedSafeStoreResult {
+    ok: bool,
+    error: string?
+}
+
+struct SharedIncrResult {
+    value: number?,
+    error: string?,
+    forcible: bool
+}
+
+struct SharedNumberResult {
+    value: number?,
+    error: string?
+}
+"#;
+
+/// Write an RSS script with the shared-dict result structs prepended.
 fn write_script(path: &Path, body: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
-    fs::write(path, body).unwrap();
+    let source = format!("{}{}", RSS_SHARED_RESULT_STRUCTS, body);
+    fs::write(path, source).unwrap();
 }
 
 fn conf_body(module: &Path, prefix: &Path, port: u16, locations: &str) -> String {
@@ -190,8 +229,8 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let r = ngx::shared::get(d, "Jim");
-ngx::header::set("X-Value", r["value"]);
+let r: SharedGetResult<string> = ngx::shared::get(d, "Jim");
+ngx::header::set("X-Value", r.value);
 ngx::exit(200);
 "#,
     );
@@ -200,8 +239,8 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let r = ngx::shared::incr(d, "hits", 1, 0, null);
-ngx::header::set("X-Value", ngx::encode_args({ n: r["value"] }));
+let r: SharedIncrResult = ngx::shared::incr(d, "hits", 1, 0, null);
+ngx::header::set("X-Value", ngx::encode_args({ n: r.value }));
 ngx::exit(200);
 "#,
     );
@@ -210,8 +249,8 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let r = ngx::shared::get(d, "hits");
-ngx::header::set("X-Value", ngx::encode_args({ n: r["value"] }));
+let r: SharedGetResult<int> = ngx::shared::get(d, "hits");
+ngx::header::set("X-Value", ngx::encode_args({ n: r.value }));
 ngx::exit(200);
 "#,
     );
@@ -224,19 +263,19 @@ ngx::shared::set(d, "b", true, null, 3);
 ngx::shared::set(d, "i", 42, null, null);
 ngx::shared::set(d, "f", 1.5, null, null);
 ngx::shared::set(d, "s", "hi", null, null);
-let gb = ngx::shared::get(d, "b");
-let gi = ngx::shared::get(d, "i");
-let gf = ngx::shared::get(d, "f");
-let gs = ngx::shared::get(d, "s");
-if gb["value"] {
+let gb: SharedGetResult<bool> = ngx::shared::get(d, "b");
+let gi: SharedGetResult<int> = ngx::shared::get(d, "i");
+let gf: SharedGetResult<float> = ngx::shared::get(d, "f");
+let gs: SharedGetResult<string> = ngx::shared::get(d, "s");
+if gb.value {
     ngx::header::set("X-Bool", "1");
 } else {
     ngx::header::set("X-Bool", "0");
 }
-ngx::header::set("X-Flags", ngx::encode_args({ n: gb["flags"] }));
-ngx::header::set("X-Int", ngx::encode_args({ n: gi["value"] }));
-ngx::header::set("X-Float", ngx::encode_args({ n: gf["value"] }));
-ngx::header::set("X-Str", gs["value"]);
+ngx::header::set("X-Flags", ngx::encode_args({ n: gb.flags }));
+ngx::header::set("X-Int", ngx::encode_args({ n: gi.value }));
+ngx::header::set("X-Float", ngx::encode_args({ n: gf.value }));
+ngx::header::set("X-Str", gs.value);
 ngx::exit(200);
 "#,
     );
@@ -245,18 +284,19 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let add1 = ngx::shared::add(d, "once", "a", null, null);
-let add2 = ngx::shared::add(d, "once", "b", null, null);
-let rep = ngx::shared::replace(d, "once", "c", null, null);
-let niladd = ngx::shared::add(d, "nilk", null, null, null);
-if add1["ok"] {
+let add1: SharedStoreResult = ngx::shared::add(d, "once", "a", null, null);
+let add2: SharedStoreResult = ngx::shared::add(d, "once", "b", null, null);
+let rep: SharedStoreResult = ngx::shared::replace(d, "once", "c", null, null);
+let niladd: SharedStoreResult = ngx::shared::add(d, "nilk", null, null, null);
+if add1.ok {
     ngx::header::set("X-Add1", "1");
 } else {
     ngx::header::set("X-Add1", "0");
 }
-ngx::header::set("X-Add2", add2["error"]);
-ngx::header::set("X-Rep", ngx::shared::get(d, "once")["value"]);
-ngx::header::set("X-Nil", niladd["error"]);
+ngx::header::set("X-Add2", add2.error);
+let replaced: SharedGetResult<string> = ngx::shared::get(d, "once");
+ngx::header::set("X-Rep", replaced.value);
+ngx::header::set("X-Nil", niladd.error);
 ngx::exit(200);
 "#,
     );
@@ -266,8 +306,8 @@ ngx::exit(200);
 use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::set(d, "ttlkey", "v", 30, null);
-let t = ngx::shared::ttl(d, "ttlkey");
-ngx::header::set("X-Ttl", ngx::encode_args({ n: t["value"] }));
+let t: SharedNumberResult = ngx::shared::ttl(d, "ttlkey");
+ngx::header::set("X-Ttl", ngx::encode_args({ n: t.value }));
 ngx::exit(200);
 "#,
     );
@@ -291,8 +331,10 @@ let dogs = ngx::shared::dict("dogs");
 let cats = ngx::shared::dict("cats");
 ngx::shared::set(dogs, "k", "woof", null, null);
 ngx::shared::set(cats, "k", "meow", null, null);
-ngx::header::set("X-Dogs", ngx::shared::get(dogs, "k")["value"]);
-ngx::header::set("X-Cats", ngx::shared::get(cats, "k")["value"]);
+let dog: SharedGetResult<string> = ngx::shared::get(dogs, "k");
+let cat: SharedGetResult<string> = ngx::shared::get(cats, "k");
+ngx::header::set("X-Dogs", dog.value);
+ngx::header::set("X-Cats", cat.value);
 ngx::exit(200);
 "#,
     );
@@ -301,8 +343,8 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let r = ngx::shared::set(d, "", "x", null, null);
-ngx::header::set("X-Err", r["error"]);
+let r: SharedStoreResult = ngx::shared::set(d, "", "x", null, null);
+ngx::header::set("X-Err", r.error);
 ngx::exit(200);
 "#,
     );
@@ -500,16 +542,16 @@ ngx::exit(200);
 use ngx;
 ngx::update_time();
 let d = ngx::shared::dict("dogs");
-let live = ngx::shared::get(d, "k");
-let stale = ngx::shared::get_stale(d, "k");
-ngx::header::set("X-Live", ngx::encode_args({ n: live["flags"] }));
-if stale["stale"] {
+let live: SharedGetResult<string> = ngx::shared::get(d, "k");
+let stale: SharedGetResult<string> = ngx::shared::get_stale(d, "k");
+ngx::header::set("X-Live", ngx::encode_args({ n: live.flags }));
+if stale.stale {
     ngx::header::set("X-Stale", "1");
 } else {
     ngx::header::set("X-Stale", "0");
 }
-ngx::header::set("X-Val", stale["value"]);
-ngx::header::set("X-Flags", ngx::encode_args({ n: stale["flags"] }));
+ngx::header::set("X-Val", stale.value);
+ngx::header::set("X-Flags", ngx::encode_args({ n: stale.flags }));
 ngx::exit(200);
 "#,
     );
@@ -525,13 +567,13 @@ ngx::shared::set(d, "c", blob, null, null);
 ngx::shared::set(d, "d", blob, null, null);
 ngx::shared::set(d, "e", blob, null, null);
 ngx::shared::set(d, "f", blob, null, null);
-let safe = ngx::shared::safe_set(d, "final", blob, null, null);
-if safe["ok"] {
+let safe: SharedSafeStoreResult = ngx::shared::safe_set(d, "final", blob, null, null);
+if safe.ok {
     ngx::header::set("X-Ok", "1");
 } else {
     ngx::header::set("X-Ok", "0");
 }
-ngx::header::set("X-Safe", safe["error"]);
+ngx::header::set("X-Safe", safe.error);
 ngx::exit(200);
 "#,
     );
@@ -632,7 +674,8 @@ use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::lpush(d, "q", "left");
 ngx::shared::rpush(d, "q", "right");
-ngx::header::set("X-Len", ngx::encode_args({ n: ngx::shared::llen(d, "q")["value"] }));
+let len: SharedNumberResult = ngx::shared::llen(d, "q");
+ngx::header::set("X-Len", ngx::encode_args({ n: len.value }));
 ngx::header::set("X-Worker", ngx::encode_args({ n: ngx::worker::id() }));
 ngx::exit(200);
 "#,
@@ -642,11 +685,12 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let left = ngx::shared::lpop(d, "q");
-let right = ngx::shared::rpop(d, "q");
-ngx::header::set("X-Left", left["value"]);
-ngx::header::set("X-Right", right["value"]);
-ngx::header::set("X-Len", ngx::encode_args({ n: ngx::shared::llen(d, "q")["value"] }));
+let left: SharedGetResult<string> = ngx::shared::lpop(d, "q");
+let right: SharedGetResult<string> = ngx::shared::rpop(d, "q");
+ngx::header::set("X-Left", left.value);
+ngx::header::set("X-Right", right.value);
+let len: SharedNumberResult = ngx::shared::llen(d, "q");
+ngx::header::set("X-Len", ngx::encode_args({ n: len.value }));
 ngx::header::set("X-Worker", ngx::encode_args({ n: ngx::worker::id() }));
 ngx::exit(200);
 "#,
@@ -657,10 +701,10 @@ ngx::exit(200);
 use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::set(d, "scalar", "keep", null, null);
-let push = ngx::shared::lpush(d, "scalar", "x");
-let got = ngx::shared::get(d, "scalar");
-ngx::header::set("X-Err", push["error"]);
-ngx::header::set("X-Val", got["value"]);
+let push: SharedNumberResult = ngx::shared::lpush(d, "scalar", "x");
+let got: SharedGetResult<string> = ngx::shared::get(d, "scalar");
+ngx::header::set("X-Err", push.error);
+ngx::header::set("X-Val", got.value);
 ngx::exit(200);
 "#,
     );
@@ -670,9 +714,10 @@ ngx::exit(200);
 use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::rpush(d, "lst", "a");
-let got = ngx::shared::get(d, "lst");
-ngx::header::set("X-Err", got["error"]);
-ngx::header::set("X-Len", ngx::encode_args({ n: ngx::shared::llen(d, "lst")["value"] }));
+let got: SharedGetResult<string> = ngx::shared::get(d, "lst");
+ngx::header::set("X-Err", got.error);
+let list_len: SharedNumberResult = ngx::shared::llen(d, "lst");
+ngx::header::set("X-Len", ngx::encode_args({ n: list_len.value }));
 ngx::exit(200);
 "#,
     );
@@ -701,10 +746,14 @@ ngx::header::set("X-0", keys[0]);
 ngx::header::set("X-1", keys[1]);
 ngx::header::set("X-2", keys[2]);
 ngx::header::set("X-3", keys[3]);
-ngx::header::set("X-A", ngx::shared::get(d, "a")["value"]);
-ngx::header::set("X-B", ngx::shared::get(d, "b")["value"]);
-ngx::header::set("X-C", ngx::shared::get(d, "c")["value"]);
-ngx::header::set("X-Lst", ngx::encode_args({ n: ngx::shared::llen(d, "lst2")["value"] }));
+let ga: SharedGetResult<string> = ngx::shared::get(d, "a");
+let gb2: SharedGetResult<string> = ngx::shared::get(d, "b");
+let gc: SharedGetResult<string> = ngx::shared::get(d, "c");
+ngx::header::set("X-A", ga.value);
+ngx::header::set("X-B", gb2.value);
+ngx::header::set("X-C", gc.value);
+let lst_len: SharedNumberResult = ngx::shared::llen(d, "lst2");
+ngx::header::set("X-Lst", ngx::encode_args({ n: lst_len.value }));
 ngx::exit(200);
 "#,
     );
@@ -716,9 +765,9 @@ let d = ngx::shared::dict("dogs");
 ngx::shared::set(d, "live", "1", 1, null);
 ngx::shared::flush_all(d);
 let n = ngx::shared::flush_expired(d, 0);
-let live = ngx::shared::get(d, "live");
+let live: SharedGetResult<string> = ngx::shared::get(d, "live");
 ngx::header::set("X-Freed", ngx::encode_args({ n: n }));
-if live["stale"] {
+if live.stale {
     ngx::header::set("X-Stale", "1");
 } else {
     ngx::header::set("X-Stale", "0");
@@ -742,8 +791,8 @@ ngx::exit(200);
 use ngx;
 ngx::update_time();
 let d = ngx::shared::dict("dogs");
-let n = ngx::shared::llen(d, "exp");
-ngx::header::set("X-Len", ngx::encode_args({ n: n["value"] }));
+let n: SharedNumberResult = ngx::shared::llen(d, "exp");
+ngx::header::set("X-Len", ngx::encode_args({ n: n.value }));
 ngx::exit(200);
 "#,
     );
@@ -753,13 +802,13 @@ ngx::exit(200);
 use ngx;
 let d = ngx::shared::dict("tiny");
 let blob = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
-let a = ngx::shared::lpush(d, "q", blob);
-let b = ngx::shared::lpush(d, "q", blob);
-let c = ngx::shared::lpush(d, "q", blob);
-let d2 = ngx::shared::lpush(d, "q", blob);
-let e = ngx::shared::lpush(d, "q", blob);
-let last = ngx::shared::lpush(d, "q", blob);
-ngx::header::set("X-Err", last["error"]);
+let a: SharedNumberResult = ngx::shared::lpush(d, "q", blob);
+let b: SharedNumberResult = ngx::shared::lpush(d, "q", blob);
+let c: SharedNumberResult = ngx::shared::lpush(d, "q", blob);
+let d2: SharedNumberResult = ngx::shared::lpush(d, "q", blob);
+let e: SharedNumberResult = ngx::shared::lpush(d, "q", blob);
+let last: SharedNumberResult = ngx::shared::lpush(d, "q", blob);
+ngx::header::set("X-Err", last.error);
 ngx::exit(200);
 "#,
     );
@@ -768,9 +817,10 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let n = ngx::shared::llen(d, "reload");
-ngx::header::set("X-Len", ngx::encode_args({ n: n["value"] }));
-ngx::header::set("X-Pop", ngx::shared::lpop(d, "reload")["value"]);
+let n: SharedNumberResult = ngx::shared::llen(d, "reload");
+ngx::header::set("X-Len", ngx::encode_args({ n: n.value }));
+let popped: SharedGetResult<string> = ngx::shared::lpop(d, "reload");
+ngx::header::set("X-Pop", popped.value);
 ngx::exit(200);
 "#,
     );
@@ -984,9 +1034,10 @@ http {{
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let n = ngx::shared::llen(d, "reload");
-ngx::header::set("X-Len", ngx::encode_args({ n: n["value"] }));
-ngx::header::set("X-Pop", ngx::shared::lpop(d, "reload")["value"]);
+let n: SharedNumberResult = ngx::shared::llen(d, "reload");
+ngx::header::set("X-Len", ngx::encode_args({ n: n.value }));
+let popped: SharedGetResult<string> = ngx::shared::lpop(d, "reload");
+ngx::header::set("X-Pop", popped.value);
 ngx::exit(200);
 "#,
     );
@@ -1112,14 +1163,14 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let k0 = ngx::shared::get(d, "k0000");
-let kn = ngx::shared::get(d, "k1099");
-if k0["value"] == null {
+let k0: SharedGetResult<int> = ngx::shared::get(d, "k0000");
+let kn: SharedGetResult<int> = ngx::shared::get(d, "k1099");
+if k0.value == null {
     ngx::header::set("X-K0", "missing");
 } else {
     ngx::header::set("X-K0", "1");
 }
-if kn["value"] == null {
+if kn.value == null {
     ngx::header::set("X-KN", "missing");
 } else {
     ngx::header::set("X-KN", "1");
@@ -1148,7 +1199,8 @@ ngx::update_time();
 let d = ngx::shared::dict("visit");
 let keys = ngx::shared::get_keys(d, 10);
 ngx::header::set("X-N", ngx::encode_args({ n: keys.length }));
-ngx::header::set("X-Live", ngx::shared::get(d, "live")["value"]);
+let live: SharedGetResult<string> = ngx::shared::get(d, "live");
+ngx::header::set("X-Live", live.value);
 ngx::exit(200);
 "#,
     );
@@ -1177,9 +1229,9 @@ use ngx;
 ngx::update_time();
 let d = ngx::shared::dict("cats");
 let n = ngx::shared::flush_expired(d, 10);
-let stale = ngx::shared::get_stale(d, "expired-mru-4");
+let stale: SharedGetResult<int> = ngx::shared::get_stale(d, "expired-mru-4");
 ngx::header::set("X-Freed", ngx::encode_args({ n: n }));
-if stale["value"] == null {
+if stale.value == null {
     ngx::header::set("X-Stale", "missing");
 } else {
     ngx::header::set("X-Stale", "present");
@@ -1194,15 +1246,15 @@ use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::rpush(d, "decode", "keep");
 ngx::shared::rpush(d, "decode", "tail");
-let popped = ngx::shared::lpop(d, "decode");
-let rest = ngx::shared::llen(d, "decode");
-ngx::header::set("X-Pop", popped["value"]);
-if popped["error"] == null {
+let popped: SharedGetResult<string> = ngx::shared::lpop(d, "decode");
+let rest: SharedNumberResult = ngx::shared::llen(d, "decode");
+ngx::header::set("X-Pop", popped.value);
+if popped.error == null {
     ngx::header::set("X-Err", "none");
 } else {
     ngx::header::set("X-Err", "err");
 }
-ngx::header::set("X-Len", ngx::encode_args({ n: rest["value"] }));
+ngx::header::set("X-Len", ngx::encode_args({ n: rest.value }));
 ngx::exit(200);
 "#,
     );
