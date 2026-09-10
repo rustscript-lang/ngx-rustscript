@@ -105,7 +105,7 @@ fn find_zone(name: &str) -> Option<NonNull<ngx_shm_zone_t>> {
         // SAFETY: `part` walks NGINX's shared_memory list.
         let part_ref = unsafe { &*part };
         let elts = part_ref.elts.cast::<ngx_shm_zone_t>();
-        for i in 0..part_ref.nelts as usize {
+        for i in 0..part_ref.nelts {
             // SAFETY: `i` is in-range for this list part.
             let zone = unsafe { elts.add(i) };
             if zone.is_null() {

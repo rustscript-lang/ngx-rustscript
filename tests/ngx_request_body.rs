@@ -564,10 +564,7 @@ fn looks_chunked_body(body: &str) -> bool {
 fn decode_chunked_body(body: &str) -> String {
     let mut out = String::new();
     let mut rest = body;
-    loop {
-        let Some((size_line, after)) = rest.split_once("\r\n") else {
-            break;
-        };
+    while let Some((size_line, after)) = rest.split_once("\r\n") {
         let Ok(size) = usize::from_str_radix(size_line.trim(), 16) else {
             break;
         };
