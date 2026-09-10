@@ -772,10 +772,7 @@ fn wait_access_status(log: &Path, method: &str, uri: &str, status: u16, timeout:
 fn wait_log_contains(log: &Path, needle: &str, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if fs::read_to_string(log)
-            .unwrap_or_default()
-            .contains(needle)
-        {
+        if fs::read_to_string(log).unwrap_or_default().contains(needle) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(20));
