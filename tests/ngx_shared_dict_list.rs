@@ -89,7 +89,7 @@ fn list_and_maintenance_hosts_are_catalogued() {
     assert_eq!(
         production_runtime_host_names().len(),
         191,
-        "186 previous hosts plus 5 request-body mutation hosts"
+        "production host inventory must stay in sync"
     );
     let key = ResourceTypeKey::new("ngx.shared.dict").unwrap();
     let catalog = ngx_host_catalog();

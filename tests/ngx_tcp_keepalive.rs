@@ -247,7 +247,7 @@ fn production_host_count_adds_keepalive_and_tls_hosts() {
     assert_eq!(
         production_runtime_host_names().len(),
         191,
-        "186 previous hosts plus 5 request-body mutation hosts"
+        "production host inventory must stay in sync"
     );
     assert_eq!(ngx_host_catalog().functions().len(), 191);
     assert_eq!(ngx_rustscript::host::ngx_host_manifest().len(), 191);

@@ -171,13 +171,16 @@ prefix (the directory of the config file). Absolute paths are unchanged.
 The file is read once at `nginx -t` / reload, must be a regular UTF-8 file,
 and is compiled with `compile_source`.
 
-Config accepts catalogued ngx hosts in the access phase, including timers,
-codec, time, metadata, constants, `ngx::log`, `ngx::shared::*`, and UDP cosocket. `print` is not a host (use `ngx::log`); `runtime::sleep`, unknown imports, and
-phase-forbidden imports are rejected at configuration time. Unknown
-modules fail compile or import check. Duplicate directives in the same
-location are rejected. Unset nested locations inherit the parent
-program; an explicit child directive overrides. Unconfigured locations
-keep the original access-phase decline.
+Config accepts every production host in the access phase except the five
+content-only output hosts (`ngx::send_headers`, `ngx::print`, `ngx::say`,
+`ngx::flush`, and `ngx::eof`). This includes timers, codec, time, metadata,
+constants, logging, request read/write/body, `ngx.ctx`, response metadata,
+control, shared dict, and UDP/TCP cosocket hosts. Bare `print` is not a host
+(use `ngx::log`); `runtime::sleep`, unknown imports, and phase-forbidden
+imports are rejected at configuration time. Unknown modules fail compile or
+import check. Duplicate directives in the same location are rejected. Unset
+nested locations inherit the parent program; an explicit child directive
+overrides. Unconfigured locations keep the original access-phase decline.
 
 `log_by_rss_file` compiles under the Log phase against a closed
 positive allowlist keyed by family, capability, and import name.
@@ -239,7 +242,7 @@ use ngx;
 ngx::sleep_ms(30);
 ```
 
-Read a request body (nullary like OpenResty; `get_post_args` still takes explicit `null` for the max-args adaptation):
+Read a request body in `content_by_rss_file` (nullary like OpenResty; `get_post_args` still takes explicit `null` for the max-args adaptation):
 
 ```rss
 use ngx;
@@ -248,7 +251,7 @@ let data = ngx::req::get_body_data();
 ngx::say(data);
 ```
 
-Replace the request body (memory; `set_body_file` / builder APIs are in the compatibility doc):
+Replace the request body in `content_by_rss_file` (memory; `set_body_file` / builder APIs are in the compatibility doc):
 
 ```rss
 use ngx;
@@ -422,8 +425,10 @@ to a directory to place them elsewhere.
   `BINDGEN_EXTRA_CLANG_ARGS`; install clang and libclang; point
   `NGINX_SOURCE_DIR` / `NGINX_BUILD_DIR` at the configured 1.30.4 tree.
 - `script imports are not supported` / `failed to compile script` — only
-  catalogued ngx hosts may be imported in the access phase (timers, codec,
-  time, metadata, constants, and `ngx::log`). `print` is rejected (use `ngx::log`); `runtime::sleep` is rejected.
+  catalogued ngx hosts allowed in the active directive phase may be imported.
+  `access_by_rss_file`, `content_by_rss_file`, and `log_by_rss_file` have
+  distinct phase allowlists; see the compatibility matrix. Bare `print` and
+  `runtime::sleep` are rejected.
 - HTTP 500 from an access script — VM runtime error or unexpected Waiting on
   an import-free program. Check the error log.
 - HTTP 499 on a sleep route — the client closed the connection before the

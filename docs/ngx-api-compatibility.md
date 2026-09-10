@@ -118,9 +118,19 @@ Shared sets used by the tables:
 | `PHASE_REQ_SET_METHOD` | `set`, `rewrite`, `access`, `content`, `header_filter` |
 | `PHASE_REQ_SET_URI` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter` |
 | `PHASE_REQ_SET_HEADER` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `balancer` |
+| `PHASE_REQ_READ_BODY` | `rewrite`, `access`, `content` |
+| `PHASE_REQ_GET_BODY_DATA` | `rewrite`, `access`, `content`, `log` |
+| `PHASE_REQ_GET_BODY_FILE` | `rewrite`, `access`, `content` |
+| `PHASE_REQ_SET_BODY` | `rewrite`, `access`, `content` |
 | `PHASE_RESPONSE_META` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `balancer` |
+| `PHASE_OUTPUT` | `content` |
 | `PHASE_EXIT` | `rewrite`, `access`, `content`, `header_filter`, `timer`, `balancer`, `ssl_certificate`, `ssl_session_fetch`, `ssl_session_store` |
 | `PHASE_REDIRECT` | `rewrite`, `access`, `content` |
+| `PHASE_CTX` | `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `timer`, `balancer`, `ssl_certificate`, `ssl_session_fetch`, `ssl_session_store`, `ssl_client_hello` |
+| `PHASE_DICT_LOOKUP` | same as `PHASE_ALL` |
+| `PHASE_DICT_GET` | same as `PHASE_CTX` |
+| `PHASE_DICT_WRITE` | `init`, `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `timer`, `balancer`, `ssl_certificate`, `ssl_session_fetch`, `ssl_session_store`, `ssl_client_hello` |
+| `PHASE_SOCKET_UDP` | same as `SLEEP_PHASES` |
 
 ## Cross-cutting adaptations
 
@@ -166,11 +176,13 @@ host adds a further difference.
    messages containing NUL are host errors. The line is prefixed
    `ngx-rustscript: `. OpenResty varargs are a single string.
 9. **Phase and config import enforcement.** `compile_rss_source` compiles
-   against `ngx_host_catalog()` and then
-   `validate_program_imports_for_phase(..., Access)`. Unknown names,
-   phase-forbidden names, arity, and type mismatches fail distinctly at
-   `nginx -t` / reload. Catalog phase metadata is the allowlist for
-   future directives; only `access` is wired today.
+   access scripts against `ngx_host_catalog()` and then
+   `validate_program_imports_for_phase(..., Access)`;
+   `compile_rss_source_for_phase` performs the corresponding Content or
+   Log validation for `content_by_rss_file` and `log_by_rss_file`. Unknown
+   names, phase-forbidden names, arity, and type mismatches fail distinctly
+   at `nginx -t` / reload. Catalog phase metadata is the allowlist for all
+   three executable directives and for documented future phases.
 10. **`ngx.worker.pids` semantics.** The array always includes live
     `ngx_pid` when `pid > 0`. Other `ngx_processes` slots are included
     only when `pid > 0` and `channel[0] > 0` (excludes master, helpers,
@@ -262,7 +274,7 @@ Cycle-dependent hosts fail with a host error when `ngx_cycle` is null.
 
 | OpenResty API | RustScript callable | Status | Phases | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- |
-| `ngx.get_phase` | `ngx::get_phase() -> string` | adapted | `PHASE_ALL` | Reads the worker-thread execution scope. Fails outside a scope. `ssl_certificate` is returned as `ssl_cert`. Current runtime always runs in `access`. | `tests/ngx_meta.rs` (`get_phase_reads_execution_scope_and_fails_outside_a_request`), `tests/access_nginx.rs` |
+| `ngx.get_phase` | `ngx::get_phase() -> string` | adapted | `PHASE_ALL` | Reads the worker-thread execution scope. Fails outside a scope. `ssl_certificate` is returned as `ssl_cert`. Executable request handlers report `access`, `content`, or `log` according to the active directive. | `tests/ngx_meta.rs` (`get_phase_reads_execution_scope_and_fails_outside_a_request`), `tests/access_nginx.rs`, `tests/content_nginx.rs`, `tests/log_nginx.rs` |
 | `ngx.config.subsystem` | `ngx::config::subsystem() -> string` | supported | `PHASE_CONFIG_RUNTIME` | Always `"http"`. Stream is out of scope. | `tests/ngx_meta.rs` (`compile_time_config_metadata_is_owned_and_truthful`) |
 | `ngx.config.debug` | `ngx::config::debug() -> bool` | supported | `PHASE_CONFIG_RUNTIME` | `ngx::log::DEBUG` of the linked NGINX build. | `tests/ngx_meta.rs` |
 | `ngx.config.prefix` | `ngx::config::prefix() -> string` | adapted | `PHASE_CONFIG_RUNTIME` | Owned copy of `ngx_cycle.prefix`. Requires a live cycle. | `tests/ngx_meta.rs`, `tests/access_nginx.rs` |
@@ -283,7 +295,7 @@ accepted in `tests/access_nginx.rs`
 
 | OpenResty API | RustScript callable | Status | Phases | Yield | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ngx.log` | `ngx::log(level: int, message: string) -> null` | adapted | `PHASE_ALL` | sync | level `NGX_LOG_STDERR..=NGX_LOG_DEBUG`; no embedded NUL | Single string, not varargs. Request log when the access scope is live and allows `LOG`; otherwise cycle log; error if neither. Prefix `ngx-rustscript: `. No global `print`. | `tests/ngx_meta.rs` (`log_*`), `tests/access_nginx.rs` (`access_phase_logs_*`, `access_phase_rejects_invalid_log_level_and_embedded_nul`) |
+| `ngx.log` | `ngx::log(level: int, message: string) -> null` | adapted | `PHASE_ALL` | sync | level `NGX_LOG_STDERR..=NGX_LOG_DEBUG`; no embedded NUL | Single string, not varargs. Request log when a request execution scope is live and allows `LOG`; otherwise cycle log; error if neither. Prefix `ngx-rustscript: `. No global `print`. | `tests/ngx_meta.rs` (`log_*`), `tests/access_nginx.rs` (`access_phase_logs_*`, `access_phase_rejects_invalid_log_level_and_embedded_nul`), `tests/log_nginx.rs` |
 
 ## Constant families
 
@@ -538,14 +550,14 @@ request-owned VMs.
 
 | OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ngx.shared.DICT` | `ngx::shared::dict(name: string) -> SharedDictHandle` | adapted | `PHASE_DICT_LOOKUP` | unknown zone is a host error | Typed handle, not `ngx.shared.NAME` field | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT` | `ngx::shared::dict(name: string) -> resource` | adapted | `PHASE_DICT_LOOKUP` | unknown zone is a host error | Typed `ngx.shared.dict` handle, not `ngx.shared.NAME` field | `tests/ngx_shared_dict.rs` |
 | `ngx.shared.DICT.get` | `ngx::shared::get(dict, key) -> map` | adapted | `PHASE_DICT_GET` | missing → `{value: null}` | Map `{value, flags, stale, error}` | `tests/ngx_shared_dict.rs` |
 | `ngx.shared.DICT.get_stale` | `ngx::shared::get_stale(dict, key) -> map` | adapted | `PHASE_DICT_GET` | stale expired values | `stale` is bool | `tests/ngx_shared_dict.rs` |
 | `ngx.shared.DICT.set` | `ngx::shared::set(dict, key, value, exptime, flags) -> map` | adapted | `PHASE_DICT_WRITE` | LRU up to 30 | `{ok, error, forcible}` | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.safe_set` | `ngx::shared::safe_set(...)` | adapted | `PHASE_DICT_WRITE` | no eviction | `{ok, error}` | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.add` | `ngx::shared::add(...)` | adapted | `PHASE_DICT_WRITE` | exists → error | `{ok, error, forcible}` | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.safe_add` | `ngx::shared::safe_add(...)` | adapted | `PHASE_DICT_WRITE` | no eviction | `{ok, error}` | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.replace` | `ngx::shared::replace(...)` | adapted | `PHASE_DICT_WRITE` | missing → not found | `{ok, error, forcible}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.safe_set` | `ngx::shared::safe_set(dict, key, value, exptime, flags) -> map` | adapted | `PHASE_DICT_WRITE` | no eviction | `{ok, error}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.add` | `ngx::shared::add(dict, key, value, exptime, flags) -> map` | adapted | `PHASE_DICT_WRITE` | exists → error | `{ok, error, forcible}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.safe_add` | `ngx::shared::safe_add(dict, key, value, exptime, flags) -> map` | adapted | `PHASE_DICT_WRITE` | no eviction | `{ok, error}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.replace` | `ngx::shared::replace(dict, key, value, exptime, flags) -> map` | adapted | `PHASE_DICT_WRITE` | missing → not found | `{ok, error, forcible}` | `tests/ngx_shared_dict.rs` |
 | `ngx.shared.DICT.delete` | `ngx::shared::delete(dict, key) -> null` | adapted | `PHASE_DICT_WRITE` | — | Missing delete is success | `tests/ngx_shared_dict.rs` |
 | `ngx.shared.DICT.incr` | `ngx::shared::incr(dict, key, value, init, init_ttl) -> map` | adapted | `PHASE_DICT_WRITE` | numbers only | `{value, error, forcible}` | `tests/ngx_shared_dict.rs` |
 | `ngx.shared.DICT.ttl` | `ngx::shared::ttl(dict, key) -> map` | adapted | `PHASE_DICT_WRITE` | never-expire is `0` | `{value, error}` | `tests/ngx_shared_dict.rs` |
@@ -659,16 +671,17 @@ acceptance is `tests/nginx_integration.py`.
 Not production hosts in this matrix (do not import them):
 
 - `ngx.exec` / internal redirect (`set_uri jump=true`)
-- Timer callbacks and light threads: `ngx::thread::{spawn,wait,kill}`,
-  `ngx::timer::{at,every}`, `ngx::on_abort`, `ngx::run_worker_thread`.
-  Configuration compile rejects those names in access, content, and log
-  (`UnsupportedImport`). The execution contract and upstream `pd-vm` gap
-  are in [docs/design/ngx-scheduler.md](design/ngx-scheduler.md). Host
-  count stays **191**.
-- `ngx::semaphore::{new,wait,post,count}` is also absent. A counting
-  semaphore could reuse generic `HostFuture` and `ResourceHandle` without
-  script callables; that does not unlock thread/timer/`on_abort` APIs and
-  is not registered.
+- Timer callbacks/counters and light threads: `ngx::thread::{spawn,wait,kill}`,
+  `ngx::timer::{at,every,pending_count,running_count}`, `ngx::on_abort`,
+  `ngx::run_worker_thread`. Configuration compile rejects those names in
+  access, content, and log (`UnsupportedImport`). The execution contract
+  and upstream `pd-vm` gap are in
+  [docs/design/ngx-scheduler.md](design/ngx-scheduler.md). Host count stays
+  **191**.
+- Bare `ngx::semaphore` and `ngx::semaphore::{new,wait,post,count}` are
+  also absent. A counting semaphore could reuse generic `HostFuture` and
+  `ResourceHandle` without script callables; that does not unlock
+  thread/timer/`on_abort` APIs and is not registered.
 - Stream subsystem, `ndk.set_var.*`, Lua `coroutine.*`
 - `tcpsock:getsslpointer` / `tcpsock:getsslctx` (no NGINX SSL FFI)
 - `print`, `runtime::sleep`, and test hosts `ngx::probe` / `ngx::ready` /
