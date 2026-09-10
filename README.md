@@ -328,6 +328,11 @@ returned to the pool.
 The current ngx host surface (signatures, phases, yield behavior,
 limits, and OpenResty adaptations) is listed in
 [docs/ngx-api-compatibility.md](docs/ngx-api-compatibility.md).
+`ngx::thread::{spawn,wait,kill}`, `ngx::timer::{at,every}`,
+`ngx::on_abort`, `ngx::semaphore::*`, and `ngx::run_worker_thread` are
+not production hosts; configuration compile rejects those imports.
+The callback execution contract is
+[docs/design/ngx-scheduler.md](docs/design/ngx-scheduler.md).
 Content-phase `ngx::send_headers` / `ngx::print` / `ngx::say` /
 `ngx::flush` / `ngx::eof` copy payload on the worker thread into
 request-pool buffers and send through `ngx_http_output_filter`. Access

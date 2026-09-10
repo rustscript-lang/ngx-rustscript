@@ -659,7 +659,16 @@ acceptance is `tests/nginx_integration.py`.
 Not production hosts in this matrix (do not import them):
 
 - `ngx.exec` / internal redirect (`set_uri jump=true`)
-- Timer callbacks, light threads
+- Timer callbacks and light threads: `ngx::thread::{spawn,wait,kill}`,
+  `ngx::timer::{at,every}`, `ngx::on_abort`, `ngx::run_worker_thread`.
+  Configuration compile rejects those names in access, content, and log
+  (`UnsupportedImport`). The execution contract and upstream `pd-vm` gap
+  are in [docs/design/ngx-scheduler.md](design/ngx-scheduler.md). Host
+  count stays **191**.
+- `ngx::semaphore::{new,wait,post,count}` is also absent. A counting
+  semaphore could reuse generic `HostFuture` and `ResourceHandle` without
+  script callables; that does not unlock thread/timer/`on_abort` APIs and
+  is not registered.
 - Stream subsystem, `ndk.set_var.*`, Lua `coroutine.*`
 - `tcpsock:getsslpointer` / `tcpsock:getsslctx` (no NGINX SSL FFI)
 - `print`, `runtime::sleep`, and test hosts `ngx::probe` / `ngx::ready` /
