@@ -6,7 +6,9 @@
 use ngx_rustscript_nginx_test_stubs as _;
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener as StdTcpListener, UdpSocket as StdUdpSocket};
+use std::net::{
+    SocketAddr, TcpListener as StdTcpListener, ToSocketAddrs, UdpSocket as StdUdpSocket,
+};
 use std::os::unix::io::RawFd;
 use std::sync::Arc;
 use std::thread;
@@ -204,7 +206,13 @@ fn settimeout_only_program_requires_request_state() {
 
 #[test]
 fn dns_setpeername_echo_round_trip() {
-    let peer = bind_echo_peer("127.0.0.1:0");
+    let resolved = ("localhost", 0)
+        .to_socket_addrs()
+        .expect("resolve localhost")
+        .next()
+        .expect("localhost address");
+    assert!(resolved.ip().is_loopback());
+    let peer = bind_echo_peer(&resolved.to_string());
     let port = peer.local_addr().unwrap().port();
     let echo = spawn_echo(peer, b"ping", b"pong");
     let status = pump(
