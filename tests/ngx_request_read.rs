@@ -363,25 +363,16 @@ fn request_read_schemas_match_callable_namespaces() {
     assert_eq!(headers.params.len(), 2);
     assert_eq!(headers.params[0].ty, HostTypeSchema::Unknown);
     assert_eq!(headers.params[1].ty, HostTypeSchema::Unknown);
-    assert_eq!(
-        headers.return_type,
-        HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown))
-    );
+    assert_eq!(headers.return_type, HostTypeSchema::Unknown);
 
     let args = schema_named(GET_URI_ARGS);
     assert_eq!(args.params.len(), 1);
     assert_eq!(args.params[0].ty, HostTypeSchema::Unknown);
-    assert_eq!(
-        args.return_type,
-        HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown))
-    );
+    assert_eq!(args.return_type, HostTypeSchema::Unknown);
 
     let post = schema_named(GET_POST_ARGS);
     assert_eq!(post.params.len(), 1);
-    assert_eq!(
-        post.return_type,
-        HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown))
-    );
+    assert_eq!(post.return_type, HostTypeSchema::Unknown);
 
     assert_eq!(schema_named(IS_INTERNAL).return_type, HostTypeSchema::Bool);
     assert_eq!(schema_named(START_TIME).return_type, HostTypeSchema::Float);
