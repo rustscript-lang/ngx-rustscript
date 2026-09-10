@@ -1,0 +1,34 @@
+use ngx;
+
+let LIMIT = 5;
+let WINDOW_SECONDS = 2;
+let RETRY_AFTER = "2";
+
+let key = ngx::var::get("rate_limit_key").unwrap_or("");
+if key == "" {
+    ngx::exit(ngx::http::status_service_unavailable());
+}
+
+let dict = ngx::shared::dict("ratelimit");
+let added = ngx::shared::safe_add(dict, key, 1, WINDOW_SECONDS, null);
+if added["ok"] {
+    if 1 > LIMIT {
+        ngx::header::set("Retry-After", RETRY_AFTER);
+        ngx::exit(ngx::http::status_too_many_requests());
+    }
+} else {
+    if added["error"] != "exists" {
+        ngx::exit(ngx::http::status_service_unavailable());
+    }
+    let counted = ngx::shared::incr(dict, key, 1, null, null);
+    if counted["error"] != null {
+        ngx::exit(ngx::http::status_service_unavailable());
+    }
+    if counted["forcible"] {
+        ngx::exit(ngx::http::status_service_unavailable());
+    }
+    if counted["value"] > LIMIT {
+        ngx::header::set("Retry-After", RETRY_AFTER);
+        ngx::exit(ngx::http::status_too_many_requests());
+    }
+}
