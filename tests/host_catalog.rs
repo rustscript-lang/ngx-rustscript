@@ -61,21 +61,22 @@ fn manifest_catalog_and_runtime_names_correspond() {
     let manifest = ngx_host_manifest();
     let runtime_names = production_runtime_host_names();
 
-    let catalog_names: HashSet<&str> = catalog
+    let catalog_names: Vec<&str> = catalog
         .functions()
         .iter()
         .map(|schema| schema.name.as_str())
         .collect();
-    let manifest_names: HashSet<&str> = manifest.iter().map(|entry| entry.name).collect();
-    let runtime_set: HashSet<&str> = runtime_names.iter().copied().collect();
+    let manifest_names: Vec<&str> = manifest.iter().map(|entry| entry.name).collect();
 
     assert_eq!(
-        catalog_names, runtime_set,
-        "compiler catalog names must match runtime bindings exactly"
+        catalog_names.as_slice(),
+        runtime_names,
+        "compiler catalog names and order must match runtime bindings exactly"
     );
     assert_eq!(
-        manifest_names, runtime_set,
-        "manifest names must match runtime bindings exactly"
+        manifest_names.as_slice(),
+        runtime_names,
+        "manifest names and order must match runtime bindings exactly"
     );
     assert_eq!(
         catalog.functions().len(),

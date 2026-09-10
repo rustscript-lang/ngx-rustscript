@@ -14,6 +14,8 @@ unsigned int ngx_rustscript_request_is_internal(const ngx_http_request_t *r);
 unsigned int ngx_rustscript_request_headers_sent(const ngx_http_request_t *r);
 unsigned int ngx_rustscript_request_reading_body(const ngx_http_request_t *r);
 unsigned int ngx_rustscript_request_discard_body(const ngx_http_request_t *r);
+unsigned int ngx_rustscript_c_request_header_only(const ngx_http_request_t *r);
+unsigned int ngx_rustscript_c_request_is_http10(const ngx_http_request_t *r);
 void ngx_rustscript_c_request_set_uri_flags(ngx_http_request_t *r, unsigned int internal,
     unsigned int valid_unparsed_uri, unsigned int valid_location, unsigned int uri_changed);
 void ngx_rustscript_c_headers_out_reset_specials(ngx_http_request_t *r);
@@ -166,18 +168,23 @@ int main(void)
     if (ngx_rustscript_request_is_internal(NULL) != 0
         || ngx_rustscript_request_headers_sent(NULL) != 0
         || ngx_rustscript_request_reading_body(NULL) != 0
-        || ngx_rustscript_request_discard_body(NULL) != 0)
+        || ngx_rustscript_request_discard_body(NULL) != 0
+        || ngx_rustscript_c_request_header_only(NULL) != 0
+        || ngx_rustscript_c_request_is_http10(NULL) != 0)
     {
         fail("NULL request must read as false");
     }
 
     memset(&r, 0, sizeof(r));
+    r.http_version = NGX_HTTP_VERSION_11;
     if (ngx_rustscript_request_is_internal(&r) != 0
         || ngx_rustscript_request_headers_sent(&r) != 0
         || ngx_rustscript_request_reading_body(&r) != 0
-        || ngx_rustscript_request_discard_body(&r) != 0)
+        || ngx_rustscript_request_discard_body(&r) != 0
+        || ngx_rustscript_c_request_header_only(&r) != 0
+        || ngx_rustscript_c_request_is_http10(&r) != 0)
     {
-        fail("zeroed request must read as false");
+        fail("zeroed HTTP/1.1 request must read as false");
     }
 
     r.filter_finalize = 1;
@@ -233,6 +240,35 @@ int main(void)
     }
 
     r.discard_body = 0;
+
+    r.header_only = 1;
+    if (ngx_rustscript_c_request_header_only(&r) != 1) {
+        fail("C header_only=1 must make request header-only");
+    }
+    if (ngx_rustscript_request_headers_sent(&r) != 0
+        || ngx_rustscript_c_request_is_http10(&r) != 0)
+    {
+        fail("C header_only must not affect neighboring output shims");
+    }
+    r.header_only = 0;
+
+    r.method = NGX_HTTP_HEAD;
+    if (ngx_rustscript_c_request_header_only(&r) != 1) {
+        fail("HEAD method must make request header-only");
+    }
+    r.method = NGX_HTTP_GET;
+    if (ngx_rustscript_c_request_header_only(&r) != 0) {
+        fail("GET without header_only must allow a response body");
+    }
+
+    r.http_version = NGX_HTTP_VERSION_10;
+    if (ngx_rustscript_c_request_is_http10(&r) != 1) {
+        fail("HTTP/1.0 must make is_http10 true");
+    }
+    r.http_version = NGX_HTTP_VERSION_11;
+    if (ngx_rustscript_c_request_is_http10(&r) != 0) {
+        fail("HTTP/1.1 must make is_http10 false");
+    }
 
     ngx_rustscript_c_request_set_uri_flags(NULL, 1, 1, 1, 1);
     ngx_rustscript_c_headers_out_reset_specials(NULL);
