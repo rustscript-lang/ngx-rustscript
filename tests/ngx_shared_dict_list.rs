@@ -113,18 +113,12 @@ fn list_and_maintenance_hosts_are_catalogued() {
                 assert_eq!(schema.params.len(), 3);
                 assert_eq!(schema.params[1].ty, HostTypeSchema::String);
                 assert_eq!(schema.params[2].ty, HostTypeSchema::Unknown);
-                assert_eq!(
-                    schema.return_type,
-                    HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown))
-                );
+                assert_eq!(schema.return_type, HostTypeSchema::Unknown);
             }
             NGX_SHARED_LPOP_NAME | NGX_SHARED_RPOP_NAME | NGX_SHARED_LLEN_NAME => {
                 assert_eq!(schema.params.len(), 2);
                 assert_eq!(schema.params[1].ty, HostTypeSchema::String);
-                assert_eq!(
-                    schema.return_type,
-                    HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown))
-                );
+                assert_eq!(schema.return_type, HostTypeSchema::Unknown);
             }
             NGX_SHARED_FLUSH_ALL_NAME => {
                 assert_eq!(schema.params.len(), 1);

@@ -20,6 +20,24 @@ fn ret<T: IntoHostCallOutcome>(value: T) -> VmResult<CallOutcome> {
     Ok(value.into_host_call_outcome())
 }
 
+#[derive(Debug)]
+struct DecodedArgsResult {
+    args: VmMap,
+    truncated: bool,
+}
+
+impl IntoHostCallOutcome for DecodedArgsResult {
+    fn into_host_call_outcome(self) -> CallOutcome {
+        let mut carrier = VmMap::new();
+        carrier.insert(
+            Value::string("args"),
+            Value::Map(std::sync::Arc::new(self.args)),
+        );
+        carrier.insert(Value::string("truncated"), Value::Bool(self.truncated));
+        carrier.into_host_call_outcome()
+    }
+}
+
 fn limit_input(name: &str, len: usize) -> VmResult<()> {
     if len > MAX_CODEC_INPUT_BYTES {
         return Err(VmError::HostError(format!(
@@ -397,10 +415,7 @@ pub fn decode_args(query: &str, max_args: &Value) -> VmResult<CallOutcome> {
     } as usize;
 
     let (args, truncated) = decode_query_args(query.as_bytes(), max_args);
-    let mut result = VmMap::new();
-    result.insert(Value::string("args"), Value::Map(std::sync::Arc::new(args)));
-    result.insert(Value::string("truncated"), Value::Bool(truncated));
-    ret(result)
+    ret(DecodedArgsResult { args, truncated })
 }
 
 fn encode_base64_bytes(bytes: &[u8], no_padding: bool) -> String {

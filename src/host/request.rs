@@ -33,6 +33,40 @@ fn ret<T: IntoHostCallOutcome>(value: T) -> VmResult<CallOutcome> {
     Ok(value.into_host_call_outcome())
 }
 
+#[derive(Debug)]
+struct RequestHeadersResult {
+    headers: VmMap,
+    truncated: bool,
+}
+
+#[derive(Debug)]
+struct RequestArgsResult {
+    args: VmMap,
+    truncated: bool,
+}
+
+fn map_envelope_outcome(field: &'static str, values: VmMap, truncated: bool) -> CallOutcome {
+    let mut carrier = VmMap::new();
+    carrier.insert(
+        Value::string(field),
+        Value::Map(std::sync::Arc::new(values)),
+    );
+    carrier.insert(Value::string("truncated"), Value::Bool(truncated));
+    carrier.into_host_call_outcome()
+}
+
+impl IntoHostCallOutcome for RequestHeadersResult {
+    fn into_host_call_outcome(self) -> CallOutcome {
+        map_envelope_outcome("headers", self.headers, self.truncated)
+    }
+}
+
+impl IntoHostCallOutcome for RequestArgsResult {
+    fn into_host_call_outcome(self) -> CallOutcome {
+        map_envelope_outcome("args", self.args, self.truncated)
+    }
+}
+
 fn scope_err(err: ScopeError) -> VmError {
     VmError::HostError(err.to_string())
 }
@@ -193,13 +227,6 @@ fn insert_decoded_arg(args: &mut VmMap, key: String, value: Value) {
             args.insert(key_value, Value::array(vec![previous, value]));
         }
     }
-}
-
-fn result_map(inner_key: &str, inner: VmMap, truncated: bool) -> VmMap {
-    let mut result = VmMap::new();
-    result.insert(Value::string(inner_key), Value::Map(std::sync::Arc::new(inner)));
-    result.insert(Value::string("truncated"), Value::Bool(truncated));
-    result
 }
 
 fn http_version_number(version: ngx_uint_t) -> Option<f64> {
@@ -698,7 +725,7 @@ pub fn get_headers(max_headers: &Value, raw: &Value) -> VmResult<CallOutcome> {
     let raw_names = optional_bool(raw, "ngx::req::get_headers raw")?.unwrap_or(false);
     with_request(|request| {
         let (headers, truncated) = collect_headers(&request.as_ref().headers_in.headers, max, raw_names)?;
-        ret(result_map("headers", headers, truncated))
+        ret(RequestHeadersResult { headers, truncated })
     })
 }
 
@@ -714,7 +741,7 @@ pub fn get_uri_args(max_args: &Value) -> VmResult<CallOutcome> {
     with_request(|request| {
         let bytes = copy_ngx_str(request.as_ref().args, MAX_COPY_BYTES, "ngx::req::get_uri_args")?;
         let (args, truncated) = super::codec::decode_query_args(&bytes, max);
-        ret(result_map("args", args, truncated))
+        ret(RequestArgsResult { args, truncated })
     })
 }
 
@@ -735,7 +762,7 @@ pub fn get_post_args(max_args: &Value) -> VmResult<CallOutcome> {
         }
         let bytes = super::body::copy_completed_body(request.as_ref(), "ngx::req::get_post_args")?;
         let (args, truncated) = super::codec::decode_query_args(&bytes, max);
-        ret(result_map("args", args, truncated))
+        ret(RequestArgsResult { args, truncated })
     })
 }
 

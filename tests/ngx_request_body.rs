@@ -698,10 +698,14 @@ if file == null {
         &post,
         r#"
 use ngx;
+struct RequestArgsResult {
+    args: map,
+    truncated: bool
+}
 ngx::req::read_body();
-let parsed = ngx::req::get_post_args(null);
-ngx::say(ngx::encode_args(parsed["args"]));
-if parsed["truncated"] {
+let parsed: RequestArgsResult = ngx::req::get_post_args(null);
+ngx::say(ngx::encode_args(parsed.args));
+if parsed.truncated {
     ngx::say("trunc");
 } else {
     ngx::say("full");

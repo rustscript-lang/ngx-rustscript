@@ -35,6 +35,159 @@ fn error_text(err: &ConfigError) -> String {
 }
 
 #[test]
+fn shared_fixed_results_compile_as_explicit_struct_types() {
+    compile(
+        r#"
+        use ngx;
+
+        struct SharedGetResult<T> {
+            value: T?,
+            flags: int,
+            stale: bool,
+            error: string?
+        }
+
+        struct SharedStoreResult {
+            ok: bool,
+            error: string?,
+            forcible: bool
+        }
+
+        struct SharedSafeStoreResult {
+            ok: bool,
+            error: string?
+        }
+
+        struct SharedIncrResult {
+            value: number?,
+            error: string?,
+            forcible: bool
+        }
+
+        struct SharedNumberResult {
+            value: number?,
+            error: string?
+        }
+
+        let dict = ngx::shared::dict("ratelimit");
+        let got: SharedGetResult<number> = ngx::shared::get(dict, "key");
+        if got.error == null && !got.stale {
+            got.value;
+            got.flags;
+        }
+
+        let stored: SharedStoreResult = ngx::shared::set(dict, "key", 1, 2, null);
+        if stored.ok && !stored.forcible {
+            stored.error;
+        }
+
+        let added: SharedSafeStoreResult =
+            ngx::shared::safe_add(dict, "key", 1, 2, null);
+        if added.ok {
+            added.error;
+        }
+
+        let counted: SharedIncrResult = ngx::shared::incr(dict, "key", 1, null, null);
+        if counted.error == null && !counted.forcible {
+            counted.value;
+        }
+
+        let ttl: SharedNumberResult = ngx::shared::ttl(dict, "key");
+        if ttl.error == null {
+            ttl.value;
+        }
+        "#,
+    );
+}
+
+#[test]
+fn dynamic_map_envelopes_compile_as_explicit_struct_types() {
+    compile(
+        r#"
+        use ngx;
+
+        struct DecodedArgsResult {
+            args: map,
+            truncated: bool
+        }
+
+        struct RequestHeadersResult {
+            headers: map,
+            truncated: bool
+        }
+
+        struct RequestArgsResult {
+            args: map,
+            truncated: bool
+        }
+
+        let decoded: DecodedArgsResult = ngx::decode_args("a=1", null);
+        if !decoded.truncated {
+            ngx::encode_args(decoded.args);
+        }
+
+        let headers: RequestHeadersResult = ngx::req::get_headers(null, null);
+        if !headers.truncated {
+            ngx::encode_args(headers.headers);
+        }
+
+        let uri: RequestArgsResult = ngx::req::get_uri_args(null);
+        let post: RequestArgsResult = ngx::req::get_post_args(null);
+        if !uri.truncated && !post.truncated {
+            ngx::encode_args(uri.args);
+            ngx::encode_args(post.args);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn dynamic_map_envelopes_are_not_declared_as_maps() {
+    let catalog = ngx_host_catalog();
+    for name in [
+        "ngx::decode_args",
+        "ngx::req::get_headers",
+        "ngx::req::get_uri_args",
+        "ngx::req::get_post_args",
+    ] {
+        assert_eq!(
+            catalog.function(name).expect("host schema").return_type,
+            HostTypeSchema::Unknown,
+            "{name} has a fixed outer result shape"
+        );
+    }
+}
+
+#[test]
+fn shared_fixed_results_are_not_declared_as_dynamic_maps() {
+    let catalog = ngx_host_catalog();
+    for name in [
+        "ngx::shared::get",
+        "ngx::shared::get_stale",
+        "ngx::shared::set",
+        "ngx::shared::safe_set",
+        "ngx::shared::add",
+        "ngx::shared::safe_add",
+        "ngx::shared::replace",
+        "ngx::shared::incr",
+        "ngx::shared::ttl",
+        "ngx::shared::expire",
+        "ngx::shared::lpush",
+        "ngx::shared::rpush",
+        "ngx::shared::lpop",
+        "ngx::shared::rpop",
+        "ngx::shared::llen",
+    ] {
+        let schema = catalog.function(name).expect("shared host schema");
+        assert_eq!(
+            schema.return_type,
+            HostTypeSchema::Unknown,
+            "{name} has a fixed result shape and must use an explicit RustScript struct type"
+        );
+    }
+}
+
+#[test]
 fn runtime_host_names_are_unique() {
     let names = production_runtime_host_names();
     let mut seen = HashSet::new();

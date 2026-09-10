@@ -1268,6 +1268,14 @@ fn nginx_request_read_semantics_methods_headers_args_vars_and_internal() {
         &script,
         r#"
 use ngx;
+struct RequestHeadersResult {
+    headers: map,
+    truncated: bool
+}
+struct RequestArgsResult {
+    args: map,
+    truncated: bool
+}
 ngx::log(ngx::log_level::notice(), "REQ_METHOD=" + ngx::req::get_method());
 ngx::log(ngx::log_level::notice(), "REQ_VERSION=" + ngx::encode_args({ v: ngx::req::http_version() }));
 if ngx::req::is_internal() {
@@ -1287,16 +1295,16 @@ if ngx::headers_sent() {
 }
 ngx::log(ngx::log_level::notice(), "REQ_START=" + ngx::encode_args({ v: ngx::req::start_time() }));
 ngx::log(ngx::log_level::notice(), "REQ_RAW=" + ngx::req::raw_header(null));
-let headers = ngx::req::get_headers(null, null);
-ngx::log(ngx::log_level::notice(), "REQ_HEADERS=" + ngx::encode_args(headers["headers"]));
-ngx::log(ngx::log_level::notice(), "REQ_HEADERS_TRUNC=" + ngx::encode_args({ v: headers["truncated"] }));
-let raw_headers = ngx::req::get_headers(null, true);
-ngx::log(ngx::log_level::notice(), "REQ_RAW_HEADERS=" + ngx::encode_args(raw_headers["headers"]));
-let capped = ngx::req::get_headers(1, null);
-ngx::log(ngx::log_level::notice(), "REQ_HEADERS_CAP=" + ngx::encode_args({ v: capped["truncated"] }));
-let args = ngx::req::get_uri_args(null);
-ngx::log(ngx::log_level::notice(), "REQ_ARGS=" + ngx::encode_args(args["args"]));
-ngx::log(ngx::log_level::notice(), "REQ_ARGS_TRUNC=" + ngx::encode_args({ v: args["truncated"] }));
+let headers: RequestHeadersResult = ngx::req::get_headers(null, null);
+ngx::log(ngx::log_level::notice(), "REQ_HEADERS=" + ngx::encode_args(headers.headers));
+ngx::log(ngx::log_level::notice(), "REQ_HEADERS_TRUNC=" + ngx::encode_args({ v: headers.truncated }));
+let raw_headers: RequestHeadersResult = ngx::req::get_headers(null, true);
+ngx::log(ngx::log_level::notice(), "REQ_RAW_HEADERS=" + ngx::encode_args(raw_headers.headers));
+let capped: RequestHeadersResult = ngx::req::get_headers(1, null);
+ngx::log(ngx::log_level::notice(), "REQ_HEADERS_CAP=" + ngx::encode_args({ v: capped.truncated }));
+let args: RequestArgsResult = ngx::req::get_uri_args(null);
+ngx::log(ngx::log_level::notice(), "REQ_ARGS=" + ngx::encode_args(args.args));
+ngx::log(ngx::log_level::notice(), "REQ_ARGS_TRUNC=" + ngx::encode_args({ v: args.truncated }));
 ngx::log(ngx::log_level::notice(), "REQ_VARS=" + ngx::encode_args({ uri: ngx::var::get("uri"), request_uri: ngx::var::get("request_uri"), args: ngx::var::get("args"), host: ngx::var::get("host"), missing: ngx::var::get("no_such_rss_var"), empty: ngx::var::get("rss_empty") }));
 "#,
     );

@@ -1651,7 +1651,7 @@ fn dict_get_schema(name: &'static str) -> HostFunctionSchema {
             dict_handle_param(),
             HostParamSchema::value("key", HostTypeSchema::String),
         ],
-        HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+        HostTypeSchema::Unknown,
     )
 }
 
@@ -1665,7 +1665,7 @@ fn dict_store_schema(name: &'static str) -> HostFunctionSchema {
             HostParamSchema::value("exptime", HostTypeSchema::Unknown),
             HostParamSchema::value("flags", HostTypeSchema::Unknown),
         ],
-        HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+        HostTypeSchema::Unknown,
     )
 }
 
@@ -1693,7 +1693,7 @@ fn schema_for(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("query", HostTypeSchema::String),
                 HostParamSchema::value("max_args", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+            HostTypeSchema::Unknown,
         ),
         NGX_ENCODE_BASE64_NAME => HostFunctionSchema::with_return(
             NGX_ENCODE_BASE64_NAME,
@@ -1767,17 +1767,17 @@ fn schema_for(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("max_headers", HostTypeSchema::Unknown),
                 HostParamSchema::value("raw", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+            HostTypeSchema::Unknown,
         ),
         NGX_REQ_GET_URI_ARGS_NAME => HostFunctionSchema::with_return(
             NGX_REQ_GET_URI_ARGS_NAME,
             vec![HostParamSchema::value("max_args", HostTypeSchema::Unknown)],
-            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+            HostTypeSchema::Unknown,
         ),
         NGX_REQ_GET_POST_ARGS_NAME => HostFunctionSchema::with_return(
             NGX_REQ_GET_POST_ARGS_NAME,
             vec![HostParamSchema::value("max_args", HostTypeSchema::Unknown)],
-            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+            HostTypeSchema::Unknown,
         ),
         NGX_REQ_READ_BODY_NAME => nullary(NGX_REQ_READ_BODY_NAME, HostTypeSchema::Null),
         NGX_REQ_DISCARD_BODY_NAME => nullary(NGX_REQ_DISCARD_BODY_NAME, HostTypeSchema::Null),
@@ -1950,7 +1950,7 @@ fn schema_for(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("init", HostTypeSchema::Unknown),
                 HostParamSchema::value("init_ttl", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+            HostTypeSchema::Unknown,
         ),
         NGX_SHARED_TTL_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_TTL_NAME,
@@ -1958,7 +1958,7 @@ fn schema_for(name: &str) -> HostFunctionSchema {
                 dict_handle_param(),
                 HostParamSchema::value("key", HostTypeSchema::String),
             ],
-            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+            HostTypeSchema::Unknown,
         ),
         NGX_SHARED_EXPIRE_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_EXPIRE_NAME,
@@ -1967,7 +1967,7 @@ fn schema_for(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("key", HostTypeSchema::String),
                 HostParamSchema::value("exptime", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+            HostTypeSchema::Unknown,
         ),
         NGX_SHARED_CAPACITY_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_CAPACITY_NAME,
@@ -1986,7 +1986,7 @@ fn schema_for(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("key", HostTypeSchema::String),
                 HostParamSchema::value("value", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+            HostTypeSchema::Unknown,
         ),
         NGX_SHARED_RPUSH_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_RPUSH_NAME,
@@ -1995,7 +1995,7 @@ fn schema_for(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("key", HostTypeSchema::String),
                 HostParamSchema::value("value", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+            HostTypeSchema::Unknown,
         ),
         NGX_SHARED_LPOP_NAME => dict_get_schema(NGX_SHARED_LPOP_NAME),
         NGX_SHARED_RPOP_NAME => dict_get_schema(NGX_SHARED_RPOP_NAME),

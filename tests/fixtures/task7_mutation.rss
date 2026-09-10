@@ -1,4 +1,8 @@
 use ngx;
+struct RequestHeadersResult {
+    headers: map,
+    truncated: bool
+}
 ngx::req::set_method(ngx::http::post());
 ngx::req::set_uri("/mutated", false);
 ngx::req::set_uri_args("k=v");
@@ -6,6 +10,7 @@ ngx::req::set_header("Host", "mut.example");
 ngx::var::set("writable", "from-rss");
 ngx::status::set(201);
 ngx::header::set("X-Resp", "ok");
-ngx::log(ngx::log_level::notice(), "TASK7_MUT_STATE " + ngx::encode_args({ method: ngx::req::get_method(), uri: ngx::var::get("uri"), args: ngx::var::get("args"), host: ngx::req::get_headers(null, null)["headers"]["host"], var: ngx::var::get("writable"), status: ngx::status::get(), resp: ngx::header::get("X-Resp") }));
+let request_headers: RequestHeadersResult = ngx::req::get_headers(null, null);
+ngx::log(ngx::log_level::notice(), "TASK7_MUT_STATE " + ngx::encode_args({ method: ngx::req::get_method(), uri: ngx::var::get("uri"), args: ngx::var::get("args"), host: request_headers.headers["host"], var: ngx::var::get("writable"), status: ngx::status::get(), resp: ngx::header::get("X-Resp") }));
 ngx::exit(201);
 ngx::log(ngx::log_level::notice(), "TASK7_MUT_MARKER");

@@ -405,6 +405,28 @@ fn assert_documented_constants() {
         !EXAMPLE_RSS.contains("incr(dict, key, 1, 0,"),
         "allocating incr init must not create windows: {EXAMPLE_RSS}"
     );
+    for required in [
+        "struct SharedSafeStoreResult",
+        "struct SharedIncrResult",
+        "let added: SharedSafeStoreResult",
+        "let counted: SharedIncrResult",
+        "added.ok",
+        "added.error",
+        "counted.error",
+        "counted.forcible",
+        "counted.value",
+    ] {
+        assert!(
+            EXAMPLE_RSS.contains(required),
+            "typed shared-dict result expression `{required}` missing: {EXAMPLE_RSS}"
+        );
+    }
+    for dynamic_access in ["added[", "counted["] {
+        assert!(
+            !EXAMPLE_RSS.contains(dynamic_access),
+            "fixed shared-dict result must use typed field access: {EXAMPLE_RSS}"
+        );
+    }
 }
 
 #[test]

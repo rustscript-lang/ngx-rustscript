@@ -230,12 +230,22 @@ rows share that allowlist except as noted). `log_by_rss_file` accepts
 them only because that citation exists and each name is on the closed
 Log allowlist.
 
+`ngx::decode_args` uses this fixed outer type; its `args` field remains a
+dynamic-key map:
+
+```rss
+struct DecodedArgsResult {
+    args: map,
+    truncated: bool
+}
+```
+
 | OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
 | `ngx.escape_uri` | `ngx::escape_uri(uri: string, escape_type: unknown) -> string` | adapted | `PHASE_ESCAPE_URI` | input/output caps; type `0..=8` | Second arg is `null` (default type 2, URI component) or int `0..=8`. Types match lua-nginx-module bitmaps (0 URI, 1 args, 2 component, 3 HTML, 4 refresh, 5/6 memcached, 7 header name, 8 header value). | `tests/ngx_codec.rs` (`escape_uri_*`), `tests/host_catalog.rs` |
 | `ngx.unescape_uri` | `ngx::unescape_uri(uri: string) -> string` | adapted | `PHASE_UNESCAPE_URI` | input cap | `+` becomes space; invalid `%` left as-is; non-UTF-8 bytes kept as `char::from` string. Not allowed in `ssl_session_fetch` / `ssl_session_store`. | `tests/ngx_codec.rs` (`unescape_uri_*`) |
 | `ngx.encode_args` | `ngx::encode_args(args: unknown) -> string` | adapted | `PHASE_ENCODE_ARGS` | 1024 pairs; input/output caps | Catalog type is `unknown` because object literals are not `map<unknown>`; runtime requires a map. Array values emit repeated keys. `true` is a bare key; `false`/`null` omitted. Nested maps/arrays-as-single-value rejected. Duplicate map keys overwrite; use arrays for multi-value keys. Not allowed in `init` / `init_worker`. | `tests/ngx_codec.rs` (`encode_args_*`) |
-| `ngx.decode_args` | `ngx::decode_args(query: string, max_args: unknown) -> map` | adapted | `PHASE_DECODE_ARGS` | default 100; hard max 1024 | Returns `{ args, truncated }`. See cross-cutting item 4. `max_args` is `null` or int. | `tests/ngx_codec.rs` (`decode_args_*`) |
+| `ngx.decode_args` | `ngx::decode_args(query: string, max_args: unknown) -> DecodedArgsResult` | adapted | `PHASE_DECODE_ARGS` | default 100; hard max 1024 | Returns fields `args: map` and `truncated: bool`; only `args` is a dynamic-key map. See cross-cutting item 4. `max_args` is `null` or int. | `tests/ngx_codec.rs` (`decode_args_*`) |
 | `ngx.encode_base64` | `ngx::encode_base64(input: unknown, no_padding: unknown) -> string` | adapted | `PHASE_CODEC_MISC_SSL_CLIENT_HELLO` | input/output caps | `input` is string or bytes. `no_padding` is `null`/`false` or `true`. | `tests/ngx_codec.rs` (`encode_base64_padding_and_decode_variants`) |
 | `ngx.decode_base64` | `ngx::decode_base64(text: string) -> optional<bytes>` | adapted | `PHASE_CODEC_MISC_SSL_CLIENT_HELLO` | input cap | Invalid input is `null`, not an error. Padding may be omitted. | `tests/ngx_codec.rs` (`encode_base64_padding_and_decode_variants`) |
 | `ngx.decode_base64mime` | `ngx::decode_base64mime(text: string) -> optional<bytes>` | adapted | `PHASE_CODEC_MISC` | input cap | Skips non-alphabet bytes; stops at first `=`. `data_len % 4 == 1` is `null`. **Not** allowed in `ssl_client_hello` (OpenResty v0.10.29 exception). | `tests/ngx_codec.rs` (`decode_base64mime_*`), `tests/host_catalog.rs` |
@@ -409,14 +419,26 @@ owned VM values on the worker main thread and never retain request, pool,
 or list pointers. They require a live request scope. `ngx::req::read_body`
 is async (`Waiting`); the rest of this family is sync.
 
+```rss
+struct RequestHeadersResult {
+    headers: map,
+    truncated: bool
+}
+
+struct RequestArgsResult {
+    args: map,
+    truncated: bool
+}
+```
+
 | OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
 | `ngx.req.get_method` | `ngx::req::get_method() -> string` | supported | `PHASE_REQ_GET_METHOD` | 256-byte method token | Custom methods keep the textual token. | `tests/ngx_request_read.rs` |
 | `ngx.req.http_version` | `ngx::req::http_version() -> optional<float>` | adapted | `PHASE_REQ_HTTP_VERSION` | none | `0.9`/`1.0`/`1.1`/`2.0`/`3.0`, or `null` if unrecognized. | `tests/ngx_request_read.rs` |
 | `ngx.req.raw_header` | `ngx::req::raw_header(no_request_line: unknown) -> string` | adapted | `PHASE_REQ_HTTP_VERSION` | 65536-byte reconstruction | Reconstructs from the **main** request connection header buffer and busy chain (OpenResty v0.10.29). Validates every pointer/range and rejects HTTP/2 (`r->main->stream`) and HTTP/3 (`http_version` 3.0 or non-null `v3_parse`) using main-request protocol truth. Parser NULs restore to `:` and CR/LF. Preread body after CRLFCRLF is stripped. `no_request_line` is `null`/`false`/`true`. Malformed ranges, null buffers, cycles, and over-cap copies are host errors. | `tests/ngx_request_read.rs` (`raw_header_*`) |
-| `ngx.req.get_headers` | `ngx::req::get_headers(max_headers: unknown, raw: unknown) -> map` | adapted | `PHASE_REQ_GET_HEADERS` | default 100; hard 1024; 8192-byte field; 65536-byte total | Returns `{ headers, truncated }`. `raw` `true` keeps original names; otherwise lowercase. Duplicate names become arrays. Empty values kept. `hash==0` skipped. Count/byte caps set `truncated=true` before further copy. Null elts with `nelts>0`, cycles, and impossible metadata are host errors, not silent `truncated=false`. | `tests/ngx_request_read.rs` (`get_headers_*`) |
-| `ngx.req.get_uri_args` | `ngx::req::get_uri_args(max_args: unknown) -> map` | adapted | `PHASE_REQ_GET_URI_ARGS` | default 100; hard 1024; 65536-byte query | Returns `{ args, truncated }` via the crate-private `decode_query_args` helper shared with `ngx::decode_args`. Trailing empty `&` at max_args is not truncated. `0` clamps to 1024. | `tests/ngx_request_read.rs`, `tests/ngx_codec.rs` |
-| `ngx.req.get_post_args` | `ngx::req::get_post_args(max_args: unknown) -> map` | adapted | `PHASE_REQ_GET_POST_ARGS` | same arg caps; 65536-byte body | Sync parse after `read_body` completion from memory **or** a bounded temp file. Returns `{ args, truncated }` with the shared decoder. Duplicate keys become arrays. Unread, still-reading, discarded, incomplete, or corrupt bodies are structured host errors. Does not delete NGINX temp files. Never initiates body read or yield. | `tests/ngx_request_read.rs`, `tests/ngx_request_body.rs` |
+| `ngx.req.get_headers` | `ngx::req::get_headers(max_headers: unknown, raw: unknown) -> RequestHeadersResult` | adapted | `PHASE_REQ_GET_HEADERS` | default 100; hard 1024; 8192-byte field; 65536-byte total | Fixed fields `headers: map` and `truncated: bool`; only `headers` has dynamic keys. `raw` `true` keeps original names; otherwise lowercase. Duplicate names become arrays. Empty values kept. `hash==0` skipped. Count/byte caps set `truncated=true` before further copy. Null elts with `nelts>0`, cycles, and impossible metadata are host errors, not silent truncation. | `tests/ngx_request_read.rs` |
+| `ngx.req.get_uri_args` | `ngx::req::get_uri_args(max_args: unknown) -> RequestArgsResult` | adapted | `PHASE_REQ_GET_URI_ARGS` | default 100; hard 1024; 65536-byte query | Fixed fields `args: map` and `truncated: bool`; only `args` has dynamic keys. Uses the crate-private `decode_query_args` helper shared with `ngx::decode_args`. Trailing empty `&` at max_args is not truncated. `0` clamps to 1024. | `tests/ngx_request_read.rs`, `tests/ngx_codec.rs` |
+| `ngx.req.get_post_args` | `ngx::req::get_post_args(max_args: unknown) -> RequestArgsResult` | adapted | `PHASE_REQ_GET_POST_ARGS` | same arg caps; 65536-byte body | Sync parse after `read_body` completion from memory **or** a bounded temp file. Fixed fields `args: map` and `truncated: bool`. Duplicate keys become arrays. Unread, still-reading, discarded, incomplete, or corrupt bodies are structured host errors. Does not delete NGINX temp files. Never initiates body read or yield. | `tests/ngx_request_body.rs` |
 | `ngx.req.read_body` | `ngx::req::read_body() -> null` | adapted | `PHASE_REQ_READ_BODY` | async; rewrite/access/content | Calls `ngx_http_read_client_request_body` through a C shim. Undoes that API's `r->main->count++` for `NGX_OK`/`NGX_AGAIN` so the phase driver (content `NGX_DONE` / access `NGX_AGAIN`) owns count. Premature client close (`c->error` / confirmed EOF) is `499`; timeout stays `408`; protocol/`413` statuses are preserved. A C read-event wrapper peeks EOF then finalizes `499` once, otherwise invokes NGINX's original body handler. Generation-safe `nginx_op` cell: callback completes once; cleanup cancels once; stale callbacks no-op. Futures hold no request/VM/module pointers. Idempotent after completion. Forbidden in Log. | `tests/ngx_request_body.rs`, `tests/lifecycle.rs` |
 | `ngx.req.discard_body` | `ngx::req::discard_body() -> null` | adapted | `PHASE_REQ_READ_BODY` | sync; rewrite/access/content | Calls `ngx_http_discard_request_body`. Never waits. Idempotent (`NGX_OK`/`NGX_AGAIN`). Discard-after-read is a no-op; read-after-discard completes immediately. Forbidden in Log. | `tests/ngx_request_body.rs` |
 | `ngx.req.get_body_data` | `ngx::req::get_body_data() -> optional<string>` | adapted | `PHASE_REQ_GET_BODY_DATA` | 65536-byte copy | Nullary like OpenResty. Owned copy of in-memory buffers. File-backed returns `null`. Empty memory buffers are skipped; inverted ranges and cycles are host errors. Allowed in Log (completed-body getter). | `tests/ngx_request_body.rs` |
@@ -538,11 +560,59 @@ bytes. Duplicate names (same or different size) are rejected. The zone
 is NGINX shared memory with a slab-backed rbtree/LRU store, the
 `init(shm_zone, old_data)` reload contract, and a cross-worker mutex.
 `ngx::shared::dict(name)` returns a typed handle; later methods take
-that handle. Multi-return OpenResty values become maps with fixed keys
-(`value` / `flags` / `stale` / `ok` / `error` / `forcible`; incr is
-`{value, error, forcible}` only). Optional `exptime` and `flags` are
-explicit `null`. Values are bool, int, float, string, or bytes;
-`set(..., null, ...)` deletes. `add`/`replace` reject null.
+that handle. Multi-return OpenResty values use fixed result structs at the
+RustScript boundary. The current host catalog exposes these return slots as
+`unknown`, so callers declare the matching struct and annotate the assignment;
+field access then uses `.value` / `.flags` / `.stale` / `.ok` / `.error` /
+`.forcible`. The VM's internal carrier is not part of the script-facing type.
+Truly dynamic-key collections remain `map` fields inside typed envelopes, such
+as `DecodedArgsResult.args` and `RequestHeadersResult.headers`.
+Optional `exptime` and `flags` are explicit `null`. Values are bool, int,
+float, string, or bytes; `set(..., null, ...)` deletes. `add`/`replace` reject
+null.
+
+The shared-dict result shapes are:
+
+```rss
+struct SharedGetResult<T> {
+    value: T?,
+    flags: int,
+    stale: bool,
+    error: string?
+}
+
+struct SharedStoreResult {
+    ok: bool,
+    error: string?,
+    forcible: bool
+}
+
+struct SharedSafeStoreResult {
+    ok: bool,
+    error: string?
+}
+
+struct SharedIncrResult {
+    value: number?,
+    error: string?,
+    forcible: bool
+}
+
+struct SharedNumberResult {
+    value: number?,
+    error: string?
+}
+```
+
+For example:
+
+```rss
+let added: SharedSafeStoreResult =
+    ngx::shared::safe_add(dict, key, 1, WINDOW_SECONDS, null);
+if added.ok {
+    // ...
+}
+```
 Keys are at most 65535 bytes; values at most 65536 bytes.
 Empty keys are rejected. LRU eviction reports `forcible`; `safe_*`
 never evicts and returns `no memory`. Shared dict hosts do not require
@@ -551,24 +621,24 @@ request-owned VMs.
 | OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
 | `ngx.shared.DICT` | `ngx::shared::dict(name: string) -> resource` | adapted | `PHASE_DICT_LOOKUP` | unknown zone is a host error | Typed `ngx.shared.dict` handle, not `ngx.shared.NAME` field | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.get` | `ngx::shared::get(dict, key) -> map` | adapted | `PHASE_DICT_GET` | missing → `{value: null}` | Map `{value, flags, stale, error}` | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.get_stale` | `ngx::shared::get_stale(dict, key) -> map` | adapted | `PHASE_DICT_GET` | stale expired values | `stale` is bool | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.set` | `ngx::shared::set(dict, key, value, exptime, flags) -> map` | adapted | `PHASE_DICT_WRITE` | LRU up to 30 | `{ok, error, forcible}` | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.safe_set` | `ngx::shared::safe_set(dict, key, value, exptime, flags) -> map` | adapted | `PHASE_DICT_WRITE` | no eviction | `{ok, error}` | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.add` | `ngx::shared::add(dict, key, value, exptime, flags) -> map` | adapted | `PHASE_DICT_WRITE` | exists → error | `{ok, error, forcible}` | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.safe_add` | `ngx::shared::safe_add(dict, key, value, exptime, flags) -> map` | adapted | `PHASE_DICT_WRITE` | no eviction | `{ok, error}` | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.replace` | `ngx::shared::replace(dict, key, value, exptime, flags) -> map` | adapted | `PHASE_DICT_WRITE` | missing → not found | `{ok, error, forcible}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.get` | `ngx::shared::get(dict, key) -> SharedGetResult<T>` | adapted | `PHASE_DICT_GET` | missing → `{value: null}` | Fields `value`, `flags`, `stale`, `error` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.get_stale` | `ngx::shared::get_stale(dict, key) -> SharedGetResult<T>` | adapted | `PHASE_DICT_GET` | stale expired values | `stale` is bool | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.set` | `ngx::shared::set(dict, key, value, exptime, flags) -> SharedStoreResult` | adapted | `PHASE_DICT_WRITE` | LRU up to 30 | Fields `ok`, `error`, `forcible` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.safe_set` | `ngx::shared::safe_set(dict, key, value, exptime, flags) -> SharedSafeStoreResult` | adapted | `PHASE_DICT_WRITE` | no eviction | Fields `ok`, `error` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.add` | `ngx::shared::add(dict, key, value, exptime, flags) -> SharedStoreResult` | adapted | `PHASE_DICT_WRITE` | exists → error | Fields `ok`, `error`, `forcible` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.safe_add` | `ngx::shared::safe_add(dict, key, value, exptime, flags) -> SharedSafeStoreResult` | adapted | `PHASE_DICT_WRITE` | no eviction | Fields `ok`, `error` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.replace` | `ngx::shared::replace(dict, key, value, exptime, flags) -> SharedStoreResult` | adapted | `PHASE_DICT_WRITE` | missing → not found | Fields `ok`, `error`, `forcible` | `tests/ngx_shared_dict.rs` |
 | `ngx.shared.DICT.delete` | `ngx::shared::delete(dict, key) -> null` | adapted | `PHASE_DICT_WRITE` | — | Missing delete is success | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.incr` | `ngx::shared::incr(dict, key, value, init, init_ttl) -> map` | adapted | `PHASE_DICT_WRITE` | numbers only | `{value, error, forcible}` | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.ttl` | `ngx::shared::ttl(dict, key) -> map` | adapted | `PHASE_DICT_WRITE` | never-expire is `0` | `{value, error}` | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.expire` | `ngx::shared::expire(dict, key, exptime) -> map` | adapted | `PHASE_DICT_WRITE` | — | `{ok, error}` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.incr` | `ngx::shared::incr(dict, key, value, init, init_ttl) -> SharedIncrResult` | adapted | `PHASE_DICT_WRITE` | numbers only | Fields `value`, `error`, `forcible` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.ttl` | `ngx::shared::ttl(dict, key) -> SharedNumberResult` | adapted | `PHASE_DICT_WRITE` | never-expire is `0` | Fields `value`, `error` | `tests/ngx_shared_dict.rs` |
+| `ngx.shared.DICT.expire` | `ngx::shared::expire(dict, key, exptime) -> SharedSafeStoreResult` | adapted | `PHASE_DICT_WRITE` | — | Fields `ok`, `error` | `tests/ngx_shared_dict.rs` |
 | `ngx.shared.DICT.capacity` | `ngx::shared::capacity(dict) -> int` | adapted | `PHASE_DICT_WRITE` | — | Zone size in bytes | `tests/ngx_shared_dict.rs` |
 | `ngx.shared.DICT.free_space` | `ngx::shared::free_space(dict) -> int` | adapted | `PHASE_DICT_WRITE` | approximate | Process-local: capacity − used; shm: `pfree * pagesize` | `tests/ngx_shared_dict.rs` |
-| `ngx.shared.DICT.lpush` | `ngx::shared::lpush(dict, key, value) -> map` | adapted | `PHASE_DICT_WRITE` | list len ≤ 65536; no LRU eviction | `{value: len, error}`; bool/null/map → `bad value type`; scalar conflict → `value not a list` without mutating the node | `tests/ngx_shared_dict_list.rs` |
-| `ngx.shared.DICT.rpush` | `ngx::shared::rpush(dict, key, value) -> map` | adapted | `PHASE_DICT_WRITE` | same | Same map as lpush; appends | `tests/ngx_shared_dict_list.rs` |
-| `ngx.shared.DICT.lpop` | `ngx::shared::lpop(dict, key) -> map` | adapted | `PHASE_DICT_WRITE` | decode before unlink | `{value, flags, stale, error}`; empty/missing → `{value: null}`; decode failure → `{error: "bad value type"}` and the item stays queued | `tests/ngx_shared_dict_list.rs` |
-| `ngx.shared.DICT.rpop` | `ngx::shared::rpop(dict, key) -> map` | adapted | `PHASE_DICT_WRITE` | same | Same map as lpop; pops tail | `tests/ngx_shared_dict_list.rs` |
-| `ngx.shared.DICT.llen` | `ngx::shared::llen(dict, key) -> map` | adapted | `PHASE_DICT_WRITE` | — | Missing/expired → `{value: 0}`; scalar → `value not a list` | `tests/ngx_shared_dict_list.rs` |
+| `ngx.shared.DICT.lpush` | `ngx::shared::lpush(dict, key, value) -> SharedNumberResult` | adapted | `PHASE_DICT_WRITE` | list len ≤ 65536; no LRU eviction | Fields `value`, `error`; bool/null/map → `bad value type`; scalar conflict → `value not a list` without mutating the node | `tests/ngx_shared_dict_list.rs` |
+| `ngx.shared.DICT.rpush` | `ngx::shared::rpush(dict, key, value) -> SharedNumberResult` | adapted | `PHASE_DICT_WRITE` | same | Same result type as lpush; appends | `tests/ngx_shared_dict_list.rs` |
+| `ngx.shared.DICT.lpop` | `ngx::shared::lpop(dict, key) -> SharedGetResult<T>` | adapted | `PHASE_DICT_WRITE` | decode before unlink | Fields `value`, `flags`, `stale`, `error`; empty/missing → `{value: null}`; decode failure → `{error: "bad value type"}` and the item stays queued | `tests/ngx_shared_dict_list.rs` |
+| `ngx.shared.DICT.rpop` | `ngx::shared::rpop(dict, key) -> SharedGetResult<T>` | adapted | `PHASE_DICT_WRITE` | same | Same result type as lpop; pops tail | `tests/ngx_shared_dict_list.rs` |
+| `ngx.shared.DICT.llen` | `ngx::shared::llen(dict, key) -> SharedNumberResult` | adapted | `PHASE_DICT_WRITE` | — | Missing/expired → `{value: 0}`; scalar → `value not a list` | `tests/ngx_shared_dict_list.rs` |
 | `ngx.shared.DICT.flush_all` | `ngx::shared::flush_all(dict) -> null` | adapted | `PHASE_DICT_WRITE` | LRU; ≤1024 visits/call | Each call first frees already-expired keys (visit-capped), then marks live LRU keys with `expires=1` (visit-capped), then `expire(0)`. Repeated calls make monotonic progress across >1024 keys; one call does not wipe the zone. | `tests/ngx_shared_dict_list.rs` |
 | `ngx.shared.DICT.flush_expired` | `ngx::shared::flush_expired(dict, max) -> int` | adapted | `PHASE_DICT_WRITE` | `max` 0/null still ≤ 1024 results; visits ≤ 1024 | Freed count. Walk stops at the result cap *or* the hard visit cap, whichever comes first. OpenResty `0` is unlimited. | `tests/ngx_shared_dict_list.rs` |
 | `ngx.shared.DICT.get_keys` | `ngx::shared::get_keys(dict, max) -> array<string>` | adapted | `PHASE_DICT_WRITE` | read-only; `max` 0/null still ≤ 1024 results; visits ≤ 1024 | Oldest-first, skips expired, never deletes or force-expires. OpenResty `0` returns all keys; this project keeps both a result cap and a visit cap. | `tests/ngx_shared_dict_list.rs` |

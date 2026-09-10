@@ -1,7 +1,8 @@
 // OpenResty-oriented shared dictionary hosts.
 //
-// Optional trailing arguments are explicit `null`. Multi-return values are
-// maps with fixed keys (`value`/`flags`/`stale`/`ok`/`error`/`forcible`).
+// Optional trailing arguments are explicit `null`. Fixed-shape multi-return
+// values use dedicated result structs; RustScript's VM represents struct values
+// with its map carrier at the host ABI boundary.
 
 use std::sync::Arc;
 
@@ -32,59 +33,154 @@ fn host_err(msg: impl Into<String>) -> VmError {
     VmError::HostError(msg.into())
 }
 
-fn insert_map(map: &mut VmMap, key: &str, value: Value) {
-    map.insert(Value::string(key), value);
-}
-
-fn get_map(result: shared_dict::GetResult) -> Value {
-    let mut map = VmMap::new();
-    insert_map(&mut map, "value", dict_value_to_vm(result.value));
-    insert_map(&mut map, "flags", Value::Int(i64::from(result.flags)));
-    insert_map(&mut map, "stale", Value::Bool(result.stale));
-    insert_map(
-        &mut map,
-        "error",
-        match result.error {
-            Some(err) => Value::String(err.to_string().into()),
-            None => Value::Null,
-        },
-    );
-    Value::Map(Arc::new(map))
-}
-
-fn store_map(result: shared_dict::StoreResult, include_forcible: bool) -> Value {
-    let mut map = VmMap::new();
-    insert_map(&mut map, "ok", Value::Bool(result.ok));
-    insert_map(
-        &mut map,
-        "error",
-        match result.error {
-            Some(err) => Value::String(err.to_string().into()),
-            None => Value::Null,
-        },
-    );
-    if include_forcible {
-        insert_map(&mut map, "forcible", Value::Bool(result.forcible));
+fn struct_outcome<const N: usize>(fields: [(&'static str, Value); N]) -> CallOutcome {
+    let mut carrier = VmMap::new();
+    for (name, value) in fields {
+        carrier.insert(Value::string(name), value);
     }
-    if let Some(value) = result.value {
-        insert_map(&mut map, "value", dict_value_to_vm(Some(value)));
-    }
-    Value::Map(Arc::new(map))
+    Value::Map(Arc::new(carrier)).into_host_call_outcome()
 }
 
-fn incr_map(result: shared_dict::StoreResult) -> Value {
-    let mut map = VmMap::new();
-    insert_map(&mut map, "value", dict_value_to_vm(result.value));
-    insert_map(
-        &mut map,
-        "error",
-        match result.error {
-            Some(err) => Value::String(err.to_string().into()),
-            None => Value::Null,
-        },
-    );
-    insert_map(&mut map, "forcible", Value::Bool(result.forcible));
-    Value::Map(Arc::new(map))
+fn error_value(error: Option<&'static str>) -> Value {
+    error.map_or(Value::Null, Value::string)
+}
+
+#[derive(Debug)]
+struct SharedGetResult {
+    value: Value,
+    flags: i64,
+    stale: bool,
+    error: Option<&'static str>,
+}
+
+impl From<shared_dict::GetResult> for SharedGetResult {
+    fn from(result: shared_dict::GetResult) -> Self {
+        Self {
+            value: dict_value_to_vm(result.value),
+            flags: i64::from(result.flags),
+            stale: result.stale,
+            error: result.error,
+        }
+    }
+}
+
+impl IntoHostCallOutcome for SharedGetResult {
+    fn into_host_call_outcome(self) -> CallOutcome {
+        struct_outcome([
+            ("value", self.value),
+            ("flags", Value::Int(self.flags)),
+            ("stale", Value::Bool(self.stale)),
+            ("error", error_value(self.error)),
+        ])
+    }
+}
+
+#[derive(Debug)]
+struct SharedStoreResult {
+    ok: bool,
+    error: Option<&'static str>,
+    forcible: bool,
+}
+
+impl From<shared_dict::StoreResult> for SharedStoreResult {
+    fn from(result: shared_dict::StoreResult) -> Self {
+        Self {
+            ok: result.ok,
+            error: result.error,
+            forcible: result.forcible,
+        }
+    }
+}
+
+impl IntoHostCallOutcome for SharedStoreResult {
+    fn into_host_call_outcome(self) -> CallOutcome {
+        struct_outcome([
+            ("ok", Value::Bool(self.ok)),
+            ("error", error_value(self.error)),
+            ("forcible", Value::Bool(self.forcible)),
+        ])
+    }
+}
+
+#[derive(Debug)]
+struct SharedSafeStoreResult {
+    ok: bool,
+    error: Option<&'static str>,
+}
+
+impl From<shared_dict::StoreResult> for SharedSafeStoreResult {
+    fn from(result: shared_dict::StoreResult) -> Self {
+        Self {
+            ok: result.ok,
+            error: result.error,
+        }
+    }
+}
+
+impl IntoHostCallOutcome for SharedSafeStoreResult {
+    fn into_host_call_outcome(self) -> CallOutcome {
+        struct_outcome([
+            ("ok", Value::Bool(self.ok)),
+            ("error", error_value(self.error)),
+        ])
+    }
+}
+
+#[derive(Debug)]
+struct SharedIncrResult {
+    value: Value,
+    error: Option<&'static str>,
+    forcible: bool,
+}
+
+impl From<shared_dict::StoreResult> for SharedIncrResult {
+    fn from(result: shared_dict::StoreResult) -> Self {
+        Self {
+            value: dict_value_to_vm(result.value),
+            error: result.error,
+            forcible: result.forcible,
+        }
+    }
+}
+
+impl IntoHostCallOutcome for SharedIncrResult {
+    fn into_host_call_outcome(self) -> CallOutcome {
+        struct_outcome([
+            ("value", self.value),
+            ("error", error_value(self.error)),
+            ("forcible", Value::Bool(self.forcible)),
+        ])
+    }
+}
+
+#[derive(Debug)]
+struct SharedNumberResult {
+    value: Value,
+    error: Option<&'static str>,
+}
+
+impl From<shared_dict::GetResult> for SharedNumberResult {
+    fn from(result: shared_dict::GetResult) -> Self {
+        Self {
+            value: dict_value_to_vm(result.value),
+            error: result.error,
+        }
+    }
+}
+
+impl From<shared_dict::StoreResult> for SharedNumberResult {
+    fn from(result: shared_dict::StoreResult) -> Self {
+        Self {
+            value: dict_value_to_vm(result.value),
+            error: result.error,
+        }
+    }
+}
+
+impl IntoHostCallOutcome for SharedNumberResult {
+    fn into_host_call_outcome(self) -> CallOutcome {
+        struct_outcome([("value", self.value), ("error", error_value(self.error))])
+    }
 }
 
 fn dict_value_to_vm(value: Option<DictValue>) -> Value {
@@ -210,7 +306,7 @@ fn dict(vm: &mut Vm, name: String) -> VmResult<CallOutcome> {
 fn get(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     let result = zone_op(&dict, |name| shared_dict::dict_get(name, key, false))?;
-    ret(get_map(result))
+    ret(SharedGetResult::from(result))
 }
 
 /// `value, flags, stale = dict:get_stale(key)`.
@@ -218,7 +314,7 @@ fn get(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOut
 fn get_stale(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     let result = zone_op(&dict, |name| shared_dict::dict_get(name, key, true))?;
-    ret(get_map(result))
+    ret(SharedGetResult::from(result))
 }
 
 fn store_host(
@@ -228,8 +324,7 @@ fn store_host(
     exptime: Value,
     flags: Value,
     mode: StoreMode,
-    include_forcible: bool,
-) -> VmResult<CallOutcome> {
+) -> VmResult<shared_dict::StoreResult> {
     let key = key_bytes(&key)?;
     let value = vm_to_dict_value(&value)?;
     if value.is_none()
@@ -238,22 +333,18 @@ fn store_host(
             StoreMode::Add | StoreMode::SafeAdd | StoreMode::Replace
         )
     {
-        return ret(store_map(
-            shared_dict::StoreResult {
-                ok: false,
-                error: Some("attempt to add or replace nil values"),
-                forcible: false,
-                value: None,
-            },
-            include_forcible,
-        ));
+        return Ok(shared_dict::StoreResult {
+            ok: false,
+            error: Some("attempt to add or replace nil values"),
+            forcible: false,
+            value: None,
+        });
     }
     let exptime = optional_exptime(&exptime, "exptime")?;
     let flags = optional_flags(&flags)?;
-    let result = zone_op(dict, |name| {
+    zone_op(dict, |name| {
         shared_dict::dict_store(name, key, value.clone(), exptime, flags, mode)
-    })?;
-    ret(store_map(result, include_forcible))
+    })
 }
 
 /// `success, err, forcible = dict:set(key, value, exptime?, flags?)`.
@@ -265,7 +356,14 @@ fn set(
     exptime: Value,
     flags: Value,
 ) -> VmResult<CallOutcome> {
-    store_host(&dict, key, value, exptime, flags, StoreMode::Set, true)
+    ret(SharedStoreResult::from(store_host(
+        &dict,
+        key,
+        value,
+        exptime,
+        flags,
+        StoreMode::Set,
+    )?))
 }
 
 /// `success, err = dict:safe_set(...)` without LRU eviction.
@@ -277,7 +375,14 @@ fn safe_set(
     exptime: Value,
     flags: Value,
 ) -> VmResult<CallOutcome> {
-    store_host(&dict, key, value, exptime, flags, StoreMode::SafeSet, false)
+    ret(SharedSafeStoreResult::from(store_host(
+        &dict,
+        key,
+        value,
+        exptime,
+        flags,
+        StoreMode::SafeSet,
+    )?))
 }
 
 /// `success, err, forcible = dict:add(...)` if the key is absent.
@@ -289,7 +394,14 @@ fn add(
     exptime: Value,
     flags: Value,
 ) -> VmResult<CallOutcome> {
-    store_host(&dict, key, value, exptime, flags, StoreMode::Add, true)
+    ret(SharedStoreResult::from(store_host(
+        &dict,
+        key,
+        value,
+        exptime,
+        flags,
+        StoreMode::Add,
+    )?))
 }
 
 /// `success, err = dict:safe_add(...)` without LRU eviction.
@@ -301,7 +413,14 @@ fn safe_add(
     exptime: Value,
     flags: Value,
 ) -> VmResult<CallOutcome> {
-    store_host(&dict, key, value, exptime, flags, StoreMode::SafeAdd, false)
+    ret(SharedSafeStoreResult::from(store_host(
+        &dict,
+        key,
+        value,
+        exptime,
+        flags,
+        StoreMode::SafeAdd,
+    )?))
 }
 
 /// `success, err, forcible = dict:replace(...)` if the key exists.
@@ -313,7 +432,14 @@ fn replace(
     exptime: Value,
     flags: Value,
 ) -> VmResult<CallOutcome> {
-    store_host(&dict, key, value, exptime, flags, StoreMode::Replace, true)
+    ret(SharedStoreResult::from(store_host(
+        &dict,
+        key,
+        value,
+        exptime,
+        flags,
+        StoreMode::Replace,
+    )?))
 }
 
 /// Unconditionally removes `key`.
@@ -348,7 +474,7 @@ fn incr(
     let result = zone_op(&dict, |name| {
         shared_dict::dict_incr(name, key, delta.clone(), init.clone(), init_ttl)
     })?;
-    ret(incr_map(result))
+    ret(SharedIncrResult::from(result))
 }
 
 /// Remaining TTL in seconds, or `not found`.
@@ -356,26 +482,21 @@ fn incr(
 fn ttl(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     let result = zone_op(&dict, |name| shared_dict::dict_ttl(name, key))?;
-    let mut map = VmMap::new();
-    match result {
-        Ok(ttl) => {
-            insert_map(
-                &mut map,
-                "value",
-                if ttl.fract() == 0.0 {
-                    Value::Int(ttl as i64)
-                } else {
-                    Value::Float(ttl)
-                },
-            );
-            insert_map(&mut map, "error", Value::Null);
-        }
-        Err(err) => {
-            insert_map(&mut map, "value", Value::Null);
-            insert_map(&mut map, "error", Value::String(err.to_string().into()));
-        }
-    }
-    ret(Value::Map(Arc::new(map)))
+    let result = match result {
+        Ok(ttl) => SharedNumberResult {
+            value: if ttl.fract() == 0.0 {
+                Value::Int(ttl as i64)
+            } else {
+                Value::Float(ttl)
+            },
+            error: None,
+        },
+        Err(error) => SharedNumberResult {
+            value: Value::Null,
+            error: Some(error),
+        },
+    };
+    ret(result)
 }
 
 /// Updates the remaining TTL for an existing key.
@@ -390,7 +511,7 @@ fn expire(
     let result = zone_op(&dict, |name| {
         shared_dict::dict_expire(name, key, exptime)
     })?;
-    ret(store_map(result, false))
+    ret(SharedSafeStoreResult::from(result))
 }
 
 /// Zone capacity in bytes.
@@ -422,20 +543,6 @@ fn list_item_from_vm(value: &Value) -> Result<DictValue, &'static str> {
     }
 }
 
-fn list_result_map(result: shared_dict::StoreResult) -> Value {
-    let mut map = VmMap::new();
-    insert_map(&mut map, "value", dict_value_to_vm(result.value));
-    insert_map(
-        &mut map,
-        "error",
-        match result.error {
-            Some(err) => Value::String(err.to_string().into()),
-            None => Value::Null,
-        },
-    );
-    Value::Map(Arc::new(map))
-}
-
 fn optional_max(value: &Value) -> VmResult<Option<i64>> {
     match value {
         Value::Null => Ok(None),
@@ -457,7 +564,7 @@ fn list_push_host(
     let item = match list_item_from_vm(&value) {
         Ok(item) => item,
         Err(err) => {
-            return ret(list_result_map(shared_dict::StoreResult {
+            return ret(SharedNumberResult::from(shared_dict::StoreResult {
                 ok: false,
                 error: Some(err),
                 forcible: false,
@@ -472,7 +579,7 @@ fn list_push_host(
             shared_dict::dict_rpush(name, key, item.clone())
         }
     })?;
-    ret(list_result_map(result))
+    ret(SharedNumberResult::from(result))
 }
 
 /// `len, err = dict:lpush(key, value)` — prepend a list item.
@@ -500,7 +607,7 @@ fn rpush(
 fn lpop(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     let result = zone_op(&dict, |name| shared_dict::dict_lpop(name, key))?;
-    ret(get_map(result))
+    ret(SharedGetResult::from(result))
 }
 
 /// `value, err = dict:rpop(key)`.
@@ -508,7 +615,7 @@ fn lpop(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOu
 fn rpop(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     let result = zone_op(&dict, |name| shared_dict::dict_rpop(name, key))?;
-    ret(get_map(result))
+    ret(SharedGetResult::from(result))
 }
 
 /// `len, err = dict:llen(key)`. Missing keys are length 0.
@@ -516,7 +623,7 @@ fn rpop(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOu
 fn llen(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     let result = zone_op(&dict, |name| shared_dict::dict_llen(name, key))?;
-    ret(get_map(result))
+    ret(SharedNumberResult::from(result))
 }
 
 /// Mark up to `MAX_FLUSH_BATCH` keys expired (OpenResty sets `expires=1`).
@@ -547,4 +654,64 @@ fn get_keys(dict: ResourceRef<'_, SharedDictHandle>, max: Value) -> VmResult<Cal
         .map(|key| Value::string(String::from_utf8_lossy(&key).into_owned()))
         .collect();
     ret(Value::array(values))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vm::CallReturn;
+
+    fn outcome_map<T: IntoHostCallOutcome>(value: T) -> Arc<VmMap> {
+        match value.into_host_call_outcome() {
+            CallOutcome::Return(CallReturn::One(Value::Map(map))) => map,
+            other => panic!("expected one map carrier, got {other:?}"),
+        }
+    }
+
+    fn assert_exact_keys(map: &VmMap, expected: &[&str]) {
+        assert_eq!(map.len(), expected.len());
+        for key in expected {
+            assert!(
+                map.get(&Value::string(*key)).is_some(),
+                "missing result field {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_result_converters_emit_the_documented_exact_shapes() {
+        let get = outcome_map(SharedGetResult {
+            value: Value::Null,
+            flags: 0,
+            stale: false,
+            error: None,
+        });
+        assert_exact_keys(&get, &["value", "flags", "stale", "error"]);
+
+        let store = outcome_map(SharedStoreResult {
+            ok: true,
+            error: None,
+            forcible: false,
+        });
+        assert_exact_keys(&store, &["ok", "error", "forcible"]);
+
+        let safe_store = outcome_map(SharedSafeStoreResult {
+            ok: true,
+            error: None,
+        });
+        assert_exact_keys(&safe_store, &["ok", "error"]);
+
+        let incr = outcome_map(SharedIncrResult {
+            value: Value::Float(1.0),
+            error: None,
+            forcible: false,
+        });
+        assert_exact_keys(&incr, &["value", "error", "forcible"]);
+
+        let number = outcome_map(SharedNumberResult {
+            value: Value::Int(1),
+            error: None,
+        });
+        assert_exact_keys(&number, &["value", "error"]);
+    }
 }

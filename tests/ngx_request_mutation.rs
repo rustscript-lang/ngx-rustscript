@@ -575,10 +575,15 @@ ngx::var::set("uri", "/nope");
         &header_script,
         r#"
 use ngx;
+struct RequestHeadersResult {
+    headers: map,
+    truncated: bool
+}
 ngx::req::set_header("X-Dup", "first");
 ngx::req::set_header("X-Dup", ["a", "b"]);
 ngx::req::clear_header("X-Remove");
-ngx::log(ngx::log_level::notice(), "HDR=" + ngx::encode_args(ngx::req::get_headers(null, null)["headers"]));
+let headers: RequestHeadersResult = ngx::req::get_headers(null, null);
+ngx::log(ngx::log_level::notice(), "HDR=" + ngx::encode_args(headers.headers));
 "#,
     );
     let resp_script = prefix.join("conf/resp.rss");
