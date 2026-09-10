@@ -167,6 +167,11 @@ pub fn write_reading_body(ptr: *mut c_void, val: bool) {
     unsafe { ngx_rustscript_test_request_set_reading_body(ptr, u32::from(val)) }
 }
 
+/// Overlay C `r->discard_body` onto an existing request allocation.
+pub fn write_discard_body(ptr: *mut c_void, val: bool) {
+    unsafe { ngx_rustscript_test_request_set_discard_body(ptr, u32::from(val)) }
+}
+
 impl Drop for AbiRequest {
     fn drop(&mut self) {
         unsafe { ngx_rustscript_test_request_free(self.ptr) }

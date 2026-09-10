@@ -330,11 +330,11 @@ fn production_host_count_includes_tcp_pool_and_tls_hosts() {
     let runtime: BTreeSet<&str> = production_runtime_host_names().iter().copied().collect();
     assert_eq!(
         production_runtime_host_names().len(),
-        186,
-        "182 previous hosts plus 4 request-body hosts"
+        191,
+        "186 previous hosts plus 5 request-body mutation hosts"
     );
-    assert_eq!(ngx_host_catalog().functions().len(), 186);
-    assert_eq!(ngx_rustscript::host::ngx_host_manifest().len(), 186);
+    assert_eq!(ngx_host_catalog().functions().len(), 191);
+    assert_eq!(ngx_rustscript::host::ngx_host_manifest().len(), 191);
     for name in [
         NGX_SOCKET_TCP_NAME,
         NGX_SOCKET_TCP_CONNECT_NAME,

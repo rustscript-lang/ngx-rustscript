@@ -52,6 +52,11 @@ pub const NGX_REQ_READ_BODY_NAME: &str = "ngx::req::read_body";
 pub const NGX_REQ_DISCARD_BODY_NAME: &str = "ngx::req::discard_body";
 pub const NGX_REQ_GET_BODY_DATA_NAME: &str = "ngx::req::get_body_data";
 pub const NGX_REQ_GET_BODY_FILE_NAME: &str = "ngx::req::get_body_file";
+pub const NGX_REQ_SET_BODY_DATA_NAME: &str = "ngx::req::set_body_data";
+pub const NGX_REQ_SET_BODY_FILE_NAME: &str = "ngx::req::set_body_file";
+pub const NGX_REQ_INIT_BODY_NAME: &str = "ngx::req::init_body";
+pub const NGX_REQ_APPEND_BODY_NAME: &str = "ngx::req::append_body";
+pub const NGX_REQ_FINISH_BODY_NAME: &str = "ngx::req::finish_body";
 pub const NGX_REQ_IS_INTERNAL_NAME: &str = "ngx::req::is_internal";
 pub const NGX_REQ_START_TIME_NAME: &str = "ngx::req::start_time";
 pub const NGX_IS_SUBREQUEST_NAME: &str = "ngx::is_subrequest";
@@ -435,6 +440,9 @@ const PHASE_REQ_GET_BODY_DATA: &[NgxPhase] = &[
 /// `ngx.req.get_body_file`.
 const PHASE_REQ_GET_BODY_FILE: &[NgxPhase] =
     &[NgxPhase::Rewrite, NgxPhase::Access, NgxPhase::Content];
+
+/// `ngx.req.set_body_data` / `set_body_file` / builder APIs.
+const PHASE_REQ_SET_BODY: &[NgxPhase] = &[NgxPhase::Rewrite, NgxPhase::Access, NgxPhase::Content];
 
 /// `ngx.req.get_headers`.
 const PHASE_REQ_GET_HEADERS: &[NgxPhase] = &[
@@ -1033,6 +1041,31 @@ const MANIFEST: &[HostManifestEntry] = &[
         NGX_REQ_GET_BODY_FILE_NAME,
         "ngx.req.get_body_file",
         PHASE_REQ_GET_BODY_FILE,
+    ),
+    request_write_entry(
+        NGX_REQ_SET_BODY_DATA_NAME,
+        "ngx.req.set_body_data",
+        PHASE_REQ_SET_BODY,
+    ),
+    request_write_entry(
+        NGX_REQ_SET_BODY_FILE_NAME,
+        "ngx.req.set_body_file",
+        PHASE_REQ_SET_BODY,
+    ),
+    request_write_entry(
+        NGX_REQ_INIT_BODY_NAME,
+        "ngx.req.init_body",
+        PHASE_REQ_SET_BODY,
+    ),
+    request_write_entry(
+        NGX_REQ_APPEND_BODY_NAME,
+        "ngx.req.append_body",
+        PHASE_REQ_SET_BODY,
+    ),
+    request_write_entry(
+        NGX_REQ_FINISH_BODY_NAME,
+        "ngx.req.finish_body",
+        PHASE_REQ_SET_BODY,
     ),
     request_entry(
         NGX_REQ_IS_INTERNAL_NAME,
@@ -1756,6 +1789,33 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             NGX_REQ_GET_BODY_FILE_NAME,
             HostTypeSchema::Optional(Box::new(HostTypeSchema::String)),
         ),
+        NGX_REQ_SET_BODY_DATA_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_SET_BODY_DATA_NAME,
+            vec![HostParamSchema::value("data", HostTypeSchema::String)],
+            HostTypeSchema::Null,
+        ),
+        NGX_REQ_SET_BODY_FILE_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_SET_BODY_FILE_NAME,
+            vec![
+                HostParamSchema::value("path", HostTypeSchema::String),
+                HostParamSchema::value("auto_clean", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_REQ_INIT_BODY_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_INIT_BODY_NAME,
+            vec![HostParamSchema::value(
+                "buffer_size",
+                HostTypeSchema::Unknown,
+            )],
+            HostTypeSchema::Null,
+        ),
+        NGX_REQ_APPEND_BODY_NAME => HostFunctionSchema::with_return(
+            NGX_REQ_APPEND_BODY_NAME,
+            vec![HostParamSchema::value("data", HostTypeSchema::String)],
+            HostTypeSchema::Null,
+        ),
+        NGX_REQ_FINISH_BODY_NAME => nullary(NGX_REQ_FINISH_BODY_NAME, HostTypeSchema::Null),
         NGX_REQ_IS_INTERNAL_NAME => nullary(NGX_REQ_IS_INTERNAL_NAME, HostTypeSchema::Bool),
         NGX_REQ_START_TIME_NAME => nullary(NGX_REQ_START_TIME_NAME, HostTypeSchema::Float),
         NGX_IS_SUBREQUEST_NAME => nullary(NGX_IS_SUBREQUEST_NAME, HostTypeSchema::Bool),

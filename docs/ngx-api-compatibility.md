@@ -5,7 +5,7 @@ This matrix is the authoritative current ngx host surface for
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **186** names in the same order.
+Those three lists contain the same **191** names in the same order.
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and documents only
@@ -56,7 +56,7 @@ argument.
 | Time | 9 | sync |
 | Metadata / worker / config / phase | 12 | sync |
 | Logging | 1 | sync |
-| Request-read / var | 21 | mixed |
+| Request-read / var | 26 | mixed |
 | Request-local ctx | 4 | sync |
 | Response metadata | 6 | sync |
 | Response output | 5 | print/say/send_headers/eof sync; flush async |
@@ -66,7 +66,7 @@ argument.
 | Cosocket (TCP) | 16 | mixed |
 | Constants | 65 | sync |
 | of which HTTP status | 35 | sync |
-| **Production total** | **186** | |
+| **Production total** | **191** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
 the production manifest, catalog, or `bind_ngx_hosts`.
@@ -409,6 +409,11 @@ is async (`Waiting`); the rest of this family is sync.
 | `ngx.req.discard_body` | `ngx::req::discard_body() -> null` | adapted | `PHASE_REQ_READ_BODY` | sync; rewrite/access/content | Calls `ngx_http_discard_request_body`. Never waits. Idempotent (`NGX_OK`/`NGX_AGAIN`). Discard-after-read is a no-op; read-after-discard completes immediately. Forbidden in Log. | `tests/ngx_request_body.rs` |
 | `ngx.req.get_body_data` | `ngx::req::get_body_data() -> optional<string>` | adapted | `PHASE_REQ_GET_BODY_DATA` | 65536-byte copy | Nullary like OpenResty. Owned copy of in-memory buffers. File-backed returns `null`. Empty memory buffers are skipped; inverted ranges and cycles are host errors. Allowed in Log (completed-body getter). | `tests/ngx_request_body.rs` |
 | `ngx.req.get_body_file` | `ngx::req::get_body_file() -> optional<string>` | adapted | `PHASE_REQ_GET_BODY_FILE` | 4096-byte path | Owned copy of NGINX temp-file path. Memory-backed returns `null`. Does not delete the file. Forbidden in Log. | `tests/ngx_request_body.rs` |
+| `ngx.req.set_body_data` | `ngx::req::set_body_data(data: string) -> null` | adapted | `PHASE_REQ_SET_BODY` | 65536-byte memory body | Transactionally allocates a complete `ngx_http_request_body_t` / chain / buf plus bytes from the request pool, then swaps `r->request_body` only after Content-Length (real header hash, linked duplicates updated, dedicated pointer coherent) and chunked/Transfer-Encoding hide-hash sync succeed. Empty body installs a zero-length memory buf. Prior body remains on allocation failure. Rejected in Log, without `RequestWrite`/live request, while `reading_body`/`discard_body`/`header_sent`, while a read-body wait is armed, and on subrequests (`r != r->main`). | `tests/ngx_request_body_mutation.rs` |
+| `ngx.req.set_body_file` | `ngx::req::set_body_file(path: string, auto_clean: unknown) -> null` | adapted | `PHASE_REQ_SET_BODY` | 4096-byte path; 65536-byte file | `lstat` then `O_NOFOLLOW\|O_CLOEXEC\|O_NONBLOCK` open; post-open `fstat` must stay a regular file with the same `st_dev`/`st_ino` as `lstat`. Regular files only (symlink/dir/FIFO rejected before open). `auto_clean` `null`/`false` leaves the source path; `true` copies into a private temp. A C `ngx_pool_cleanup_add` handler (`ngx_pool_delete_file` vs `ngx_pool_cleanup_file`) owns the fd: unlink the copy exactly once when `auto_clean`, close once, never unlink the caller source. Errors before cleanup registration leave fd with the caller; after registration a failed header commit nulls the handler. File buf matches OpenResty: `rb->buf=NULL`, `in_file`/`last_buf`/`last_in_chain`, no `temp_file` bit. Content-Length uses the real header hash so proxy hide-hash emits exactly one CL; Transfer-Encoding chain entries keep the hide-hash and are emptied. | `tests/ngx_request_body_mutation.rs` |
+| `ngx.req.init_body` | `ngx::req::init_body(buffer_size: unknown) -> null` | adapted | `PHASE_REQ_SET_BODY` | default/hard cap 65536 | Request-owned builder in `RequestPhaseCtx` (test fallback only without module ctx). `null` uses the default cap; integer must be `0..=65536`. Repeated init resets the builder. Does not mutate NGINX body until `finish_body`. | `tests/ngx_request_body_mutation.rs` |
+| `ngx.req.append_body` | `ngx::req::append_body(data: string) -> null` | adapted | `PHASE_REQ_SET_BODY` | cumulative builder cap | Copies bytes into the builder. Fails without `init_body` or when the cap would be exceeded; the builder is unchanged on oversize. | `tests/ngx_request_body_mutation.rs` |
+| `ngx.req.finish_body` | `ngx::req::finish_body() -> null` | adapted | `PHASE_REQ_SET_BODY` | same as `set_body_data` | Atomically installs one coherent in-memory body. Repeated finish / finish without init fail. Allocation failure restores the builder. Dropped on request cleanup/error/disconnect/shutdown. | `tests/ngx_request_body_mutation.rs` |
 | `ngx.req.is_internal` | `ngx::req::is_internal() -> bool` | adapted | `PHASE_REQ_FLAGS` | none | Live C `r->internal` via a headers-compiled shim (`ngx_rustscript_request_is_internal`). nginx-sys bindgen bitfield getters are the wrong ABI; neighboring C flags such as `filter_finalize` must not read as internal (`REQ_INTERNAL_REDIR=true`). | `tests/ngx_request_read.rs`, `tests/ngx_request_abi.rs` |
 | `ngx.req.start_time` | `ngx::req::start_time() -> float` | supported | `PHASE_REQ_FLAGS` | none | `start_sec + start_msec/1000`. | `tests/ngx_request_read.rs` |
 | `ngx.is_subrequest` | `ngx::is_subrequest() -> bool` | supported | `PHASE_REQ_FLAGS` | none | `r != r->main`. Live false-path on main requests (`REQ_SUB=false`). `ngx_http_core_access_phase` skips all access handlers when `r != r->main`, so SSI/mirror/auth_request subrequests cannot run `access_by_rss_file`. True is stub-covered; SSI include still returns `sub-ok` as evidence the subrequest ran. | `tests/ngx_request_read.rs` |

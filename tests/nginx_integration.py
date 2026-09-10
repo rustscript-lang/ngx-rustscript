@@ -405,6 +405,7 @@ def runtime_conf(module, prefix, port, udp_script=None, tcp_script=None, keepali
             location("/task7-exit/", fixture("task7_exit403.rss")),
             location("/task7-redirect/", fixture("task7_redirect.rss")),
             location("/task7-sleep-exit/", fixture("task7_exit_sleep.rss")),
+            location("/task11-body/", fixture("task11_body.rss")),
             content_location("/content/", fixture("content_phase.rss")),
             content_location("/output/", fixture("output_print.rss")),
             """
@@ -500,6 +501,10 @@ def http_get(port, path, timeout=10.0, sent_event=None):
     return http_exchange(port, "GET", path, timeout=timeout, sent_event=sent_event)
 
 
+def http_post(port, path, body, timeout=10.0):
+    return http_exchange(port, "POST", path, timeout=timeout, body=body)
+
+
 def http_exchange(
     port,
     method,
@@ -508,16 +513,21 @@ def http_exchange(
     sent_event=None,
     headers=None,
     version="HTTP/1.0",
+    body=None,
 ):
     lines = [
         f"{method} {path} {version}",
         "Host: 127.0.0.1",
         "Connection: close",
     ]
+    payload = b""
+    if body is not None:
+        payload = body if isinstance(body, bytes) else body.encode("utf-8")
+        lines.append(f"Content-Length: {len(payload)}")
     if headers:
         for name, value in headers.items():
             lines.append(f"{name}: {value}")
-    req = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+    req = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + payload
     sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
     try:
         sock.settimeout(timeout)
@@ -789,6 +799,7 @@ def run_acceptance(nginx, module):
         write_index(prefix, "udp/index.html", "udp-ok\n")
         write_index(prefix, "tcp/index.html", "tcp-ok\n")
         write_index(prefix, "tcp-ka/index.html", "tcp-ok\n")
+        write_index(prefix, "task11-body/index.html", "task11-ok\n")
 
         write_text(
             os.path.join(prefix, "conf", "nginx.conf"),
@@ -1328,6 +1339,25 @@ def run_acceptance(nginx, module):
                 "task7-sleep-exit must not execute statements after ngx::exit",
                 dump_owned(prefix, proc, error_text),
             )
+
+        status, body, raw = http_post(port, "/task11-body/", "ORIGINAL-STALE", timeout=8.0)
+        if status != 200:
+            raise CheckError(
+                f"task11-body expected 200, got {status}",
+                dump_owned(prefix, proc, raw),
+            )
+        error_text = read_file(os.path.join(prefix, "logs", "error.log"))
+        if "TASK11=TASK11-REPLACED" not in error_text:
+            raise CheckError(
+                "task11-body must log TASK11=TASK11-REPLACED after set_body_data",
+                dump_owned(prefix, proc, error_text),
+            )
+        if "TASK11=ORIGINAL-STALE" in error_text:
+            raise CheckError(
+                "task11-body must not log the original body after replacement",
+                dump_owned(prefix, proc, error_text),
+            )
+        summary["task11"] = "TASK11=TASK11-REPLACED"
 
         status, body, raw = http_get(port, "/task7-mut/", timeout=8.0)
         if status != 201:

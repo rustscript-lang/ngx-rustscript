@@ -50,8 +50,8 @@ fn runtime_host_names_are_unique() {
     );
     assert_eq!(
         names.len(),
-        186,
-        "production runtime host count must stay 186"
+        191,
+        "production runtime host count must stay 191"
     );
 }
 

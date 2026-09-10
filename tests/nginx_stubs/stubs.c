@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <time.h>
@@ -111,9 +112,35 @@ void ngx_log_error_core(
 
 void *ngx_pool_cleanup_add(void *p, size_t size)
 {
+    struct {
+        void *handler;
+        void *data;
+        void *next;
+    } *c;
+
     (void)p;
-    (void)size;
-    return NULL;
+    c = calloc(1, sizeof(*c));
+    if (c == NULL) {
+        return NULL;
+    }
+    if (size > 0) {
+        c->data = calloc(1, size);
+        if (c->data == NULL) {
+            free(c);
+            return NULL;
+        }
+    }
+    return c;
+}
+
+void ngx_pool_cleanup_file(void *data)
+{
+    (void)data;
+}
+
+void ngx_pool_delete_file(void *data)
+{
+    (void)data;
 }
 
 /* ngx_palloc / ngx_pnalloc / ngx_list_push live in request_abi.c so they can

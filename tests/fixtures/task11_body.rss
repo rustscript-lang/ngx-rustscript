@@ -1,0 +1,5 @@
+use ngx;
+ngx::req::read_body();
+ngx::req::set_body_data("TASK11-REPLACED");
+ngx::log(ngx::log_level::notice(), ngx::encode_args({ TASK11: ngx::req::get_body_data() }));
+ngx::exit(200);

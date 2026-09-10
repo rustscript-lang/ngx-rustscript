@@ -25,6 +25,13 @@ void ngx_rustscript_c_request_main_count_dec(ngx_http_request_t *r);
 ngx_int_t ngx_rustscript_c_read_client_request_body(
     ngx_http_request_t *r, void (*handler)(ngx_http_request_t *r));
 ngx_int_t ngx_rustscript_c_discard_request_body(ngx_http_request_t *r);
+unsigned int ngx_rustscript_c_headers_in_chunked(const ngx_http_request_t *r);
+unsigned int ngx_rustscript_c_buf_memory(const ngx_buf_t *b);
+unsigned int ngx_rustscript_c_buf_temporary(const ngx_buf_t *b);
+unsigned int ngx_rustscript_c_buf_in_file(const ngx_buf_t *b);
+unsigned int ngx_rustscript_c_buf_last_buf(const ngx_buf_t *b);
+unsigned int ngx_rustscript_c_buf_last_in_chain(const ngx_buf_t *b);
+unsigned int ngx_rustscript_c_buf_temp_file(const ngx_buf_t *b);
 
 static void fail(const char *msg)
 {
@@ -319,6 +326,59 @@ int main(void)
     }
     if (ngx_rustscript_c_discard_request_body(NULL) != NGX_ERROR) {
         fail("NULL discard_body must be NGX_ERROR");
+    }
+
+    {
+        ngx_buf_t b;
+        ngx_http_request_t req;
+
+        memset(&b, 0, sizeof(b));
+        b.temporary = 1;
+        b.memory = 1;
+        b.last_buf = 1;
+        b.last_in_chain = 1;
+        if (!ngx_rustscript_c_buf_memory(&b)
+            || !ngx_rustscript_c_buf_temporary(&b)
+            || ngx_rustscript_c_buf_in_file(&b)
+            || !ngx_rustscript_c_buf_last_buf(&b)
+            || !ngx_rustscript_c_buf_last_in_chain(&b)
+            || ngx_rustscript_c_buf_temp_file(&b))
+        {
+            fail("memory body buf flags");
+        }
+        memset(&b, 0, sizeof(b));
+        b.in_file = 1;
+        b.last_buf = 1;
+        b.last_in_chain = 1;
+        if (ngx_rustscript_c_buf_memory(&b)
+            || ngx_rustscript_c_buf_temporary(&b)
+            || !ngx_rustscript_c_buf_in_file(&b)
+            || !ngx_rustscript_c_buf_last_buf(&b)
+            || !ngx_rustscript_c_buf_last_in_chain(&b)
+            || ngx_rustscript_c_buf_temp_file(&b))
+        {
+            fail("file body buf flags");
+        }
+        b.temp_file = 1;
+        if (!ngx_rustscript_c_buf_temp_file(&b)) {
+            fail("temp_file getter must follow C bitfield");
+        }
+        memset(&req, 0, sizeof(req));
+        req.headers_in.chunked = 1;
+        if (!ngx_rustscript_c_headers_in_chunked(&req)) {
+            fail("chunked getter must follow C bitfield");
+        }
+        req.headers_in.chunked = 0;
+        if (ngx_rustscript_c_headers_in_chunked(&req)) {
+            fail("chunked getter must clear");
+        }
+        if (ngx_rustscript_c_headers_in_chunked(NULL)
+            || ngx_rustscript_c_buf_memory(NULL)
+            || ngx_rustscript_c_buf_in_file(NULL)
+            || ngx_rustscript_c_buf_temp_file(NULL))
+        {
+            fail("NULL buf/chunked shims must be 0");
+        }
     }
 
     puts("ok");

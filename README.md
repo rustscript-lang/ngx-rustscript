@@ -243,6 +243,15 @@ let data = ngx::req::get_body_data();
 ngx::say(data);
 ```
 
+Replace the request body (memory; `set_body_file` / builder APIs are in the compatibility doc):
+
+```rss
+use ngx;
+ngx::req::read_body();
+ngx::req::set_body_data("replacement");
+ngx::say(ngx::req::get_body_data());
+```
+
 Two sequential sleeps:
 
 ```rss

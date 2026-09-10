@@ -1169,6 +1169,357 @@ void ngx_rustscript_c_finalize_client_closed(ngx_http_request_t *r)
 }
 #endif
 
+#ifndef NGX_RUSTSCRIPT_ABI_PROBE
+static void *
+rss_pcalloc(ngx_pool_t *pool, size_t size)
+{
+    void *p;
+
+    p = ngx_palloc(pool, size);
+    if (p != NULL) {
+        ngx_memzero(p, size);
+    }
+    return p;
+}
+
+static unsigned
+rss_header_key_ieq(ngx_str_t *key, const char *name, size_t nlen)
+{
+    size_t i;
+    u_char a, b;
+
+    if (key == NULL || key->data == NULL || key->len != nlen) {
+        return 0;
+    }
+    for (i = 0; i < nlen; i++) {
+        a = key->data[i];
+        b = (u_char) name[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (u_char) (a - 'A' + 'a');
+        }
+        if (b >= 'A' && b <= 'Z') {
+            b = (u_char) (b - 'A' + 'a');
+        }
+        if (a != b) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static ngx_uint_t
+rss_hash_lc(const char *low, size_t n)
+{
+    u_char tmp[32];
+
+    if (n == 0 || n >= sizeof(tmp)) {
+        return 0;
+    }
+    return ngx_hash_strlow(tmp, (u_char *) low, n);
+}
+
+static void
+rss_apply_header_chain(ngx_table_elt_t *h, ngx_uint_t hash, u_char *value, size_t len)
+{
+    while (h != NULL) {
+        h->hash = hash;
+        h->value.data = value;
+        h->value.len = len;
+        h = h->next;
+    }
+}
+
+static void
+rss_for_each_named_header(ngx_http_request_t *r, const char *name, size_t nlen,
+                          ngx_uint_t hash, u_char *value, size_t len)
+{
+    ngx_list_part_t *part;
+    ngx_table_elt_t *h;
+    ngx_uint_t       i;
+
+    if (r->headers_in.headers.last == NULL) {
+        return;
+    }
+    part = &r->headers_in.headers.part;
+    h = part->elts;
+    for (i = 0; /* void */; i++) {
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+        if (rss_header_key_ieq(&h[i].key, name, nlen)) {
+            rss_apply_header_chain(&h[i], hash, value, len);
+        }
+    }
+}
+
+static void
+rss_clear_chunked_and_transfer_encoding(ngx_http_request_t *r)
+{
+    ngx_uint_t hash;
+
+    hash = rss_hash_lc("transfer-encoding", sizeof("transfer-encoding") - 1);
+    r->headers_in.chunked = 0;
+    if (r->headers_in.transfer_encoding != NULL) {
+        rss_apply_header_chain(r->headers_in.transfer_encoding, hash,
+                               (u_char *) "", 0);
+        r->headers_in.transfer_encoding = NULL;
+    }
+    rss_for_each_named_header(r, "transfer-encoding",
+                              sizeof("transfer-encoding") - 1, hash,
+                              (u_char *) "", 0);
+}
+
+static ngx_int_t
+rss_set_content_length(ngx_http_request_t *r, off_t n)
+{
+    u_char          *p;
+    u_char          *key;
+    u_char          *low;
+    size_t           len;
+    ngx_uint_t       hash;
+    ngx_table_elt_t *h;
+    char             tmp[NGX_OFF_T_LEN + 1];
+
+    len = (size_t) snprintf(tmp, sizeof(tmp), "%lld", (long long) n);
+    p = ngx_pnalloc(r->pool, len + 1);
+    if (p == NULL) {
+        return NGX_ERROR;
+    }
+    ngx_memcpy(p, tmp, len);
+    p[len] = '\0';
+
+    hash = rss_hash_lc("content-length", sizeof("content-length") - 1);
+
+    if (r->headers_in.headers.last == NULL) {
+        if (ngx_list_init(&r->headers_in.headers, r->pool, 4,
+                          sizeof(ngx_table_elt_t)) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+    }
+
+    h = r->headers_in.content_length;
+    if (h == NULL) {
+        key = ngx_pnalloc(r->pool, sizeof("Content-Length"));
+        low = ngx_pnalloc(r->pool, sizeof("content-length"));
+        if (key == NULL || low == NULL) {
+            return NGX_ERROR;
+        }
+        ngx_memcpy(key, "Content-Length", sizeof("Content-Length"));
+        ngx_memcpy(low, "content-length", sizeof("content-length"));
+        h = ngx_list_push(&r->headers_in.headers);
+        if (h == NULL) {
+            return NGX_ERROR;
+        }
+        ngx_memzero(h, sizeof(ngx_table_elt_t));
+        h->hash = hash;
+        h->key.len = sizeof("Content-Length") - 1;
+        h->key.data = key;
+        h->lowcase_key = low;
+        r->headers_in.content_length = h;
+    }
+    rss_apply_header_chain(h, hash, p, len);
+    rss_for_each_named_header(r, "content-length",
+                              sizeof("content-length") - 1, hash, p, len);
+    r->headers_in.content_length_n = n;
+    return NGX_OK;
+}
+
+ngx_int_t
+ngx_rustscript_c_install_memory_body(ngx_http_request_t *r,
+                                     const u_char *data, size_t len)
+{
+    ngx_http_request_body_t *rb;
+    ngx_buf_t               *b;
+    ngx_chain_t             *cl;
+    u_char                  *p;
+
+    if (r == NULL || r->pool == NULL) {
+        return NGX_ERROR;
+    }
+    if (len > 0 && data == NULL) {
+        return NGX_ERROR;
+    }
+
+    rb = rss_pcalloc(r->pool, sizeof(ngx_http_request_body_t));
+    if (rb == NULL) {
+        return NGX_ERROR;
+    }
+
+    b = rss_pcalloc(r->pool, sizeof(ngx_buf_t));
+    if (b == NULL) {
+        return NGX_ERROR;
+    }
+    cl = rss_pcalloc(r->pool, sizeof(ngx_chain_t));
+    if (cl == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (len > 0) {
+        p = ngx_pnalloc(r->pool, len);
+        if (p == NULL) {
+            return NGX_ERROR;
+        }
+        ngx_memcpy(p, data, len);
+    } else {
+        p = NULL;
+    }
+
+    b->temporary = 1;
+    b->memory = 1;
+    b->last_buf = 1;
+    b->last_in_chain = 1;
+    b->start = p;
+    b->pos = p;
+    b->last = p + len;
+    b->end = p + len;
+    cl->buf = b;
+    cl->next = NULL;
+    rb->bufs = cl;
+    rb->buf = b;
+
+    if (rss_set_content_length(r, (off_t) len) != NGX_OK) {
+        return NGX_ERROR;
+    }
+    rss_clear_chunked_and_transfer_encoding(r);
+    r->request_body = rb;
+    return NGX_OK;
+}
+
+ngx_int_t
+ngx_rustscript_c_install_file_body(ngx_http_request_t *r, int fd, off_t size,
+                                   const u_char *path, size_t path_len, int clean)
+{
+    ngx_http_request_body_t   *rb;
+    ngx_temp_file_t           *tf;
+    ngx_buf_t                 *b;
+    ngx_chain_t               *cl;
+    ngx_pool_cleanup_t        *cln;
+    ngx_pool_cleanup_file_t   *clnf;
+    ngx_log_t                 *log;
+    u_char                    *name;
+
+    if (r == NULL || r->pool == NULL || fd < 0 || path == NULL || path_len == 0) {
+        return NGX_ERROR;
+    }
+    if (size < 0) {
+        return NGX_ERROR;
+    }
+
+    rb = rss_pcalloc(r->pool, sizeof(ngx_http_request_body_t));
+    if (rb == NULL) {
+        return NGX_ERROR;
+    }
+    tf = rss_pcalloc(r->pool, sizeof(ngx_temp_file_t));
+    if (tf == NULL) {
+        return NGX_ERROR;
+    }
+    b = rss_pcalloc(r->pool, sizeof(ngx_buf_t));
+    if (b == NULL) {
+        return NGX_ERROR;
+    }
+    cl = rss_pcalloc(r->pool, sizeof(ngx_chain_t));
+    if (cl == NULL) {
+        return NGX_ERROR;
+    }
+    name = ngx_pnalloc(r->pool, path_len + 1);
+    if (name == NULL) {
+        return NGX_ERROR;
+    }
+    ngx_memcpy(name, path, path_len);
+    name[path_len] = '\0';
+
+    cln = ngx_pool_cleanup_add(r->pool, sizeof(ngx_pool_cleanup_file_t));
+    if (cln == NULL || cln->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    log = (r->connection != NULL) ? r->connection->log : NULL;
+    tf->file.fd = fd;
+    tf->file.name.len = path_len;
+    tf->file.name.data = name;
+    tf->file.log = log;
+    tf->pool = r->pool;
+    tf->persistent = 1;
+    tf->clean = 0;
+
+    /* OpenResty: in_file + last_in_chain, rb->buf = NULL, no temp_file bit. */
+    b->in_file = 1;
+    b->last_buf = 1;
+    b->last_in_chain = 1;
+    b->file_pos = 0;
+    b->file_last = size;
+    b->file = &tf->file;
+
+    cl->buf = b;
+    cl->next = NULL;
+    rb->bufs = cl;
+    rb->buf = NULL;
+    rb->temp_file = tf;
+
+    clnf = cln->data;
+    clnf->fd = fd;
+    clnf->name = name;
+    clnf->log = log;
+    cln->handler = clean ? ngx_pool_delete_file : ngx_pool_cleanup_file;
+
+    if (rss_set_content_length(r, size) != NGX_OK) {
+        cln->handler = NULL;
+        return NGX_ERROR;
+    }
+    rss_clear_chunked_and_transfer_encoding(r);
+    r->request_body = rb;
+    return NGX_OK;
+}
+#endif
+
+unsigned int
+ngx_rustscript_c_buf_memory(const ngx_buf_t *b)
+{
+    return (b != NULL && b->memory) ? 1 : 0;
+}
+
+unsigned int
+ngx_rustscript_c_buf_temporary(const ngx_buf_t *b)
+{
+    return (b != NULL && b->temporary) ? 1 : 0;
+}
+
+unsigned int
+ngx_rustscript_c_buf_in_file(const ngx_buf_t *b)
+{
+    return (b != NULL && b->in_file) ? 1 : 0;
+}
+
+unsigned int
+ngx_rustscript_c_buf_last_buf(const ngx_buf_t *b)
+{
+    return (b != NULL && b->last_buf) ? 1 : 0;
+}
+
+unsigned int
+ngx_rustscript_c_buf_last_in_chain(const ngx_buf_t *b)
+{
+    return (b != NULL && b->last_in_chain) ? 1 : 0;
+}
+
+unsigned int
+ngx_rustscript_c_buf_temp_file(const ngx_buf_t *b)
+{
+    return (b != NULL && b->temp_file) ? 1 : 0;
+}
+
+unsigned int
+ngx_rustscript_c_headers_in_chunked(const ngx_http_request_t *r)
+{
+    return (r != NULL && r->headers_in.chunked) ? 1 : 0;
+}
+
 #ifndef NGX_RUSTSCRIPT_NO_C_PUBLIC_ALIAS
 unsigned int ngx_rustscript_request_is_internal(const ngx_http_request_t *r)
 {

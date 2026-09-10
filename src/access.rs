@@ -59,6 +59,7 @@ struct RequestPhaseCtx {
     output: RefCell<Option<crate::host::OutputState>>,
     nginx_op: RefCell<crate::nginx_op::NginxOpState>,
     body_wait: RefCell<BodyWaitState>,
+    body_mut: RefCell<crate::host::BodyMutationState>,
 }
 
 impl RequestPhaseCtx {
@@ -169,6 +170,27 @@ pub(crate) fn try_with_module_nginx_op<R>(
     Some(f(&mut ctx.nginx_op.borrow_mut()))
 }
 
+pub(crate) fn try_with_module_body_mut<R>(
+    raw: *mut ngx_http_request_t,
+    f: impl FnOnce(&mut crate::host::BodyMutationState) -> R,
+) -> Option<R> {
+    if raw.is_null() {
+        return None;
+    }
+    unsafe {
+        if (*raw).ctx.is_null() {
+            return None;
+        }
+    }
+    let module = Module::module();
+    if module.ctx_index == nginx_sys::ngx_uint_t::MAX {
+        return None;
+    }
+    let request = unsafe { Request::from_ngx_http_request(raw) };
+    let ctx = request.get_module_ctx::<RequestPhaseCtx>(module)?;
+    Some(f(&mut ctx.body_mut.borrow_mut()))
+}
+
 pub(crate) fn try_with_module_body_wait<R>(
     raw: *mut ngx_http_request_t,
     f: impl FnOnce(&mut BodyWaitState) -> R,
@@ -267,6 +289,7 @@ pub(crate) fn ensure_shared_ngx_ctx(
         output: RefCell::new(None),
         nginx_op: RefCell::new(crate::nginx_op::NginxOpState::new()),
         body_wait: RefCell::new(BodyWaitState::default()),
+        body_mut: RefCell::new(crate::host::BodyMutationState::new()),
     };
     let ctx_ptr = request.pool().allocate(phase_ctx);
     if ctx_ptr.is_null() {
@@ -287,6 +310,7 @@ impl Drop for RequestPhaseCtx {
         // `r->pool = NULL`. Cancel flush wait and restore the write handler
         // while `r` is still the request being freed, then drop the VM.
         crate::host::cleanup_output_slot(self.raw, self.output.get_mut());
+        self.body_mut.get_mut().cleanup();
         self.nginx_op.get_mut().cancel();
         if let Some(exec) = self.access.get_mut() {
             cleanup_access_ctx(exec);
@@ -485,6 +509,7 @@ fn run_request_owned_phase(
                 output: RefCell::new(None),
                 nginx_op: RefCell::new(crate::nginx_op::NginxOpState::new()),
                 body_wait: RefCell::new(BodyWaitState::default()),
+                body_mut: RefCell::new(crate::host::BodyMutationState::new()),
             };
             let ctx_ptr = request.pool().allocate(phase_ctx);
             if ctx_ptr.is_null() {
