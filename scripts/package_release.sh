@@ -242,7 +242,6 @@ DOC_ROOT="$DEB_ROOT/usr/share/doc/nginx-module-rustscript"
 install -d -m 0755 "$DEB_ROOT/DEBIAN" "$DEB_ROOT/usr/lib/nginx/modules" "$DOC_ROOT/docs" "$DOC_ROOT/examples"
 install -m 0644 "$MODULE" "$DEB_ROOT/usr/lib/nginx/modules/ngx_http_rustscript_module.so"
 install -m 0644 "$ROOT/README.md" "$DOC_ROOT/README.md"
-install -m 0644 "$ROOT/docs/ngx-api-compatibility.md" "$DOC_ROOT/ngx-api-compatibility.md"
 cp -a "$ROOT/docs/." "$DOC_ROOT/docs/"
 cp -a "$ROOT/examples/." "$DOC_ROOT/examples/"
 cat > "$DEB_ROOT/DEBIAN/control" <<EOF

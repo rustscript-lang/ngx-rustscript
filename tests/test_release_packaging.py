@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import posixpath
+import re
 from pathlib import Path
 import subprocess
 import tarfile
@@ -39,6 +41,52 @@ def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     digest.update(path.read_bytes())
     return digest.hexdigest()
+
+
+def relative_markdown_link_errors(files: dict[str, bytes]) -> list[str]:
+    link_re = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
+    errors: list[str] = []
+    for name, data in files.items():
+        if not name.endswith(".md"):
+            continue
+        for raw in link_re.findall(data.decode("utf-8")):
+            target = raw.strip()
+            if target.startswith("<") and target.endswith(">"):
+                target = target[1:-1]
+            if (
+                target.startswith("#")
+                or target.startswith("//")
+                or re.match(r"^[a-z][a-z0-9+.-]*:", target, re.IGNORECASE)
+            ):
+                continue
+            relative = target.split("#", 1)[0]
+            if not relative:
+                continue
+            destination = posixpath.normpath(posixpath.join(posixpath.dirname(name), relative))
+            if destination not in files and f"{destination}/index.md" not in files:
+                errors.append(f"{name}: missing {target}")
+    return errors
+
+
+def tar_payload(path: Path, top: str) -> dict[str, bytes]:
+    prefix = f"{top}/"
+    payload: dict[str, bytes] = {}
+    with tarfile.open(path, "r:gz") as archive:
+        for member in archive.getmembers():
+            if not member.isfile() or not member.name.startswith(prefix):
+                continue
+            extracted = archive.extractfile(member)
+            if extracted is not None:
+                payload[member.name[len(prefix) :]] = extracted.read()
+    return payload
+
+
+def directory_payload(path: Path) -> dict[str, bytes]:
+    return {
+        item.relative_to(path).as_posix(): item.read_bytes()
+        for item in path.rglob("*")
+        if item.is_file()
+    }
 
 
 class ReleasePackagingTests(unittest.TestCase):
@@ -174,6 +222,10 @@ class ReleasePackagingTests(unittest.TestCase):
                 members[f"{module_top}/lib/ngx_http_rustscript_module.so"].mode,
                 0o644,
             )
+            self.assertEqual(
+                relative_markdown_link_errors(tar_payload(first / module_tgz_name, module_top)),
+                [],
+            )
 
             bundle_top = "ngx-rustscript-nginx-0.1.0-nginx-1.30.4-linux-amd64"
             with tarfile.open(first / bundle_tgz_name, "r:gz") as archive:
@@ -209,6 +261,10 @@ class ReleasePackagingTests(unittest.TestCase):
             )
             self.assertIn(b"include mime.types;", bundle_conf)
             self.assertNotIn(b"include conf/mime.types;", bundle_conf)
+            self.assertEqual(
+                relative_markdown_link_errors(tar_payload(first / bundle_tgz_name, bundle_top)),
+                [],
+            )
 
             deb = first / deb_name
             self.assertEqual(run("dpkg-deb", "-f", str(deb), "Package").stdout.strip(), "nginx-module-rustscript")
@@ -225,8 +281,14 @@ class ReleasePackagingTests(unittest.TestCase):
             self.assertIn("./usr/share/doc/nginx-module-rustscript/docs/index.md", contents)
             self.assertIn("./usr/share/doc/nginx-module-rustscript/docs/directives.md", contents)
             self.assertIn("./usr/share/doc/nginx-module-rustscript/docs/api/index.md", contents)
+            self.assertNotIn("./usr/share/doc/nginx-module-rustscript/ngx-api-compatibility.md", contents)
             self.assertNotIn("../", contents)
             self.assertFalse(any(line.startswith("l") for line in contents.splitlines()))
+            deb_extract = tmp_path / "deb-extract"
+            extract_result = run("dpkg-deb", "-x", str(deb), str(deb_extract))
+            self.assertEqual(extract_result.returncode, 0, extract_result.stdout)
+            deb_docs = deb_extract / "usr/share/doc/nginx-module-rustscript"
+            self.assertEqual(relative_markdown_link_errors(directory_payload(deb_docs)), [])
 
             checksum_check = run("sha256sum", "--check", "--strict", "SHA256SUMS", cwd=first)
             self.assertEqual(checksum_check.returncode, 0, checksum_check.stdout)
