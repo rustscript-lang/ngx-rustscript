@@ -100,6 +100,50 @@ fn standard_async_imports_compile_and_require_request_owned_execution() {
 }
 
 #[test]
+fn documented_standard_async_interfaces_compile() {
+    compile(
+        r#"
+        use io;
+        use http;
+        use sqlite;
+        use bytes as builtin_bytes;
+
+        let handle: int = io::open("input.txt", "r");
+        let line: string = io::read_line(handle);
+        let remaining: string = io::read_all(handle);
+        let written: int = io::write(handle, line);
+        let flushed: bool = io::flush(handle);
+        let closed: bool = io::close(handle);
+        let exists: bool = io::exists("input.txt");
+
+        let response: map = http::client::request({
+            method: "GET",
+            url: "https://example.test/",
+            headers: { "accept": "application/json" },
+            body: null
+        });
+        let status: int = response["status"];
+        let body_bytes: bytes = response["body"];
+        let body: string = builtin_bytes::to_utf8(body_bytes);
+
+        let db: int = sqlite::open({
+            path: "state.db",
+            mode: "read_write_create",
+            limits: {}
+        });
+        let executed: map = sqlite::execute(db, "CREATE TABLE t (v TEXT)", []);
+        let affected: int = executed["rows_affected"];
+        let queried: map = sqlite::query(db, "SELECT v FROM t", [], { max_rows: 10 });
+        let truncated: bool = queried["truncated"];
+        let transaction_results = sqlite::transaction(db, {
+            { sql: "INSERT INTO t(v) VALUES (?1)", params: {"value"} }
+        });
+        sqlite::close(db);
+        "#,
+    );
+}
+
+#[test]
 fn standard_runtime_policy_defaults_fail_closed_and_installs_on_a_vm() {
     let policy = StandardHostPolicy::fail_closed();
     assert!(policy.io_roots.is_empty());
