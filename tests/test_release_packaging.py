@@ -162,6 +162,10 @@ class ReleasePackagingTests(unittest.TestCase):
                 f"{module_top}/lib/ngx_http_rustscript_module.so",
                 f"{module_top}/README.md",
                 f"{module_top}/docs/ngx-api-compatibility.md",
+                f"{module_top}/docs/index.md",
+                f"{module_top}/docs/directives.md",
+                f"{module_top}/docs/api/index.md",
+                f"{module_top}/docs/security.md",
                 f"{module_top}/examples/rate-limit.rss",
                 f"{module_top}/examples/key-auth.rss",
             ):
@@ -190,6 +194,9 @@ class ReleasePackagingTests(unittest.TestCase):
                 f"{bundle_top}/conf/mime.types",
                 f"{bundle_top}/html/index.html",
                 f"{bundle_top}/licenses/nginx/LICENSE",
+                f"{bundle_top}/docs/index.md",
+                f"{bundle_top}/docs/directives.md",
+                f"{bundle_top}/docs/api/index.md",
                 f"{bundle_top}/examples/rate-limit.rss",
             ):
                 self.assertIn(name, bundle_members)
@@ -215,6 +222,9 @@ class ReleasePackagingTests(unittest.TestCase):
             contents = run("dpkg-deb", "-c", str(deb)).stdout
             self.assertIn("./usr/lib/nginx/modules/ngx_http_rustscript_module.so", contents)
             self.assertIn("./usr/share/doc/nginx-module-rustscript/examples/rate-limit.rss", contents)
+            self.assertIn("./usr/share/doc/nginx-module-rustscript/docs/index.md", contents)
+            self.assertIn("./usr/share/doc/nginx-module-rustscript/docs/directives.md", contents)
+            self.assertIn("./usr/share/doc/nginx-module-rustscript/docs/api/index.md", contents)
             self.assertNotIn("../", contents)
             self.assertFalse(any(line.startswith("l") for line in contents.splitlines()))
 

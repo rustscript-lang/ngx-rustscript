@@ -102,16 +102,18 @@ for required in conf/mime.types html/index.html html/50x.html LICENSE; do
 done
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-for required in README.md docs/ngx-api-compatibility.md examples; do
+for required in README.md docs examples; do
   [[ -e "$ROOT/$required" ]] || {
     echo "required package input is missing: $required" >&2
     exit 1
   }
 done
-if [[ -n "$(find "$ROOT/examples" -type l -print -quit)" ]]; then
-  echo "examples must not contain symbolic links" >&2
-  exit 1
-fi
+for tree in docs examples; do
+  if [[ -n "$(find "$ROOT/$tree" -type l -print -quit)" ]]; then
+    echo "$tree must not contain symbolic links" >&2
+    exit 1
+  fi
+done
 
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" log -1 --format=%ct)}"
 if [[ ! "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]]; then
@@ -159,7 +161,7 @@ MODULE_ROOT="$TMP/module/$MODULE_TOP"
 install -d -m 0755 "$MODULE_ROOT/lib" "$MODULE_ROOT/docs" "$MODULE_ROOT/examples"
 install -m 0644 "$MODULE" "$MODULE_ROOT/lib/ngx_http_rustscript_module.so"
 install -m 0644 "$ROOT/README.md" "$MODULE_ROOT/README.md"
-install -m 0644 "$ROOT/docs/ngx-api-compatibility.md" "$MODULE_ROOT/docs/ngx-api-compatibility.md"
+cp -a "$ROOT/docs/." "$MODULE_ROOT/docs/"
 cp -a "$ROOT/examples/." "$MODULE_ROOT/examples/"
 normalize_tree "$MODULE_ROOT"
 write_tgz "$TMP/module" "$MODULE_TOP" "$OUTPUT_DIR/$MODULE_TGZ"
@@ -187,7 +189,7 @@ install -m 0644 "$NGINX_SOURCE/html/index.html" "$BUNDLE_ROOT/html/index.html"
 install -m 0644 "$NGINX_SOURCE/html/50x.html" "$BUNDLE_ROOT/html/50x.html"
 install -m 0644 "$NGINX_SOURCE/LICENSE" "$BUNDLE_ROOT/licenses/nginx/LICENSE"
 install -m 0644 "$ROOT/README.md" "$BUNDLE_ROOT/README.md"
-install -m 0644 "$ROOT/docs/ngx-api-compatibility.md" "$BUNDLE_ROOT/docs/ngx-api-compatibility.md"
+cp -a "$ROOT/docs/." "$BUNDLE_ROOT/docs/"
 cp -a "$ROOT/examples/." "$BUNDLE_ROOT/examples/"
 cat > "$BUNDLE_ROOT/bin/nginx-rustscript" <<'EOF'
 #!/usr/bin/env bash
@@ -237,10 +239,11 @@ write_tgz "$TMP/bundle" "$BUNDLE_TOP" "$OUTPUT_DIR/$BUNDLE_TGZ"
 
 DEB_ROOT="$TMP/deb"
 DOC_ROOT="$DEB_ROOT/usr/share/doc/nginx-module-rustscript"
-install -d -m 0755 "$DEB_ROOT/DEBIAN" "$DEB_ROOT/usr/lib/nginx/modules" "$DOC_ROOT/examples"
+install -d -m 0755 "$DEB_ROOT/DEBIAN" "$DEB_ROOT/usr/lib/nginx/modules" "$DOC_ROOT/docs" "$DOC_ROOT/examples"
 install -m 0644 "$MODULE" "$DEB_ROOT/usr/lib/nginx/modules/ngx_http_rustscript_module.so"
 install -m 0644 "$ROOT/README.md" "$DOC_ROOT/README.md"
 install -m 0644 "$ROOT/docs/ngx-api-compatibility.md" "$DOC_ROOT/ngx-api-compatibility.md"
+cp -a "$ROOT/docs/." "$DOC_ROOT/docs/"
 cp -a "$ROOT/examples/." "$DOC_ROOT/examples/"
 cat > "$DEB_ROOT/DEBIAN/control" <<EOF
 Package: nginx-module-rustscript

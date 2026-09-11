@@ -158,7 +158,7 @@ Linux amd64 releases provide:
 - `SHA256SUMS`
 
 The module tgz contains `lib/ngx_http_rustscript_module.so`, the README, the
-API compatibility matrix, and the deployment examples. The NGINX bundle adds
+complete documentation tree, and the deployment examples. The NGINX bundle adds
 the pinned NGINX 1.30.4 executable, a ready module-loading configuration,
 static pages, temporary directories, and `bin/nginx-rustscript`, which runs the
 included NGINX with the extracted directory as its prefix:

@@ -193,7 +193,8 @@ host adds a further difference.
    messages containing NUL are host errors. The line is prefixed
    `ngx-rustscript: `. OpenResty varargs are a single string.
 9. **Phase and config import enforcement.** `compile_rss_source` compiles
-   access scripts against `ngx_host_catalog()` and then
+   access scripts against `compile_host_catalog()` (the 191 ngx hosts plus
+   pd-vm's HTTP import catalog) and then
    `validate_program_imports_for_phase(..., Access)`;
    `compile_rss_source_for_phase` performs the corresponding Content or
    Log validation for `content_by_rss_file` and `log_by_rss_file`. Unknown
