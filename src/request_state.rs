@@ -1032,7 +1032,7 @@ ngx::ctx::set("k", 1);
     }
 
     #[test]
-    fn default_standard_host_policy_denies_io_http_and_sqlite() {
+    fn default_standard_host_policy_denies_io() {
         let root = std::env::temp_dir().join(format!(
             "ngx-rustscript-standard-deny-{}-{}",
             std::process::id(),
@@ -1049,15 +1049,23 @@ ngx::ctx::set("k", 1);
             ),
             "outside the allowed roots",
         );
+        std::fs::remove_dir_all(root).expect("remove denied root");
+    }
+
+    #[test]
+    fn default_standard_host_policy_denies_http() {
         assert_default_policy_denies(
             "use http;\nhttp::client::request({\"method\": \"GET\", \"url\": \"http://127.0.0.1:9/\"});\n",
             "scheme 'http' is not allowed",
         );
+    }
+
+    #[test]
+    fn default_standard_host_policy_denies_sqlite() {
         assert_default_policy_denies(
             "use sqlite;\nlet db = sqlite::open({\"path\": \"state.db\", \"mode\": \"read_write_create\"});\nsqlite::close(db);\n",
             "database root is not configured",
         );
-        std::fs::remove_dir_all(root).expect("remove denied root");
     }
 
     #[test]
