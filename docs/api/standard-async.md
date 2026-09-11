@@ -174,24 +174,25 @@ or `bytes`. SQL should use SQLite placeholders such as `?1`.
 ### Query limits and result
 
 The `limits` map accepted by `sqlite::query` is parsed by the same bounded
-schema as `sqlite::open`. Query-relevant keys include `max_rows`,
-`max_columns`, `max_result_bytes`, `max_statement_bytes`, `max_parameters`,
-`max_parameter_bytes`, and `max_transaction_ms`; connection-management keys
-are accepted but do not change an already-open connection. Values cannot
-exceed the connection's limits. The result map is:
+schema as `sqlite::open`. The query path applies `max_rows`, `max_columns`,
+`max_result_bytes`, and `max_statement_bytes`. Other accepted keys do not
+change an already-open connection or the connection-owned parameter and
+operation ceilings. Values cannot exceed the connection's limits. The result
+map is:
 
 ```text
 {
     columns: array<string>,
     rows: array<array<unknown>>,
     truncated: bool,
-    next_cursor: int? // present when the last returned row starts with an int
+    next_cursor: int? // most recent returned first-column integer, when any
 }
 ```
 
-`next_cursor` is the first-column integer from the last row already returned;
-it is not the next unread row and its presence is independent of
-`truncated`. A row cell may be `null`, `int`, `float`, `string`, or `bytes`.
+`next_cursor` retains the first-column integer from the most recent returned
+row whose first column is an `int`; later rows with another first-column type
+do not clear it. It is not the next unread row, and its presence is independent
+of `truncated`. A row cell may be `null`, `int`, `float`, `string`, or `bytes`.
 
 ### Transaction statements and result
 
