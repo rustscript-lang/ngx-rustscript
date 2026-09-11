@@ -6,11 +6,11 @@ content, and log phases. Location directives `access_by_rss_file <path>`,
 script once at configuration time.
 
 Import-free scripts run synchronously to `Halted` on a worker-local VM
-pool. Scripts that import `ngx::sleep`, `ngx::sleep_ms`,
-`ngx::socket::udp*`, or `ngx::socket::tcp*` / `ngx::socket::connect`
-bind a request-local VM, return `NGX_AGAIN` while a
-generic host future is pending, and resume the same VM from the eventfd
-callback. Client disconnect during a wait finalizes the request as HTTP
+pool. Scripts that import pd-vm I/O, HTTP client, or SQLite hosts,
+`ngx::sleep`, `ngx::sleep_ms`, `ngx::socket::udp*`, or
+`ngx::socket::tcp*` / `ngx::socket::connect` bind a request-local VM,
+return `NGX_AGAIN` while a generic host future is pending, and resume the
+same VM from the eventfd callback. Client disconnect during a wait finalizes the request as HTTP
 499. Graceful master shutdown cancels in-flight host futures instead of
 waiting them out. `log_by_rss_file` is synchronous and fail-closed: it
 runs after the response is complete, never waits, and logs errors
@@ -208,7 +208,13 @@ location are rejected per slot. Unset nested locations inherit each
 parent slot independently; an explicit child directive overrides that
 slot only.
 `rss_shared_dict <name> <size>` is HTTP-main only and takes exactly two
-arguments. Relative paths resolve with NGINX `ngx_conf_full_name` against the conf
+arguments. The pd-vm standard runtime domains are denied until location
+configuration grants them: `rss_io_root <path>`, `rss_io_write on|off`,
+`rss_http_scheme http|https`, `rss_http_allow <host> <port>`,
+`rss_http_allow_private on|off`, and `rss_sqlite_root <path>`. These policy
+fields inherit independently. I/O process spawning and unsafe SQLite SQL
+remain disabled.
+Relative paths resolve with NGINX `ngx_conf_full_name` against the conf
 prefix (the directory of the config file). Absolute paths are unchanged.
 The file is read once at `nginx -t` / reload, must be a regular UTF-8 file,
 and is compiled with `compile_source`.
@@ -263,6 +269,7 @@ Complete deployment examples:
 
 - [Shared-dict fixed-window rate limiter](docs/examples/rate-limit.md) — [RSS](examples/rate-limit.rss) / [NGINX config](examples/rate-limit.nginx.conf)
 - [HMAC API-key authentication](docs/examples/key-auth.md) — [RSS](examples/key-auth.rss) / [NGINX config](examples/key-auth.nginx.conf) / [secret include template](examples/key-auth-secrets.conf.example)
+- [Async I/O → HTTP → SQLite → shared-dict → JSON pipeline](docs/examples/async-pipeline.md) — [RSS](examples/async-pipeline.rss) / [NGINX config](examples/async-pipeline.nginx.conf)
 
 Import-free access script (runs to `Halted`, then the content phase):
 
@@ -365,8 +372,9 @@ On each request the access handler leases a worker-thread-local VM via
 pool size is bounded. VM errors and unexpected `Waiting` on import-free
 programs fail the request with 500.
 
-Scripts that imported `ngx::sleep`, `ngx::sleep_ms`, or UDP/TCP cosocket
-hosts bind a request-local VM instead of the pool. `Waiting` returns
+Scripts that use pd-vm I/O, HTTP client, SQLite, `ngx::sleep`,
+`ngx::sleep_ms`, or UDP/TCP cosocket hosts bind a request-local VM instead
+of the pool. `Waiting` returns
 `NGX_AGAIN` without incrementing `r->main->count`.
 The eventfd callback polls the waiting host op, resumes the same VM on the
 worker main thread, and continues `ngx_http_core_run_phases` exactly once
@@ -393,9 +401,10 @@ rejects those imports at config time.
   `NGX_PROCESS_SINGLE`. Helper processes skip initialization. `nginx -t`,
   master, and config never create Tokio threads or the eventfd.
   `exit_process` shuts the runtime down and is idempotent.
-- Tokio features: `rt` + `rt-multi-thread` + `time` + `net` + `sync` + `io-util`
-  (UDP/TCP cosocket; no HTTP client). One worker thread named
-  `ngx-rustscript-async`. The I/O driver is enabled alongside time.
+- Tokio features: `rt` + `rt-multi-thread` + `time` + `net` + `sync` + `io-util`.
+  One worker thread named `ngx-rustscript-async` drives ngx cosockets and
+  pd-vm async I/O/HTTP host futures. SQLite operations use pd-vm's scoped
+  worker-backed operation path and resume through the same eventfd bridge.
 - Async wait capacity is `DEFAULT_MAX_IN_FLIGHT` (1024). Reserve is rejected
   when full. Host futures and wakers own only a queue sender and request
   identity — no NGINX request/pool/VM pointers cross into Tokio, and Tokio

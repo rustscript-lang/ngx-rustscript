@@ -9,6 +9,7 @@ use vm::{Vm, VmError};
 
 pub mod catalog;
 pub(crate) mod context;
+pub(crate) mod standard;
 
 pub use catalog::{
     HostCapability, HostFamily, HostManifestEntry, HostSyncKind, LOG_ALLOWED_NAMES,
@@ -50,6 +51,7 @@ pub use catalog::{
     host_allowed_in_phase, host_validates_for_log, log_allowlist_accepts, manifest_entry,
     ngx_host_catalog, ngx_host_manifest,
 };
+pub use catalog::{compile_host_catalog, is_standard_host_import};
 pub use context::{
     AllowedOps, RequestDisposition, ScopeError, VmEntryObservation, capture_vm_entries,
     current_allowed_ops, current_identity, current_phase, current_request_live, is_active,
@@ -65,6 +67,7 @@ pub use layout::helpers::request_ctx::{
     MAX_CTX_CONTAINER_ELEMS, MAX_CTX_DEPTH, MAX_CTX_KEY_BYTES, MAX_CTX_KEYS, MAX_CTX_SCALAR_BYTES,
     MAX_CTX_TOTAL_BYTES, RequestLocalCtx,
 };
+pub use standard::{StandardHostPolicy, install_standard_runtime};
 
 /// Override the OS clock sampled by time hosts. Used by tests and by
 /// `notify_cached_clock_event_boundary` to model nginx's event-loop refresh

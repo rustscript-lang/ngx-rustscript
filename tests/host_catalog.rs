@@ -9,7 +9,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use ngx_rustscript::config::{
-    ConfigError, compile_rss_source, reject_program_imports, validate_program_imports_for_phase,
+    ConfigError, compile_rss_source, compile_rss_source_for_phase, program_requires_request_state,
+    reject_program_imports, validate_program_imports_for_phase,
 };
 use ngx_rustscript::host::{
     HostCapability, HostFamily, HostSyncKind, NGX_CRC32_LONG_NAME, NGX_CRC32_SHORT_NAME,
@@ -17,7 +18,8 @@ use ngx_rustscript::host::{
     NGX_ENCODE_BASE64_NAME, NGX_ESCAPE_URI_NAME, NGX_HEADER_GET_NAME, NGX_HMAC_SHA1_NAME,
     NGX_MD5_BIN_NAME, NGX_MD5_NAME, NGX_NOW_NAME, NGX_QUOTE_SQL_STR_NAME, NGX_SHA1_BIN_NAME,
     NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_STATUS_GET_NAME, NGX_TIME_NAME, NGX_UNESCAPE_URI_NAME,
-    NGX_UPDATE_TIME_NAME, NgxPhase, bind_ngx_hosts, host_allowed_in_phase, ngx_host_catalog,
+    NGX_UPDATE_TIME_NAME, NgxPhase, StandardHostPolicy, bind_ngx_hosts, compile_host_catalog,
+    host_allowed_in_phase, install_standard_runtime, is_standard_host_import, ngx_host_catalog,
     ngx_host_manifest, production_runtime_host_names,
 };
 use vm::{HostTypeSchema, Program, Vm};
@@ -32,6 +34,92 @@ fn compile_err(source: &str) -> ConfigError {
 
 fn error_text(err: &ConfigError) -> String {
     err.to_string().to_ascii_lowercase()
+}
+
+#[test]
+fn compiler_catalog_merges_http_imports_and_leaves_io_sqlite_as_builtins() {
+    let ngx = ngx_host_catalog();
+    let merged = compile_host_catalog();
+    for name in ["http::client::request", "http::client::sse"] {
+        assert!(
+            ngx.function(name).is_none(),
+            "ngx-only catalog leaked {name}"
+        );
+        assert!(
+            merged.function(name).is_some(),
+            "merged catalog misses {name}"
+        );
+        assert!(
+            is_standard_host_import(name),
+            "standard import set misses {name}"
+        );
+        assert!(host_allowed_in_phase(name, NgxPhase::Access));
+        assert!(host_allowed_in_phase(name, NgxPhase::Content));
+        assert!(!host_allowed_in_phase(name, NgxPhase::Log));
+    }
+    for name in [
+        "io::open",
+        "io::read_all",
+        "io::close",
+        "sqlite::open",
+        "sqlite::query",
+        "sqlite::close",
+    ] {
+        assert!(
+            merged.function(name).is_none(),
+            "{name} must stay on pd-vm's builtin dispatch path"
+        );
+        assert!(!is_standard_host_import(name));
+    }
+}
+
+#[test]
+fn standard_async_imports_compile_and_require_request_owned_execution() {
+    let program = compile(
+        r#"
+        use io;
+        use http;
+        use sqlite;
+        let file = io::open("input.txt", "r");
+        let text = io::read_all(file);
+        io::close(file);
+        http::client::request({"method": "GET", "url": text});
+        let db = sqlite::open({"path": "state.db", "mode": "read_write_create"});
+        sqlite::query(db, "SELECT value FROM events", [], {});
+        sqlite::close(db);
+        "#,
+    );
+    assert!(ngx_rustscript::config::program_requires_request_state(
+        &program
+    ));
+    validate_program_imports_for_phase(&program, NgxPhase::Access).expect("access allows async");
+    validate_program_imports_for_phase(&program, NgxPhase::Content).expect("content allows async");
+    let err = validate_program_imports_for_phase(&program, NgxPhase::Log)
+        .expect_err("log cannot suspend");
+    assert!(matches!(err, ConfigError::PhaseForbidden { .. }));
+}
+
+#[test]
+fn standard_runtime_policy_defaults_fail_closed_and_installs_on_a_vm() {
+    let policy = StandardHostPolicy::fail_closed();
+    assert!(policy.io_roots.is_empty());
+    assert!(!policy.io_write);
+    assert!(policy.http_hosts.is_empty());
+    assert!(policy.http_ports.is_empty());
+    assert!(!policy.http_allow_private);
+    assert!(policy.sqlite_root.is_none());
+
+    let program = compile("let value = 1;\n");
+    let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
+    install_standard_runtime(&mut vm, &policy).expect("valid fail-closed policy");
+}
+
+#[test]
+fn async_pipeline_example_compiles_with_request_owned_execution() {
+    let source = include_str!("../examples/async-pipeline.rss");
+    let program = compile_rss_source_for_phase(source, NgxPhase::Content)
+        .expect("async pipeline example must compile");
+    assert!(program_requires_request_state(&program));
 }
 
 #[test]

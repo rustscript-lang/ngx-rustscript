@@ -36,7 +36,7 @@ rustls-pemfile = { version = "2", default-features = false, features = ["std"] }
 rustls-native-certs = "0.8"
 webpki-roots = "0.26"
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
-vm = { package = "pd-vm", git = "https://github.com/rustscript-lang/rustscript", rev = "4b749862ff1632ef1266d75709da3676de37356c", default-features = false, features = ["runtime"] }
+vm = { package = "pd-vm", git = "https://github.com/rustscript-lang/rustscript", rev = "4b749862ff1632ef1266d75709da3676de37356c", default-features = false, features = ["runtime", "async", "http-client", "sqlite"] }
 
 [features]
 default = ["export-modules"]

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use ngx::core::{NGX_CONF_ERROR, NGX_CONF_OK};
 use ngx::ffi::{
-    NGX_CONF_TAKE1, NGX_CONF_TAKE2, NGX_HTTP_LOC_CONF, NGX_HTTP_LOC_CONF_OFFSET,
+    NGX_CONF_FLAG, NGX_CONF_TAKE1, NGX_CONF_TAKE2, NGX_HTTP_LOC_CONF, NGX_HTTP_LOC_CONF_OFFSET,
     NGX_HTTP_MAIN_CONF, NGX_LOG_EMERG, ngx_command_t, ngx_conf_t, ngx_uint_t,
 };
 use ngx::http::{Merge, MergeConfigError};
@@ -18,8 +18,8 @@ use vm::{
 };
 
 use crate::host::{
-    HostCapability, HostFamily, HostSyncKind, NgxPhase, host_validates_for_log, ngx_host_catalog,
-    ngx_host_manifest,
+    HostCapability, HostFamily, HostSyncKind, NgxPhase, StandardHostPolicy, compile_host_catalog,
+    host_validates_for_log, is_standard_host_import, ngx_host_manifest,
 };
 use crate::phase::{DuplicateSlot, ScriptLocationConf};
 
@@ -29,6 +29,13 @@ pub struct LocationConf {
     access: ScriptLocationConf,
     content: ScriptLocationConf,
     log: ScriptLocationConf,
+    io_roots: Option<Vec<String>>,
+    io_write: Option<bool>,
+    http_schemes: Option<Vec<String>>,
+    http_hosts: Option<Vec<String>>,
+    http_ports: Option<Vec<u16>>,
+    http_allow_private: Option<bool>,
+    sqlite_root: Option<String>,
 }
 
 impl LocationConf {
@@ -67,6 +74,43 @@ impl LocationConf {
             .set_program(program)
             .map_err(|DuplicateSlot| ConfigError::DuplicateLog)
     }
+
+    pub fn add_io_root(&mut self, root: String) {
+        self.io_roots.get_or_insert_with(Vec::new).push(root);
+    }
+
+    pub fn set_io_write(&mut self, allow: bool) {
+        self.io_write = Some(allow);
+    }
+
+    pub fn add_http_scheme(&mut self, scheme: String) {
+        self.http_schemes.get_or_insert_with(Vec::new).push(scheme);
+    }
+
+    pub fn add_http_allow(&mut self, host: String, port: u16) {
+        self.http_hosts.get_or_insert_with(Vec::new).push(host);
+        self.http_ports.get_or_insert_with(Vec::new).push(port);
+    }
+
+    pub fn set_http_allow_private(&mut self, allow: bool) {
+        self.http_allow_private = Some(allow);
+    }
+
+    pub fn set_sqlite_root(&mut self, root: String) {
+        self.sqlite_root = Some(root);
+    }
+
+    pub fn standard_host_policy(&self) -> StandardHostPolicy {
+        let mut policy = StandardHostPolicy::fail_closed();
+        policy.io_roots = self.io_roots.clone().unwrap_or_default();
+        policy.io_write = self.io_write.unwrap_or(false);
+        policy.http_schemes = self.http_schemes.clone().unwrap_or_default();
+        policy.http_hosts = self.http_hosts.clone().unwrap_or_default();
+        policy.http_ports = self.http_ports.clone().unwrap_or_default();
+        policy.http_allow_private = self.http_allow_private.unwrap_or(false);
+        policy.sqlite_root = self.sqlite_root.clone();
+        policy
+    }
 }
 
 impl Merge for LocationConf {
@@ -74,6 +118,27 @@ impl Merge for LocationConf {
         self.access.merge_from(&prev.access);
         self.content.merge_from(&prev.content);
         self.log.merge_from(&prev.log);
+        if self.io_roots.is_none() {
+            self.io_roots.clone_from(&prev.io_roots);
+        }
+        if self.io_write.is_none() {
+            self.io_write = prev.io_write;
+        }
+        if self.http_schemes.is_none() {
+            self.http_schemes.clone_from(&prev.http_schemes);
+        }
+        if self.http_hosts.is_none() {
+            self.http_hosts.clone_from(&prev.http_hosts);
+        }
+        if self.http_ports.is_none() {
+            self.http_ports.clone_from(&prev.http_ports);
+        }
+        if self.http_allow_private.is_none() {
+            self.http_allow_private = prev.http_allow_private;
+        }
+        if self.sqlite_root.is_none() {
+            self.sqlite_root.clone_from(&prev.sqlite_root);
+        }
         Ok(())
     }
 }
@@ -173,11 +238,27 @@ pub fn reject_program_imports(program: &Program) -> Result<(), ConfigError> {
     validate_program_imports_for_phase(program, NgxPhase::Access)
 }
 
+fn first_standard_builtin(program: &Program) -> Option<String> {
+    let disassembly = vm::disassemble_program(program);
+    if disassembly.contains("builtin io_") {
+        return Some("io::*".into());
+    }
+    if disassembly.contains("builtin sqlite_") {
+        return Some("sqlite::*".into());
+    }
+    None
+}
+
 /// Check each program import against the handwritten ngx manifest.
 pub fn validate_program_imports_for_phase(
     program: &Program,
     phase: NgxPhase,
 ) -> Result<(), ConfigError> {
+    if phase == NgxPhase::Log {
+        if let Some(name) = first_standard_builtin(program) {
+            return Err(ConfigError::PhaseForbidden { name, phase });
+        }
+    }
     let manifest = ngx_host_manifest();
     let mut unknown = Vec::new();
     let mut forbidden = Vec::new();
@@ -186,6 +267,10 @@ pub fn validate_program_imports_for_phase(
             .iter()
             .find(|entry| entry.name == import.name.as_str())
         {
+            None if is_standard_host_import(&import.name) && phase != NgxPhase::Log => {}
+            None if is_standard_host_import(&import.name) => {
+                forbidden.push(import.name.as_str());
+            }
             None => unknown.push(import.name.as_str()),
             Some(entry) if phase == NgxPhase::Log && !host_validates_for_log(entry) => {
                 forbidden.push(import.name.as_str());
@@ -214,22 +299,24 @@ pub fn validate_program_imports_for_phase(
 /// all require per-request state. Pure-sync request-read programs stay on
 /// the pooled path.
 pub fn program_requires_request_state(program: &Program) -> bool {
-    program.imports.iter().any(|import| {
-        ngx_host_manifest().iter().any(|entry| {
-            entry.name == import.name.as_str()
-                && (entry.sync == HostSyncKind::Async
-                    || entry.family == HostFamily::RequestCtx
-                    || entry.family == HostFamily::Cosocket
-                    || entry.capabilities.iter().any(|cap| {
-                        matches!(
-                            cap,
-                            HostCapability::RequestWrite
-                                | HostCapability::ResponseWrite
-                                | HostCapability::Control
-                        )
-                    }))
+    first_standard_builtin(program).is_some()
+        || program.imports.iter().any(|import| {
+            is_standard_host_import(&import.name)
+                || ngx_host_manifest().iter().any(|entry| {
+                    entry.name == import.name.as_str()
+                        && (entry.sync == HostSyncKind::Async
+                            || entry.family == HostFamily::RequestCtx
+                            || entry.family == HostFamily::Cosocket
+                            || entry.capabilities.iter().any(|cap| {
+                                matches!(
+                                    cap,
+                                    HostCapability::RequestWrite
+                                        | HostCapability::ResponseWrite
+                                        | HostCapability::Control
+                                )
+                            }))
+                })
         })
-    })
 }
 
 /// Compile with the ngx host catalog and reject unknown or phase-forbidden imports.
@@ -242,7 +329,7 @@ pub fn compile_rss_source_for_phase(
     source: &str,
     phase: NgxPhase,
 ) -> Result<Arc<Program>, ConfigError> {
-    let catalog = Arc::new(ngx_host_catalog());
+    let catalog = Arc::new(compile_host_catalog());
     let compiled = compile_source_with_flavor_and_options(
         source,
         SourceFlavor::RustScript,
@@ -269,7 +356,7 @@ pub fn load_and_compile_rss_file_for_phase(
     compile_rss_source_for_phase(&source, phase)
 }
 
-pub(crate) static mut COMMANDS: [ngx_command_t; 5] = [
+pub(crate) static mut COMMANDS: [ngx_command_t; 11] = [
     ngx_command_t {
         name: ngx_string!("rss_shared_dict"),
         type_: (NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE2) as ngx_uint_t,
@@ -302,6 +389,54 @@ pub(crate) static mut COMMANDS: [ngx_command_t; 5] = [
         offset: 0,
         post: std::ptr::null_mut(),
     },
+    ngx_command_t {
+        name: ngx_string!("rss_io_root"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
+        set: Some(set_rss_io_root),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
+    ngx_command_t {
+        name: ngx_string!("rss_io_write"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_FLAG) as ngx_uint_t,
+        set: Some(set_rss_io_write),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
+    ngx_command_t {
+        name: ngx_string!("rss_http_scheme"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
+        set: Some(set_rss_http_scheme),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
+    ngx_command_t {
+        name: ngx_string!("rss_http_allow"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE2) as ngx_uint_t,
+        set: Some(set_rss_http_allow),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
+    ngx_command_t {
+        name: ngx_string!("rss_http_allow_private"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_FLAG) as ngx_uint_t,
+        set: Some(set_rss_http_allow_private),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
+    ngx_command_t {
+        name: ngx_string!("rss_sqlite_root"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
+        set: Some(set_rss_sqlite_root),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
     ngx_command_t::empty(),
 ];
 
@@ -311,7 +446,7 @@ extern "C" fn set_rss_shared_dict(
     _conf: *mut core::ffi::c_void,
 ) -> *mut core::ffi::c_char {
     // SAFETY: NGINX invokes TAKE2 handlers with a live conf and three args.
-    let args = unsafe { (*(*cf).args).as_slice() };
+    let args: &[ngx::ffi::ngx_str_t] = unsafe { (*(*cf).args).as_slice() };
     if args.len() != 3 {
         ngx_conf_log_error!(
             NGX_LOG_EMERG,
@@ -379,6 +514,156 @@ extern "C" fn set_rss_shared_dict(
     NGX_CONF_OK
 }
 
+extern "C" fn set_rss_io_root(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut core::ffi::c_void,
+) -> *mut core::ffi::c_char {
+    let loc = unsafe { &mut *conf.cast::<LocationConf>() };
+    if loc.io_roots.is_some() {
+        return duplicate_directive(cf, "rss_io_root");
+    }
+    let Some(path) = resolve_conf_path(cf, 1, "rss_io_root") else {
+        return NGX_CONF_ERROR;
+    };
+    loc.add_io_root(path);
+    NGX_CONF_OK
+}
+
+extern "C" fn set_rss_io_write(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut core::ffi::c_void,
+) -> *mut core::ffi::c_char {
+    let loc = unsafe { &mut *conf.cast::<LocationConf>() };
+    if loc.io_write.is_some() {
+        return duplicate_directive(cf, "rss_io_write");
+    }
+    let Some(value) = parse_flag(cf, "rss_io_write") else {
+        return NGX_CONF_ERROR;
+    };
+    loc.set_io_write(value);
+    NGX_CONF_OK
+}
+
+extern "C" fn set_rss_http_scheme(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut core::ffi::c_void,
+) -> *mut core::ffi::c_char {
+    let args: &[ngx::ffi::ngx_str_t] = unsafe { (*(*cf).args).as_slice() };
+    let scheme = match args.get(1).and_then(|arg| arg.to_str().ok()) {
+        Some("http") => "http",
+        Some("https") => "https",
+        _ => {
+            ngx_conf_log_error!(NGX_LOG_EMERG, cf, "rss_http_scheme: expected http or https");
+            return NGX_CONF_ERROR;
+        }
+    };
+    let loc = unsafe { &mut *conf.cast::<LocationConf>() };
+    loc.add_http_scheme(scheme.to_string());
+    NGX_CONF_OK
+}
+
+extern "C" fn set_rss_http_allow(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut core::ffi::c_void,
+) -> *mut core::ffi::c_char {
+    let args: &[ngx::ffi::ngx_str_t] = unsafe { (*(*cf).args).as_slice() };
+    let host = match args.get(1).and_then(|arg| arg.to_str().ok()) {
+        Some(host) if !host.is_empty() => host.to_string(),
+        _ => {
+            ngx_conf_log_error!(NGX_LOG_EMERG, cf, "rss_http_allow: invalid host");
+            return NGX_CONF_ERROR;
+        }
+    };
+    let port = match args
+        .get(2)
+        .and_then(|arg| arg.to_str().ok())
+        .and_then(|value| value.parse::<u16>().ok())
+    {
+        Some(port) if port != 0 => port,
+        _ => {
+            ngx_conf_log_error!(NGX_LOG_EMERG, cf, "rss_http_allow: invalid port");
+            return NGX_CONF_ERROR;
+        }
+    };
+    let loc = unsafe { &mut *conf.cast::<LocationConf>() };
+    loc.add_http_allow(host, port);
+    NGX_CONF_OK
+}
+
+extern "C" fn set_rss_http_allow_private(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut core::ffi::c_void,
+) -> *mut core::ffi::c_char {
+    let loc = unsafe { &mut *conf.cast::<LocationConf>() };
+    if loc.http_allow_private.is_some() {
+        return duplicate_directive(cf, "rss_http_allow_private");
+    }
+    let Some(value) = parse_flag(cf, "rss_http_allow_private") else {
+        return NGX_CONF_ERROR;
+    };
+    loc.set_http_allow_private(value);
+    NGX_CONF_OK
+}
+
+extern "C" fn set_rss_sqlite_root(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut core::ffi::c_void,
+) -> *mut core::ffi::c_char {
+    let loc = unsafe { &mut *conf.cast::<LocationConf>() };
+    if loc.sqlite_root.is_some() {
+        return duplicate_directive(cf, "rss_sqlite_root");
+    }
+    let Some(path) = resolve_conf_path(cf, 1, "rss_sqlite_root") else {
+        return NGX_CONF_ERROR;
+    };
+    loc.set_sqlite_root(path);
+    NGX_CONF_OK
+}
+
+fn parse_flag(cf: *mut ngx_conf_t, directive: &str) -> Option<bool> {
+    let args: &[ngx::ffi::ngx_str_t] = unsafe { (*(*cf).args).as_slice() };
+    match args.get(1).and_then(|arg| arg.to_str().ok()) {
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        _ => {
+            ngx_conf_log_error!(NGX_LOG_EMERG, cf, "{directive}: expected on or off");
+            None
+        }
+    }
+}
+
+fn resolve_conf_path(cf: *mut ngx_conf_t, index: usize, directive: &str) -> Option<String> {
+    let args: &[ngx::ffi::ngx_str_t] = unsafe { (*(*cf).args).as_slice() };
+    let mut name = *args.get(index)?;
+    let resolved = unsafe { nginx_sys::ngx_conf_full_name((*cf).cycle, &mut name, 1) };
+    if resolved != ngx::core::Status::NGX_OK.0 {
+        ngx_conf_log_error!(NGX_LOG_EMERG, cf, "{directive}: failed to resolve path");
+        return None;
+    }
+    match name.to_str() {
+        Ok(path) if !path.is_empty() => Some(path.to_string()),
+        _ => {
+            ngx_conf_log_error!(NGX_LOG_EMERG, cf, "{directive}: invalid path");
+            None
+        }
+    }
+}
+
+fn duplicate_directive(cf: *mut ngx_conf_t, directive: &str) -> *mut core::ffi::c_char {
+    ngx_conf_log_error!(
+        NGX_LOG_EMERG,
+        cf,
+        "duplicate {directive} directive in this location"
+    );
+    NGX_CONF_ERROR
+}
+
 extern "C" fn set_access_by_rss_file(
     cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,
@@ -425,7 +710,7 @@ fn set_phase_by_rss_file(
         return NGX_CONF_ERROR;
     }
 
-    let args = unsafe { (*(*cf).args).as_slice() };
+    let args: &[ngx::ffi::ngx_str_t] = unsafe { (*(*cf).args).as_slice() };
     if args.len() != 2 {
         ngx_conf_log_error!(
             NGX_LOG_EMERG,

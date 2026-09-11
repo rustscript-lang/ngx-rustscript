@@ -4,7 +4,9 @@
 //! capability data. This module is the import allowlist and config-time
 //! validator. Runtime dispatch stays in [`crate::host::bind_ngx_hosts`].
 
+use std::collections::HashSet;
 use std::fmt;
+use std::sync::OnceLock;
 
 use vm::{
     HostApiBuilder, HostApiCatalog, HostFunctionSchema, HostParamPassing, HostParamSchema,
@@ -2357,12 +2359,54 @@ pub fn ngx_host_catalog() -> HostApiCatalog {
         .expect("ngx host catalog must be a valid HostApiCatalog")
 }
 
+/// Compiler catalog containing ngx hosts and pd-vm HTTP host imports.
+///
+/// pd-vm I/O and SQLite are compiler builtins dispatched through the standard
+/// composition. Adding their schemas as external host imports would bypass
+/// that builtin path and produce unbindable imports.
+pub fn compile_host_catalog() -> HostApiCatalog {
+    let ngx = ngx_host_catalog();
+    let standard_imports = vm::http_host_catalog();
+    let mut builder = HostApiBuilder::new();
+    for resource in ngx.resources() {
+        builder.resource(resource.clone());
+    }
+    for function in ngx.functions() {
+        builder.function(function.clone());
+    }
+    for resource in standard_imports.resources() {
+        builder.resource(resource.clone());
+    }
+    for function in standard_imports.functions() {
+        builder.function(function.clone());
+    }
+    builder
+        .build()
+        .expect("merged ngx and standard host catalog must be valid")
+}
+
+fn standard_host_names() -> &'static HashSet<String> {
+    static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        vm::http_host_catalog()
+            .functions()
+            .iter()
+            .map(|function| function.name.clone())
+            .collect()
+    })
+}
+
+/// True when `name` belongs to pd-vm's enabled standard host surface.
+pub fn is_standard_host_import(name: &str) -> bool {
+    standard_host_names().contains(name)
+}
+
 /// True when `name` is a catalogued host allowed in `phase`.
 pub fn host_allowed_in_phase(name: &str, phase: NgxPhase) -> bool {
-    MANIFEST
-        .iter()
-        .find(|entry| entry.name == name)
-        .is_some_and(|entry| entry.phases.contains(&phase))
+    if let Some(entry) = MANIFEST.iter().find(|entry| entry.name == name) {
+        return entry.phases.contains(&phase);
+    }
+    is_standard_host_import(name) && matches!(phase, NgxPhase::Access | NgxPhase::Content)
 }
 
 /// Look up a production manifest entry by import name.

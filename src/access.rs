@@ -454,7 +454,7 @@ fn run_configured_phase(request: &mut Request, conf: &LocationConf, slot: PhaseS
             })
         });
     }
-    run_request_owned_phase(request, program, slot)
+    run_request_owned_phase(request, program, slot, conf.standard_host_policy())
 }
 
 fn complete_sync_ok(raw: *mut ngx_http_request_t, slot: PhaseSlot) -> Status {
@@ -472,6 +472,7 @@ fn run_request_owned_phase(
     request: &mut Request,
     program: &Arc<Program>,
     slot: PhaseSlot,
+    policy: crate::host::StandardHostPolicy,
 ) -> Status {
     let raw = request.as_mut() as *mut ngx_http_request_t;
     let directive = slot.directive();
@@ -481,7 +482,12 @@ fn run_request_owned_phase(
     {
         let request_id = next_request_id();
         let mut exec = match crate::runtime::with_worker(|worker| {
-            worker.bind_phase_exec(Arc::clone(program), request_id, slot.phase())
+            worker.bind_phase_exec_with_policy(
+                Arc::clone(program),
+                request_id,
+                slot.phase(),
+                policy,
+            )
         }) {
             Some(Ok(exec)) => exec,
             Some(Err(err)) => {
@@ -605,10 +611,16 @@ fn finish_from_raw(raw: *mut ngx_http_request_t, slot: PhaseSlot) -> Status {
                 .commit_suspend();
         }
     } else if status == AccessStatus::Error500 {
+        let error = exec
+            .borrow()
+            .as_ref()
+            .and_then(AccessExec::last_error)
+            .unwrap_or("unknown VM error")
+            .to_string();
         ngx_log_error!(
             NGX_LOG_ERR,
             request.log(),
-            "{directive}: async execution failed"
+            "{directive}: async execution failed: {error}"
         );
     }
     complete_phase_status(raw, slot, status)

@@ -1,0 +1,56 @@
+use ngx;
+use io;
+use http;
+use sqlite;
+use json;
+use bytes as builtin_bytes;
+
+struct SharedStoreResult {
+    ok: bool,
+    error: string?
+}
+
+let url_file = ngx::var::get("rss_pipeline_url_file").unwrap_or("");
+let database_file = ngx::var::get("rss_pipeline_database").unwrap_or("");
+
+let input = io::open(url_file, "r");
+let upstream_url = io::read_all(input);
+io::close(input);
+
+let upstream = http::client::request({"method": "GET", "url": upstream_url});
+let upstream_status: int = upstream["status"];
+let upstream_final_url: string = upstream["url"];
+let upstream_body_bytes: bytes = upstream["body"];
+let upstream_body = builtin_bytes::to_utf8(upstream_body_bytes);
+let upstream_json = {
+    "status": upstream_status,
+    "url": upstream_final_url,
+    "body": upstream_body
+};
+
+let database = sqlite::open({"path": database_file, "mode": "read_write_create"});
+let database_rows = sqlite::query(
+    database,
+    "SELECT 'sqlite-ok' AS source, 42 AS value",
+    [],
+    {"max_rows": 8, "max_result_bytes": 65536}
+);
+sqlite::close(database);
+
+let dict = ngx::shared::dict("pipeline");
+let shared: SharedStoreResult = ngx::shared::set(
+    dict,
+    "last_result",
+    json::encode({"upstream": upstream_json, "database": database_rows}),
+    60,
+    null
+);
+
+ngx::status::set(200);
+ngx::header::set("Content-Type", "application/json");
+ngx::say(json::encode({
+    "io": upstream_url,
+    "http": upstream_json,
+    "sqlite": database_rows,
+    "shared": {"ok": shared.ok, "error": shared.error}
+}));

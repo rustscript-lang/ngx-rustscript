@@ -310,6 +310,38 @@ fn explicit_child_overrides_parent_program() {
 }
 
 #[test]
+fn standard_host_policy_is_fail_closed_and_inherits_per_field() {
+    let mut parent = LocationConf::default();
+    parent.add_io_root("/srv/rss/input".into());
+    parent.set_io_write(true);
+    parent.add_http_scheme("https".into());
+    parent.add_http_allow("api.example.test".into(), 443);
+    parent.set_http_allow_private(false);
+    parent.set_sqlite_root("/srv/rss/db".into());
+
+    let mut child = LocationConf::default();
+    child.set_io_write(false);
+    child.merge(&parent).unwrap();
+    let policy = child.standard_host_policy();
+    assert_eq!(policy.io_roots, ["/srv/rss/input"]);
+    assert!(
+        !policy.io_write,
+        "explicit child deny overrides parent grant"
+    );
+    assert_eq!(policy.http_hosts, ["api.example.test"]);
+    assert_eq!(policy.http_ports, [443]);
+    assert_eq!(policy.http_schemes, ["https"]);
+    assert!(!policy.http_allow_private);
+    assert_eq!(policy.sqlite_root.as_deref(), Some("/srv/rss/db"));
+
+    let defaults = LocationConf::default().standard_host_policy();
+    assert!(defaults.io_roots.is_empty());
+    assert!(defaults.http_hosts.is_empty());
+    assert!(defaults.http_ports.is_empty());
+    assert!(defaults.sqlite_root.is_none());
+}
+
+#[test]
 fn unconfigured_location_has_no_program() {
     let conf = LocationConf::default();
     assert!(conf.access_program().is_none());

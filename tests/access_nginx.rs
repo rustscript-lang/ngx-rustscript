@@ -892,3 +892,92 @@ fn access_phase_ctx_sync_no_sleep_set_get_delete_clear() {
         "missing CTX_SYNC=ok marker in log:\n{log}"
     );
 }
+
+#[test]
+fn nginx_async_pipeline_runs_io_http_sqlite_shared_dict_and_json() {
+    let nginx = nginx_binary();
+    let module = module_cdylib();
+    let prefix = isolated_prefix("async-pipeline");
+    let data = prefix.join("data");
+    fs::create_dir_all(&data).unwrap();
+
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let upstream_thread = std::thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut request = [0_u8; 2048];
+        let _ = stream.read(&mut request).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nupstream-ok",
+            )
+            .unwrap();
+    });
+
+    let url_file = data.join("upstream-url.txt");
+    fs::write(
+        &url_file,
+        format!("http://127.0.0.1:{upstream_port}/source"),
+    )
+    .unwrap();
+    let database = "pipeline.db";
+    let database_path = data.join(database);
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/async-pipeline.rss");
+    let listen_port = free_port();
+    let conf = format!(
+        r#"
+worker_processes 1;
+error_log logs/error.log notice;
+pid {};
+daemon off;
+master_process off;
+load_module {};
+
+events {{ worker_connections 32; }}
+http {{
+    access_log off;
+    rss_shared_dict pipeline 1m;
+    server {{
+        listen 127.0.0.1:{listen_port};
+        server_name localhost;
+        location /pipeline {{
+            set $rss_pipeline_url_file {};
+            set $rss_pipeline_database {};
+            rss_io_root {};
+            rss_http_scheme http;
+            rss_http_allow 127.0.0.1 {upstream_port};
+            rss_http_allow_private on;
+            rss_sqlite_root {};
+            content_by_rss_file {};
+        }}
+    }}
+}}
+"#,
+        nginx_quote_path(&prefix.join("logs/nginx.pid")).unwrap(),
+        nginx_quote_path(&module).unwrap(),
+        nginx_escape_quoted(&url_file.to_string_lossy()).unwrap(),
+        nginx_escape_quoted(database).unwrap(),
+        nginx_quote_path(&data).unwrap(),
+        nginx_quote_path(&data).unwrap(),
+        nginx_quote_path(&script).unwrap(),
+    );
+    write_conf(&prefix, &conf);
+    let out = nginx_test(&nginx, &prefix);
+    let text = combined(&out);
+    assert!(out.status.success(), "nginx -t failed:\n{text}");
+
+    let _running = spawn_nginx(&nginx, &prefix);
+    wait_for_port(listen_port, Duration::from_secs(3));
+    let (status, response) = http_get(listen_port, "/pipeline");
+    let log = fs::read_to_string(prefix.join("logs/error.log")).unwrap_or_default();
+    assert_eq!(status, 200, "response:\n{response}\nerror log:\n{log}");
+    let body = http_body(&response);
+    assert!(body.contains("upstream-ok"), "response:\n{response}");
+    assert!(body.contains("sqlite-ok"), "response:\n{response}");
+    assert!(body.contains("\"ok\":true"), "response:\n{response}");
+    assert!(database_path.is_file(), "SQLite database was not created");
+    upstream_thread.join().unwrap();
+}

@@ -24,8 +24,8 @@ use vm::{Program, Vm, VmError, VmStatus};
 
 use crate::async_bridge::NgxAsyncBridge;
 use crate::host::{
-    AllowedOps, NgxPhase, RequestDisposition, RequestLocalCtx, bind_ngx_hosts, is_control_stop,
-    with_vm_request_scope_full,
+    AllowedOps, NgxPhase, RequestDisposition, RequestLocalCtx, StandardHostPolicy, bind_ngx_hosts,
+    install_standard_runtime, is_control_stop, with_vm_request_scope_full,
 };
 use crate::notify::{CompletionPermit, RequestIdentity};
 
@@ -336,6 +336,7 @@ pub struct AccessExec {
     deferred: bool,
     permit: Option<CompletionPermit>,
     last_status: Option<VmStatus>,
+    last_error: Option<String>,
 }
 
 impl AccessExec {
@@ -355,8 +356,27 @@ impl AccessExec {
         runtime: Handle,
         phase: NgxPhase,
     ) -> Result<Self, String> {
+        Self::bind_program_in_phase_with_policy(
+            program,
+            request_id,
+            generation,
+            runtime,
+            phase,
+            StandardHostPolicy::fail_closed(),
+        )
+    }
+
+    pub fn bind_program_in_phase_with_policy(
+        program: std::sync::Arc<Program>,
+        request_id: u64,
+        generation: u64,
+        runtime: Handle,
+        phase: NgxPhase,
+        policy: StandardHostPolicy,
+    ) -> Result<Self, String> {
         let mut vm = Vm::new_shared(program);
         bind_ngx_hosts(&mut vm);
+        install_standard_runtime(&mut vm, &policy)?;
         vm.set_async_bridge(Box::new(NgxAsyncBridge::new(runtime)))
             .map_err(|err| err.to_string())?;
         Ok(Self {
@@ -373,6 +393,7 @@ impl AccessExec {
             deferred: false,
             permit: None,
             last_status: None,
+            last_error: None,
         })
     }
 
@@ -463,6 +484,7 @@ impl AccessExec {
     }
 
     fn finish_from_vm_error(&mut self, err: VmError) -> AccessStatus {
+        self.last_error = Some(err.to_string());
         if is_control_stop(&err) && self.disposition != RequestDisposition::Continue {
             self.finish_from_disposition(false)
         } else {
@@ -473,6 +495,10 @@ impl AccessExec {
 
     pub fn vm_status(&self) -> Option<VmStatus> {
         self.last_status
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
     }
 
     pub fn commit_suspend(&mut self) {
@@ -605,9 +631,10 @@ impl AccessExec {
                 self.permit = None;
                 self.resume_after_ready(registry, waiter)
             }
-            Poll::Ready(Err(_)) => {
+            Poll::Ready(Err(err)) => {
                 registry.remove_exact(self.identity, &self.request_id);
                 self.permit = None;
+                self.last_error = Some(err.to_string());
                 self.state = ExecState::Failed;
                 Err(AccessStatus::Error500)
             }
@@ -706,9 +733,10 @@ impl AccessExec {
                     _ => ReadyEffect::Failed,
                 }
             }
-            Poll::Ready(Err(_)) => {
+            Poll::Ready(Err(err)) => {
                 registry.remove_exact(self.identity, &self.request_id);
                 self.permit = None;
+                self.last_error = Some(err.to_string());
                 self.state = ExecState::Failed;
                 ReadyEffect::Failed
             }
@@ -752,7 +780,7 @@ impl AccessExec {
 mod tests {
     use super::*;
     use crate::config::compile_rss_source;
-    use crate::host::live_owned_entry_count;
+    use crate::host::{StandardHostPolicy, live_owned_entry_count};
     use crate::notify::DEFAULT_MAX_IN_FLIGHT;
     use crate::runtime::WorkerRuntime;
     use std::sync::Arc;
@@ -945,6 +973,116 @@ ngx::ctx::set("k", 1);
 
     fn ctx_debug(ctx: &RequestLocalCtx, key: &str) -> String {
         format!("{:?}", ctx.get(key))
+    }
+
+    fn assert_default_policy_denies(source: &str, expected_error: &str) {
+        let program = compile(source);
+        let mut worker = WorkerRuntime::start().expect("worker");
+        let mut exec = worker
+            .bind_phase_exec(program, 92, NgxPhase::Access)
+            .expect("bind standard hosts");
+        let mut registry = IdentityRegistry::with_capacity(8);
+        let status = exec.handle_access(&mut registry, &worker);
+        if status == AccessStatus::Again {
+            exec.commit_suspend();
+            'waits: for _ in 0..8 {
+                let fd = worker.raw_fd().expect("eventfd");
+                wait_readable(fd);
+                for identity in worker.drain_ready().expect("ready identities") {
+                    match exec.apply_ready(identity, &mut registry, &worker) {
+                        ReadyEffect::Failed => break 'waits,
+                        ReadyEffect::WaitingAgain | ReadyEffect::Ignored => {}
+                        effect => panic!("expected policy denial, got {effect:?}"),
+                    }
+                }
+            }
+        } else {
+            assert_eq!(status, AccessStatus::Error500);
+        }
+        let error = exec.last_error().unwrap_or("missing VM error");
+        assert!(
+            error.contains(expected_error),
+            "expected {expected_error:?} in {error:?}"
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn default_standard_host_policy_denies_io_http_and_sqlite() {
+        let root = std::env::temp_dir().join(format!(
+            "ngx-rustscript-standard-deny-{}-{}",
+            std::process::id(),
+            crate::access::next_request_id()
+        ));
+        std::fs::create_dir(&root).expect("create denied root");
+        let input = root.join("input.txt");
+        std::fs::write(&input, "denied").expect("write denied input");
+
+        assert_default_policy_denies(
+            &format!(
+                "use io;\nlet handle = io::open({:?}, \"r\");\nio::close(handle);\n",
+                input.to_string_lossy()
+            ),
+            "outside the allowed roots",
+        );
+        assert_default_policy_denies(
+            "use http;\nhttp::client::request({\"method\": \"GET\", \"url\": \"http://127.0.0.1:9/\"});\n",
+            "scheme 'http' is not allowed",
+        );
+        assert_default_policy_denies(
+            "use sqlite;\nlet db = sqlite::open({\"path\": \"state.db\", \"mode\": \"read_write_create\"});\nsqlite::close(db);\n",
+            "database root is not configured",
+        );
+        std::fs::remove_dir_all(root).expect("remove denied root");
+    }
+
+    #[test]
+    fn request_owned_vm_runs_pd_vm_async_io_under_location_policy() {
+        let root = std::env::temp_dir().join(format!(
+            "ngx-rustscript-standard-io-{}-{}",
+            std::process::id(),
+            crate::access::next_request_id()
+        ));
+        std::fs::create_dir(&root).expect("create IO root");
+        let input = root.join("input.txt");
+        std::fs::write(&input, "policy-ok").expect("write input");
+        let source = format!(
+            "use io;\nlet handle = io::open({:?}, \"r\");\nlet text = io::read_all(handle);\nio::close(handle);\nif text != \"policy-ok\" {{ 1 / 0; }}\n",
+            input.to_string_lossy()
+        );
+        let mut policy = StandardHostPolicy::fail_closed();
+        policy.io_roots.push(root.to_string_lossy().into_owned());
+        let program = compile(&source);
+        assert!(
+            crate::config::program_requires_request_state(&program),
+            "async IO builtin must select request-owned execution:\n{}",
+            vm::disassemble_program(&program)
+        );
+        let mut worker = WorkerRuntime::start().expect("worker");
+        let mut exec = worker
+            .bind_phase_exec_with_policy(program, 91, NgxPhase::Access, policy)
+            .expect("bind standard hosts");
+        let mut registry = IdentityRegistry::with_capacity(8);
+        assert_eq!(
+            exec.handle_access(&mut registry, &worker),
+            AccessStatus::Again
+        );
+        exec.commit_suspend();
+        loop {
+            let fd = worker.raw_fd().expect("eventfd");
+            wait_readable(fd);
+            for identity in worker.drain_ready().expect("ready identities") {
+                match exec.apply_ready(identity, &mut registry, &worker) {
+                    ReadyEffect::WaitingAgain | ReadyEffect::Ignored => {}
+                    ReadyEffect::Halted => {
+                        std::fs::remove_dir_all(root).expect("remove IO root");
+                        worker.shutdown();
+                        return;
+                    }
+                    effect => panic!("async IO failed: {effect:?}"),
+                }
+            }
+        }
     }
 
     #[test]

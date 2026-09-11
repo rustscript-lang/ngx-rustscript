@@ -736,6 +736,41 @@ pool, worker isolation, and TLS verification are covered by
 `tests/ngx_tcp_keepalive.rs` and `tests/ngx_tcp_tls.rs`. NGINX
 acceptance is `tests/nginx_integration.py`.
 
+## pd-vm standard async hosts
+
+The module enables the pinned pd-vm `async`, `http-client`, and `sqlite`
+features. Access and content scripts may use:
+
+- async file hosts including `io::open`, `io::read_all`, and `io::close`;
+- `http::client::request` and `http::client::sse`;
+- SQLite hosts including `sqlite::open`, `sqlite::execute`, `sqlite::query`,
+  transactions, and `sqlite::close`.
+
+I/O and SQLite remain pd-vm compiler builtins and are dispatched through its
+public standard composition. HTTP is merged into the ngx compiler catalog from
+pd-vm's public `http_host_catalog()` and exact-bound through the same
+composition. All three domains use the existing request-owned VM and eventfd
+resume lifecycle. They are rejected in `log_by_rss_file` because that phase
+cannot wait.
+
+External access is denied by default. Location grants are:
+
+- `rss_io_root <path>` and `rss_io_write on|off`;
+- `rss_http_scheme http|https`, `rss_http_allow <host> <port>`, and
+  `rss_http_allow_private on|off`;
+- `rss_sqlite_root <path>`.
+
+Paths are resolved with `ngx_conf_full_name`. SQLite scripts pass a relative
+database path under the configured root. Process I/O and unsafe SQL remain
+disabled. pd-vm's default byte, timeout, connection, row, parameter, and result
+limits remain active. Its HTTP policy stores schemes, hosts, and ports as
+separate lists, so multiple grants admit their cross-product.
+
+The executable acceptance is
+`nginx_async_pipeline_runs_io_http_sqlite_shared_dict_and_json` in
+`tests/access_nginx.rs`; the deployable files are
+`examples/async-pipeline.rss` and `examples/async-pipeline.nginx.conf`.
+
 ## Out of scope
 
 Not production hosts in this matrix (do not import them):

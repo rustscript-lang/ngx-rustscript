@@ -140,6 +140,21 @@ impl WorkerRuntime {
         request_id: u64,
         phase: crate::host::NgxPhase,
     ) -> Result<AccessExec, String> {
+        self.bind_phase_exec_with_policy(
+            program,
+            request_id,
+            phase,
+            crate::host::StandardHostPolicy::fail_closed(),
+        )
+    }
+
+    pub fn bind_phase_exec_with_policy(
+        &mut self,
+        program: Arc<Program>,
+        request_id: u64,
+        phase: crate::host::NgxPhase,
+        policy: crate::host::StandardHostPolicy,
+    ) -> Result<AccessExec, String> {
         if self.stopped || !self.notify.is_accepting() {
             return Err(NotifyError::ShutDown.to_string());
         }
@@ -149,7 +164,9 @@ impl WorkerRuntime {
             self.next_generation = 1;
         }
         let handle = self.handle().map_err(|err| err.to_string())?;
-        AccessExec::bind_program_in_phase(program, request_id, generation, handle, phase)
+        AccessExec::bind_program_in_phase_with_policy(
+            program, request_id, generation, handle, phase, policy,
+        )
     }
 
     pub fn drain_ready(&mut self) -> Result<Vec<RequestIdentity>, RuntimeError> {
