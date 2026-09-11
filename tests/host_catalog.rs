@@ -126,6 +126,15 @@ fn documented_standard_async_interfaces_compile() {
         let body_bytes: bytes = response["body"];
         let body: string = builtin_bytes::to_utf8(body_bytes);
 
+        fn on_sse_event(item: map) -> map {
+            { action: "continue" }
+        }
+        let sse_summary: map = http::client::sse({
+            method: "GET",
+            url: "https://example.test/events",
+            timeout_ms: 1000
+        }, on_sse_event);
+
         let db: int = sqlite::open({
             path: "state.db",
             mode: "read_write_create",

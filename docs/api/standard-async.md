@@ -21,7 +21,7 @@ writes are each capped at 1 MiB by ngx-rustscript's current policy.
 | RustScript callable | Return | Yield | Interface and behavior |
 | --- | --- | --- | --- |
 | `io::open(path: string, mode: string)` | `int` handle | yes | Modes: `r`, `w`, `a`, `r+`, `w+`, `a+`. Any write-capable mode requires `rss_io_write on`. |
-| `io::read_all(handle: int)` | `string` | yes | Reads all remaining UTF-8 text, up to the read limit. |
+| `io::read_all(handle: int)` | `string` | yes | Reads all remaining UTF-8 text, then rejects the call if the result exceeds the read limit. |
 | `io::read_line(handle: int)` | `string` | yes | Reads one line, including its line ending when present, up to the read limit. |
 | `io::write(handle: int, text: string)` | `int` | yes | Writes text and returns the number of bytes written. A partial write is possible. |
 | `io::flush(handle: int)` | `bool` | yes | Flushes writable handles and returns `true`; a readable handle is a successful no-op. |
@@ -103,9 +103,12 @@ let body_bytes: bytes = response["body"];
 let body: string = builtin_bytes::to_utf8(body_bytes);
 ```
 
-The pinned catalog also contains `http::client::sse`. ngx-rustscript does not
-currently publish it as an accepted module interface because its NGINX request
-lifecycle has not been covered by the module's executable acceptance suite.
+The pinned catalog also exposes and binds
+`http::client::sse(request: map, on_event: callable(map) -> map) -> map` in
+access and content scripts. This surface is provisional in ngx-rustscript:
+its NGINX request lifecycle has not been covered by the module's executable
+acceptance suite, so the module does not yet make a lifecycle-compatibility
+claim for it.
 
 ## SQLite
 
@@ -156,8 +159,8 @@ keys and zero or negative values are rejected.
 
 ### Parameters
 
-`params` is an array whose entries may be `null`, `bool`, `int`, `float`,
-`string`, or `bytes`. SQL should use SQLite placeholders such as `?1`.
+`params` is an array whose entries may be `null`, `int`, `float`, `string`,
+or `bytes`. SQL should use SQLite placeholders such as `?1`.
 
 ### Execute result
 
@@ -170,20 +173,25 @@ keys and zero or negative values are rejected.
 
 ### Query limits and result
 
-The `limits` map accepted by `sqlite::query` uses the same keys as
-`sqlite::open`; query-specific values are bounded by the connection's limits.
-The result map is:
+The `limits` map accepted by `sqlite::query` is parsed by the same bounded
+schema as `sqlite::open`. Query-relevant keys include `max_rows`,
+`max_columns`, `max_result_bytes`, `max_statement_bytes`, `max_parameters`,
+`max_parameter_bytes`, and `max_transaction_ms`; connection-management keys
+are accepted but do not change an already-open connection. Values cannot
+exceed the connection's limits. The result map is:
 
 ```text
 {
     columns: array<string>,
     rows: array<array<unknown>>,
     truncated: bool,
-    next_cursor: int? // present only when a cursor is available
+    next_cursor: int? // present when the last returned row starts with an int
 }
 ```
 
-A row cell may be `null`, `int`, `float`, `string`, or `bytes`.
+`next_cursor` is the first-column integer from the last row already returned;
+it is not the next unread row and its presence is independent of
+`truncated`. A row cell may be `null`, `int`, `float`, `string`, or `bytes`.
 
 ### Transaction statements and result
 
