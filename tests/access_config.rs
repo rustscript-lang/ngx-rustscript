@@ -239,9 +239,12 @@ fn request_state_routing_uses_manifest_async_or_request_ctx() {
     );
     let access = include_str!("../src/access.rs");
     assert!(
-        access.contains("program_requires_request_state")
-            || access.contains("program_needs_request_exec"),
-        "access handler must consult request-state routing"
+        access.contains("metadata.requires_request_state"),
+        "access handler must consult cached request-state routing metadata"
+    );
+    assert!(
+        !access.contains("disassemble_program"),
+        "request handler must not disassemble programs on the hot path"
     );
     assert!(
         ngx_rustscript::host::AllowedOps::for_phase(ngx_rustscript::host::NgxPhase::Access)
@@ -310,12 +313,40 @@ fn explicit_child_overrides_parent_program() {
 }
 
 #[test]
+fn compiled_slot_caches_request_routing_and_sqlite_usage() {
+    let sqlite = compile_rss_source(
+        r#"
+        use sqlite;
+        let db = sqlite::open({"path": ":memory:", "mode": "memory"});
+        sqlite::close(db);
+        "#,
+    )
+    .expect("compile sqlite");
+    let mut conf = LocationConf::default();
+    conf.set_access_program(sqlite).expect("set access");
+    let metadata = conf.access_metadata();
+    assert!(metadata.requires_request_state);
+    assert!(metadata.uses_sqlite);
+
+    let plain = compile_rss_source("let x = 1 + 1;").expect("compile plain");
+    let mut plain_conf = LocationConf::default();
+    plain_conf.set_content_program(plain).expect("set content");
+    let metadata = plain_conf.content_metadata();
+    assert!(!metadata.requires_request_state);
+    assert!(!metadata.uses_sqlite);
+}
+
+#[test]
 fn standard_host_policy_is_fail_closed_and_inherits_per_field() {
     let mut parent = LocationConf::default();
     parent.add_io_root("/srv/rss/input".into());
     parent.set_io_write(true);
     parent.add_http_scheme("https".into());
-    parent.add_http_allow("api.example.test".into(), 443);
+    assert!(parent.try_set_http_allow("api.example.test".into(), 443));
+    assert!(
+        !parent.try_set_http_allow("other.example.test".into(), 8443),
+        "one location must not widen a host/port pair into a cross-product"
+    );
     parent.set_http_allow_private(false);
     parent.set_sqlite_root("/srv/rss/db".into());
 

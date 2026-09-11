@@ -1068,7 +1068,7 @@ ngx::ctx::set("k", 1);
             AccessStatus::Again
         );
         exec.commit_suspend();
-        loop {
+        for _ in 0..16 {
             let fd = worker.raw_fd().expect("eventfd");
             wait_readable(fd);
             for identity in worker.drain_ready().expect("ready identities") {
@@ -1083,6 +1083,9 @@ ngx::ctx::set("k", 1);
                 }
             }
         }
+        std::fs::remove_dir_all(root).expect("remove IO root");
+        worker.shutdown();
+        panic!("async IO exceeded the maximum resume count");
     }
 
     #[test]

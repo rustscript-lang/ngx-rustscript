@@ -20,7 +20,6 @@ use crate::access::{
     allocate_scope_identity, ensure_shared_ngx_ctx, enter_phase_scope, enter_phase_vm,
     next_request_id, run_access_program,
 };
-use crate::config;
 use crate::host::NgxPhase;
 use crate::request_state::fail_closed_log_status;
 
@@ -56,7 +55,7 @@ fn run_log_handler(request: &mut Request) -> Status {
     let Some(program) = conf.log_program() else {
         return Status::NGX_DECLINED;
     };
-    let status = if !config::program_requires_request_state(program) {
+    let status = if !conf.log_metadata().requires_request_state {
         run_pooled_log(request, program)
     } else {
         run_request_owned_log(request, program)

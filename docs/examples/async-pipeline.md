@@ -42,10 +42,10 @@ The response contains the URL read by I/O, the HTTP status/final URL/UTF-8 body,
 All three external domains start denied per location:
 
 - `rss_io_root <path>` grants file access below one canonical root. `rss_io_write on|off` separately controls writes. Process spawning stays disabled.
-- `rss_http_scheme http|https` grants a URL scheme. `rss_http_allow <host> <port>` grants host and port values. `rss_http_allow_private on` is required for loopback/private addresses and should remain off for ordinary public upstreams.
+- `rss_http_scheme http|https` grants a URL scheme. A location accepts one `rss_http_allow <host> <port>` pair; a second pair is rejected during `nginx -t`. `rss_http_allow_private on` is required for loopback/private addresses and should remain off for ordinary public upstreams.
 - `rss_sqlite_root <path>` grants file-backed SQLite access. Script database paths must be non-empty relative paths under that root. Unsafe SQL remains disabled and pd-vm's default connection/query/result limits remain active.
 
-These directives inherit by field into nested locations. A child location that sets a field replaces the inherited value for that field. Because pd-vm's `HttpConfig` stores schemes, hosts, and ports as separate allowlists, multiple entries form the allowed cross-product of those lists; keep each location's grants narrow.
+These directives inherit by field into nested locations. A child location that sets a field replaces the inherited value for that field.
 
 `log_by_rss_file` rejects I/O, HTTP, and SQLite at configuration time because the log handler cannot suspend. Access and content scripts use the existing eventfd resume path.
 

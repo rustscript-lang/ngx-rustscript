@@ -115,6 +115,29 @@ fn standard_runtime_policy_defaults_fail_closed_and_installs_on_a_vm() {
 }
 
 #[test]
+fn log_phase_rejects_each_standard_async_domain_independently() {
+    for (domain, source) in [
+        (
+            "io",
+            "use io; let h = io::open(\"/tmp/x\", \"r\"); io::close(h);",
+        ),
+        (
+            "http",
+            "use http; let r = http::client::request({\"method\": \"GET\", \"url\": \"https://example.test\"});",
+        ),
+        (
+            "sqlite",
+            "use sqlite; let db = sqlite::open({\"path\": \":memory:\", \"mode\": \"memory\"}); sqlite::close(db);",
+        ),
+    ] {
+        let err = compile_rss_source_for_phase(source, NgxPhase::Log)
+            .expect_err("standard async domain must be rejected in log phase");
+        let text = err.to_string();
+        assert!(text.contains(domain), "{domain} rejection was {text:?}");
+    }
+}
+
+#[test]
 fn async_pipeline_example_compiles_with_request_owned_execution() {
     let source = include_str!("../examples/async-pipeline.rss");
     let program = compile_rss_source_for_phase(source, NgxPhase::Content)

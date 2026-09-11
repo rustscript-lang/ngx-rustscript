@@ -210,10 +210,11 @@ slot only.
 `rss_shared_dict <name> <size>` is HTTP-main only and takes exactly two
 arguments. The pd-vm standard runtime domains are denied until location
 configuration grants them: `rss_io_root <path>`, `rss_io_write on|off`,
-`rss_http_scheme http|https`, `rss_http_allow <host> <port>`,
-`rss_http_allow_private on|off`, and `rss_sqlite_root <path>`. These policy
-fields inherit independently. I/O process spawning and unsafe SQLite SQL
-remain disabled.
+`rss_http_scheme http|https`, one `rss_http_allow <host> <port>` pair per
+location, `rss_http_allow_private on|off`, and `rss_sqlite_root <path>`. These
+policy fields inherit independently. A second HTTP pair is rejected during
+configuration, and SQLite requires its root even for an in-memory database.
+I/O process spawning and unsafe SQLite SQL remain disabled.
 Relative paths resolve with NGINX `ngx_conf_full_name` against the conf
 prefix (the directory of the config file). Absolute paths are unchanged.
 The file is read once at `nginx -t` / reload, must be a regular UTF-8 file,

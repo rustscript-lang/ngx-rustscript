@@ -305,6 +305,32 @@ fn nginx_t_rejects_duplicate_directive() {
 }
 
 #[test]
+fn nginx_t_rejects_multiple_http_allow_pairs() {
+    let nginx = nginx_binary();
+    let module = module_cdylib();
+    let prefix = isolated_prefix("t-http-allow-dup");
+    let script = nginx_quote_path(&fixture("ok.rss")).unwrap();
+    let locations = format!(
+        r#"
+        location / {{
+            rss_http_allow first.example.test 443;
+            rss_http_allow second.example.test 8443;
+            access_by_rss_file {script};
+            return 200;
+        }}
+"#
+    );
+    write_conf(&prefix, &conf_skeleton(&module, &prefix, &locations));
+    let out = nginx_test(&nginx, &prefix);
+    let text = combined(&out);
+    assert!(!out.status.success(), "expected nginx -t fail:\n{text}");
+    assert!(
+        text.contains("duplicate rss_http_allow"),
+        "duplicate grant must report that cause, got:\n{text}"
+    );
+}
+
+#[test]
 fn nginx_t_rejects_wrong_arity() {
     let nginx = nginx_binary();
     let module = module_cdylib();
@@ -894,6 +920,55 @@ fn access_phase_ctx_sync_no_sleep_set_get_delete_clear() {
 }
 
 #[test]
+fn nginx_denies_in_memory_sqlite_without_sqlite_root() {
+    let nginx = nginx_binary();
+    let module = module_cdylib();
+    let prefix = isolated_prefix("sqlite-memory-denied");
+    let script = prefix.join("sqlite-memory.rss");
+    fs::write(
+        &script,
+        r#"
+use sqlite;
+let db = sqlite::open({"path": ":memory:", "mode": "memory"});
+sqlite::close(db);
+"#,
+    )
+    .unwrap();
+    let listen_port = free_port();
+    let conf = format!(
+        r#"
+load_module {};
+worker_processes 1;
+error_log logs/error.log notice;
+pid logs/nginx.pid;
+events {{ worker_connections 64; }}
+http {{
+    server {{
+        listen 127.0.0.1:{listen_port};
+        location = /memory {{
+            content_by_rss_file {};
+        }}
+    }}
+}}
+"#,
+        nginx_quote_path(&module).unwrap(),
+        nginx_quote_path(&script).unwrap(),
+    );
+    write_conf(&prefix, &conf);
+    let out = nginx_test(&nginx, &prefix);
+    assert!(out.status.success(), "nginx -t failed:\n{}", combined(&out));
+    let _child = spawn_nginx(&nginx, &prefix);
+    wait_for_port(listen_port, Duration::from_secs(5));
+    let (status, response) = http_get(listen_port, "/memory");
+    assert_eq!(status, 500, "response:\n{response}");
+    let log = fs::read_to_string(prefix.join("logs/error.log")).unwrap_or_default();
+    assert!(
+        log.contains("SQLite is disabled until rss_sqlite_root is configured"),
+        "error log:\n{log}"
+    );
+}
+
+#[test]
 fn nginx_async_pipeline_runs_io_http_sqlite_shared_dict_and_json() {
     let nginx = nginx_binary();
     let module = module_cdylib();
@@ -903,10 +978,24 @@ fn nginx_async_pipeline_runs_io_http_sqlite_shared_dict_and_json() {
 
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
     let upstream_port = upstream.local_addr().unwrap().port();
+    upstream.set_nonblocking(true).unwrap();
     let upstream_thread = std::thread::spawn(move || {
-        let (mut stream, _) = upstream.accept().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let (mut stream, _) = loop {
+            match upstream.accept() {
+                Ok(pair) => break pair,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "timed out waiting for async pipeline HTTP request"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("upstream accept failed: {err}"),
+            }
+        };
         stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         let mut request = [0_u8; 2048];
         let _ = stream.read(&mut request).unwrap();

@@ -29,10 +29,18 @@ impl PhaseSlot {
     }
 }
 
+/// Cached execution routing discovered once when the script is compiled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScriptExecutionMetadata {
+    pub requires_request_state: bool,
+    pub uses_sqlite: bool,
+}
+
 /// One compiled script attached to a location for a single HTTP phase.
 #[derive(Clone, Debug, Default)]
 pub struct ScriptLocationConf {
     program: Option<Arc<Program>>,
+    metadata: ScriptExecutionMetadata,
 }
 
 /// Second `set_program` on the same slot.
@@ -48,17 +56,31 @@ impl ScriptLocationConf {
         self.program.as_ref()
     }
 
+    pub fn metadata(&self) -> ScriptExecutionMetadata {
+        self.metadata
+    }
+
     pub fn set_program(&mut self, program: Arc<Program>) -> Result<(), DuplicateSlot> {
+        self.set_program_with_metadata(program, ScriptExecutionMetadata::default())
+    }
+
+    pub fn set_program_with_metadata(
+        &mut self,
+        program: Arc<Program>,
+        metadata: ScriptExecutionMetadata,
+    ) -> Result<(), DuplicateSlot> {
         if self.program.is_some() {
             return Err(DuplicateSlot);
         }
         self.program = Some(program);
+        self.metadata = metadata;
         Ok(())
     }
 
     pub fn merge_from(&mut self, prev: &Self) {
         if self.program.is_none() {
             self.program.clone_from(&prev.program);
+            self.metadata = prev.metadata;
         }
     }
 }

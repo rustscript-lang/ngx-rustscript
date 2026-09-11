@@ -21,7 +21,7 @@ use crate::host::{
     HostCapability, HostFamily, HostSyncKind, NgxPhase, StandardHostPolicy, compile_host_catalog,
     host_validates_for_log, is_standard_host_import, ngx_host_manifest,
 };
-use crate::phase::{DuplicateSlot, ScriptLocationConf};
+use crate::phase::{DuplicateSlot, ScriptExecutionMetadata, ScriptLocationConf};
 
 /// Per-location compiled scripts. Access, content, and log slots are independent.
 #[derive(Default)]
@@ -32,8 +32,7 @@ pub struct LocationConf {
     io_roots: Option<Vec<String>>,
     io_write: Option<bool>,
     http_schemes: Option<Vec<String>>,
-    http_hosts: Option<Vec<String>>,
-    http_ports: Option<Vec<u16>>,
+    http_allow: Option<(String, u16)>,
     http_allow_private: Option<bool>,
     sqlite_root: Option<String>,
 }
@@ -44,9 +43,17 @@ impl LocationConf {
         self.access.program()
     }
 
+    pub fn access_metadata(&self) -> ScriptExecutionMetadata {
+        self.access.metadata()
+    }
+
     /// Compiled content program after merge, if any.
     pub fn content_program(&self) -> Option<&Arc<Program>> {
         self.content.program()
+    }
+
+    pub fn content_metadata(&self) -> ScriptExecutionMetadata {
+        self.content.metadata()
     }
 
     /// Compiled log program after merge, if any.
@@ -54,24 +61,31 @@ impl LocationConf {
         self.log.program()
     }
 
+    pub fn log_metadata(&self) -> ScriptExecutionMetadata {
+        self.log.metadata()
+    }
+
     /// Record a compiled access program. A second set in the same location is a duplicate.
     pub fn set_access_program(&mut self, program: Arc<Program>) -> Result<(), ConfigError> {
+        let metadata = script_execution_metadata(&program);
         self.access
-            .set_program(program)
+            .set_program_with_metadata(program, metadata)
             .map_err(|DuplicateSlot| ConfigError::Duplicate)
     }
 
     /// Record a compiled content program. A second set in the same location is a duplicate.
     pub fn set_content_program(&mut self, program: Arc<Program>) -> Result<(), ConfigError> {
+        let metadata = script_execution_metadata(&program);
         self.content
-            .set_program(program)
+            .set_program_with_metadata(program, metadata)
             .map_err(|DuplicateSlot| ConfigError::DuplicateContent)
     }
 
     /// Record a compiled log program. A second set in the same location is a duplicate.
     pub fn set_log_program(&mut self, program: Arc<Program>) -> Result<(), ConfigError> {
+        let metadata = script_execution_metadata(&program);
         self.log
-            .set_program(program)
+            .set_program_with_metadata(program, metadata)
             .map_err(|DuplicateSlot| ConfigError::DuplicateLog)
     }
 
@@ -87,9 +101,12 @@ impl LocationConf {
         self.http_schemes.get_or_insert_with(Vec::new).push(scheme);
     }
 
-    pub fn add_http_allow(&mut self, host: String, port: u16) {
-        self.http_hosts.get_or_insert_with(Vec::new).push(host);
-        self.http_ports.get_or_insert_with(Vec::new).push(port);
+    pub fn try_set_http_allow(&mut self, host: String, port: u16) -> bool {
+        if self.http_allow.is_some() {
+            return false;
+        }
+        self.http_allow = Some((host, port));
+        true
     }
 
     pub fn set_http_allow_private(&mut self, allow: bool) {
@@ -105,8 +122,10 @@ impl LocationConf {
         policy.io_roots = self.io_roots.clone().unwrap_or_default();
         policy.io_write = self.io_write.unwrap_or(false);
         policy.http_schemes = self.http_schemes.clone().unwrap_or_default();
-        policy.http_hosts = self.http_hosts.clone().unwrap_or_default();
-        policy.http_ports = self.http_ports.clone().unwrap_or_default();
+        if let Some((host, port)) = &self.http_allow {
+            policy.http_hosts.push(host.clone());
+            policy.http_ports.push(*port);
+        }
         policy.http_allow_private = self.http_allow_private.unwrap_or(false);
         policy.sqlite_root = self.sqlite_root.clone();
         policy
@@ -127,11 +146,8 @@ impl Merge for LocationConf {
         if self.http_schemes.is_none() {
             self.http_schemes.clone_from(&prev.http_schemes);
         }
-        if self.http_hosts.is_none() {
-            self.http_hosts.clone_from(&prev.http_hosts);
-        }
-        if self.http_ports.is_none() {
-            self.http_ports.clone_from(&prev.http_ports);
+        if self.http_allow.is_none() {
+            self.http_allow.clone_from(&prev.http_allow);
         }
         if self.http_allow_private.is_none() {
             self.http_allow_private = prev.http_allow_private;
@@ -238,12 +254,26 @@ pub fn reject_program_imports(program: &Program) -> Result<(), ConfigError> {
     validate_program_imports_for_phase(program, NgxPhase::Access)
 }
 
-fn first_standard_builtin(program: &Program) -> Option<String> {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StandardBuiltinUsage {
+    io: bool,
+    sqlite: bool,
+}
+
+fn standard_builtin_usage(program: &Program) -> StandardBuiltinUsage {
     let disassembly = vm::disassemble_program(program);
-    if disassembly.contains("builtin io_") {
+    StandardBuiltinUsage {
+        io: disassembly.contains("builtin io_"),
+        sqlite: disassembly.contains("builtin sqlite_"),
+    }
+}
+
+fn first_standard_builtin(program: &Program) -> Option<String> {
+    let usage = standard_builtin_usage(program);
+    if usage.io {
         return Some("io::*".into());
     }
-    if disassembly.contains("builtin sqlite_") {
+    if usage.sqlite {
         return Some("sqlite::*".into());
     }
     None
@@ -293,30 +323,43 @@ pub fn validate_program_imports_for_phase(
     Ok(())
 }
 
+fn request_state_required_by_imports(program: &Program) -> bool {
+    program.imports.iter().any(|import| {
+        is_standard_host_import(&import.name)
+            || ngx_host_manifest().iter().any(|entry| {
+                entry.name == import.name.as_str()
+                    && (entry.sync == HostSyncKind::Async
+                        || entry.family == HostFamily::RequestCtx
+                        || entry.family == HostFamily::Cosocket
+                        || entry.capabilities.iter().any(|cap| {
+                            matches!(
+                                cap,
+                                HostCapability::RequestWrite
+                                    | HostCapability::ResponseWrite
+                                    | HostCapability::Control
+                            )
+                        }))
+            })
+    })
+}
+
+fn script_execution_metadata(program: &Program) -> ScriptExecutionMetadata {
+    let builtins = standard_builtin_usage(program);
+    ScriptExecutionMetadata {
+        requires_request_state: builtins.io
+            || builtins.sqlite
+            || request_state_required_by_imports(program),
+        uses_sqlite: builtins.sqlite,
+    }
+}
+
 /// True when the compiled program needs request-owned `AccessExec`.
 ///
 /// Async hosts, RequestCtx, Cosocket, and mutation/control capabilities
 /// all require per-request state. Pure-sync request-read programs stay on
 /// the pooled path.
 pub fn program_requires_request_state(program: &Program) -> bool {
-    first_standard_builtin(program).is_some()
-        || program.imports.iter().any(|import| {
-            is_standard_host_import(&import.name)
-                || ngx_host_manifest().iter().any(|entry| {
-                    entry.name == import.name.as_str()
-                        && (entry.sync == HostSyncKind::Async
-                            || entry.family == HostFamily::RequestCtx
-                            || entry.family == HostFamily::Cosocket
-                            || entry.capabilities.iter().any(|cap| {
-                                matches!(
-                                    cap,
-                                    HostCapability::RequestWrite
-                                        | HostCapability::ResponseWrite
-                                        | HostCapability::Control
-                                )
-                            }))
-                })
-        })
+    script_execution_metadata(program).requires_request_state
 }
 
 /// Compile with the ngx host catalog and reject unknown or phase-forbidden imports.
@@ -590,7 +633,9 @@ extern "C" fn set_rss_http_allow(
         }
     };
     let loc = unsafe { &mut *conf.cast::<LocationConf>() };
-    loc.add_http_allow(host, port);
+    if !loc.try_set_http_allow(host, port) {
+        return duplicate_directive(cf, "rss_http_allow");
+    }
     NGX_CONF_OK
 }
 

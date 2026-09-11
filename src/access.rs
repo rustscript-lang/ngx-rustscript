@@ -23,7 +23,7 @@ use ngx::ngx_log_error;
 use vm::{Program, VmError, VmStatus};
 
 use crate::Module;
-use crate::config::{self, LocationConf};
+use crate::config::LocationConf;
 use crate::host::{
     AllowedOps, NgxPhase, RequestLocalCtx, with_request_scope, with_vm_request_scope,
 };
@@ -423,15 +423,25 @@ pub(crate) fn run_phase_handler(request: &mut Request, slot: PhaseSlot) -> Statu
 }
 
 fn run_configured_phase(request: &mut Request, conf: &LocationConf, slot: PhaseSlot) -> Status {
-    let Some(program) = (match slot {
-        PhaseSlot::Access => conf.access_program(),
-        PhaseSlot::Content => conf.content_program(),
-    }) else {
+    let (program, metadata) = match slot {
+        PhaseSlot::Access => (conf.access_program(), conf.access_metadata()),
+        PhaseSlot::Content => (conf.content_program(), conf.content_metadata()),
+    };
+    let Some(program) = program else {
         return Status::NGX_DECLINED;
     };
     let phase = slot.phase();
     let directive = slot.directive();
-    if !config::program_requires_request_state(program) {
+    let policy = conf.standard_host_policy();
+    if metadata.uses_sqlite && policy.sqlite_root.is_none() {
+        ngx_log_error!(
+            NGX_LOG_ERR,
+            request.log(),
+            "{directive}: SQLite is disabled until rss_sqlite_root is configured"
+        );
+        return HTTPStatus::INTERNAL_SERVER_ERROR.into();
+    }
+    if !metadata.requires_request_state {
         // Pool fast path: no Async and no RequestCtx. Keep ctx-null VM scope;
         // do not wrap a pooled VM with a stack ctx.
         let raw = request.as_mut() as *mut ngx_http_request_t;
@@ -454,7 +464,7 @@ fn run_configured_phase(request: &mut Request, conf: &LocationConf, slot: PhaseS
             })
         });
     }
-    run_request_owned_phase(request, program, slot, conf.standard_host_policy())
+    run_request_owned_phase(request, program, slot, policy)
 }
 
 fn complete_sync_ok(raw: *mut ngx_http_request_t, slot: PhaseSlot) -> Status {

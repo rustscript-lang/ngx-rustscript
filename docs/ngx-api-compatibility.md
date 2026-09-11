@@ -742,7 +742,7 @@ The module enables the pinned pd-vm `async`, `http-client`, and `sqlite`
 features. Access and content scripts may use:
 
 - async file hosts including `io::open`, `io::read_all`, and `io::close`;
-- `http::client::request` and `http::client::sse`;
+- `http::client::request`;
 - SQLite hosts including `sqlite::open`, `sqlite::execute`, `sqlite::query`,
   transactions, and `sqlite::close`.
 
@@ -756,15 +756,17 @@ cannot wait.
 External access is denied by default. Location grants are:
 
 - `rss_io_root <path>` and `rss_io_write on|off`;
-- `rss_http_scheme http|https`, `rss_http_allow <host> <port>`, and
-  `rss_http_allow_private on|off`;
+- `rss_http_scheme http|https`, one `rss_http_allow <host> <port>` pair per
+  location, and `rss_http_allow_private on|off`;
 - `rss_sqlite_root <path>`.
 
-Paths are resolved with `ngx_conf_full_name`. SQLite scripts pass a relative
-database path under the configured root. Process I/O and unsafe SQL remain
-disabled. pd-vm's default byte, timeout, connection, row, parameter, and result
-limits remain active. Its HTTP policy stores schemes, hosts, and ports as
-separate lists, so multiple grants admit their cross-product.
+Paths are resolved with `ngx_conf_full_name`. Any SQLite use, including an
+in-memory database, requires `rss_sqlite_root`; file-backed scripts then pass a
+relative database path under that root. A second `rss_http_allow` in one
+location is rejected during configuration, preventing pd-vm's separate host
+and port lists from admitting unintended combinations. Process I/O and unsafe
+SQL remain disabled. pd-vm's default byte, timeout, connection, row, parameter,
+and result limits remain active.
 
 The executable acceptance is
 `nginx_async_pipeline_runs_io_http_sqlite_shared_dict_and_json` in
