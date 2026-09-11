@@ -43,7 +43,7 @@ All three external domains start denied per location:
 
 - `rss_io_root <path>` grants file access below one canonical root. `rss_io_write on|off` separately controls writes. Process spawning stays disabled.
 - `rss_http_scheme http|https` grants a URL scheme. A location accepts one `rss_http_allow <host> <port>` pair; a second pair is rejected during `nginx -t`. `rss_http_allow_private on` is required for loopback/private addresses and should remain off for ordinary public upstreams.
-- `rss_sqlite_root <path>` grants file-backed SQLite access. Script database paths must be non-empty relative paths under that root. Unsafe SQL remains disabled and pd-vm's default connection/query/result limits remain active.
+- `rss_sqlite_root <path>` grants SQLite use, including in-memory databases. File-backed script paths must be non-empty relative paths under that root. Unsafe SQL remains disabled and pd-vm's default connection/query/result limits remain active.
 
 These directives inherit by field into nested locations. A child location that sets a field replaces the inherited value for that field.
 

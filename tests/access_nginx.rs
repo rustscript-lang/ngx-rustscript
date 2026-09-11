@@ -938,6 +938,8 @@ sqlite::close(db);
     let conf = format!(
         r#"
 load_module {};
+daemon off;
+master_process off;
 worker_processes 1;
 error_log logs/error.log notice;
 pid logs/nginx.pid;

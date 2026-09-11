@@ -327,6 +327,9 @@ fn compiled_slot_caches_request_routing_and_sqlite_usage() {
     let metadata = conf.access_metadata();
     assert!(metadata.requires_request_state);
     assert!(metadata.uses_sqlite);
+    let mut inherited = LocationConf::default();
+    inherited.merge(&conf).expect("inherit sqlite slot");
+    assert_eq!(inherited.access_metadata(), metadata);
 
     let plain = compile_rss_source("let x = 1 + 1;").expect("compile plain");
     let mut plain_conf = LocationConf::default();
