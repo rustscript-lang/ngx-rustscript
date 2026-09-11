@@ -86,7 +86,7 @@ for stub in ngx_conf_full_name ngx_conf_log_error ngx_array_push ngx_log_error_c
   ngx_rustscript_test_request_set_header_only \
   ngx_rustscript_stub_alloc_fail_after ngx_rustscript_stub_alloc_reset \
   ngx_rustscript_test_headers_in_msie ngx_rustscript_test_install_variable; do
-  if printf '%s\n' "$NM_OUT" | awk '{print $1}' | grep -qx "$stub"; then
+  if awk -v symbol="$stub" '$1 == symbol { found = 1 } END { exit !found }' <<< "$NM_OUT"; then
     echo "add-dynamic module must not define test NGINX stub $stub" >&2
     exit 1
   fi
@@ -94,7 +94,7 @@ done
 
 for shim in ngx_rustscript_request_is_internal ngx_rustscript_request_headers_sent \
   ngx_rustscript_request_reading_body ngx_rustscript_request_discard_body; do
-  if ! printf '%s\n' "$NM_OUT" | awk '{print $1}' | grep -qx "$shim"; then
+  if ! awk -v symbol="$shim" '$1 == symbol { found = 1 } END { exit !found }' <<< "$NM_OUT"; then
     echo "add-dynamic module must define request shim $shim" >&2
     exit 1
   fi
