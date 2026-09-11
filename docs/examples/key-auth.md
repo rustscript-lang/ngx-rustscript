@@ -1,5 +1,7 @@
 # HMAC API-key authentication
 
+[Documentation](../index.md) · [Directives](../directives.md) · [API](../api/codec.md) · [Examples](index.md)
+
 Access-phase example that accepts an `X-API-Key` header, verifies it as an
 opaque high-entropy token, and continues the request only when the digest
 matches a server-side expected value.

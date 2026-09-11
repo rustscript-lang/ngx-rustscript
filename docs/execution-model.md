@@ -1,0 +1,122 @@
+# Execution model
+
+[Documentation](index.md) · [Directives](directives.md) · [API](api/index.md) · [Execution model](execution-model.md) · [Security](security.md) · [Examples](examples/index.md) · [Compatibility](ngx-api-compatibility.md)
+
+How ngx-rustscript runs a compiled script inside an NGINX worker. This
+page is the lifecycle reference; host signatures live in the
+[API reference](api/index.md). The callback contract for non-production
+thread/timer APIs is [docs/design/ngx-scheduler.md](design/ngx-scheduler.md).
+
+## Worker process
+
+Worker runtime is created only in NGINX worker `init_process` after
+fork, and only when `ngx_process` is `NGX_PROCESS_WORKER` or
+`NGX_PROCESS_SINGLE`. Helper processes skip initialization. `nginx -t`,
+master, and config never create Tokio threads or the eventfd.
+`exit_process` shuts the runtime down and is idempotent.
+
+Tokio features: `rt` + `rt-multi-thread` + `time` + `net` + `sync` +
+`io-util`. One worker thread named `ngx-rustscript-async` drives ngx
+cosockets and pd-vm async I/O/HTTP host futures. SQLite operations use
+pd-vm's scoped worker-backed operation path and resume through the same
+eventfd bridge.
+
+## Two execution paths
+
+On each request the access (or content) handler leases a
+worker-thread-local VM via `Vm::new_shared(Arc<Program>)`.
+
+**Pooled, import-free programs** run to `VmStatus::Halted` and return
+`NGX_OK` so the next phase proceeds. After `Halted` and after a
+recoverable runtime error the VM is reset with `Vm::reset_for_reuse`
+and parked only when `Vm::is_reusable` is true. Idle pool size is 4.
+VM errors and unexpected `Waiting` on import-free programs fail the
+request with 500.
+
+**Request-owned programs** bind a request-local VM instead of the pool
+when the compiled script uses pd-vm I/O, HTTP client, SQLite,
+`ngx::sleep`, `ngx::sleep_ms`, UDP/TCP cosocket, `ngx.ctx`, or
+mutation/control capabilities (`RequestWrite`, `ResponseWrite`,
+`Control`). Pure-sync request-read stays pooled.
+
+`pd-vm` pin (see the crate README) provides `Vm::new_shared(Arc<Program>)`,
+`HostAsyncBridge`, `Vm::set_async_bridge`, `VmStatus::Waiting`,
+`Vm::poll_waiting_host_op`, and `Vm::resume`. `try_new` only wraps owned
+`Vm::new` after frame-limit validation. Normal termination is
+`Ok(VmStatus::Halted)`. Drop of `Vm` owns cancellation and resource
+closure.
+
+## Waiting and eventfd
+
+`Waiting` returns `NGX_AGAIN` without incrementing `r->main->count`.
+The eventfd callback polls the waiting host op, resumes the same VM on
+the worker main thread, and continues `ngx_http_core_run_phases`
+exactly once so the phase handler can return `NGX_OK`. Host-bound
+waiting VMs are never returned to the pool.
+
+Async wait capacity is `DEFAULT_MAX_IN_FLIGHT` (1024). Reserve is
+rejected when full. Host futures and wakers own only a queue sender and
+request identity — no NGINX request/pool/VM pointers cross into Tokio,
+and Tokio never calls `ngx_post_event`.
+
+Completions enqueue the request identity under a mutex, then write
+`eventfd(2)` created with `EFD_NONBLOCK|EFD_CLOEXEC`. The worker main
+thread registers the fd with `ngx_get_connection`. The pinned Linux
+epoll path uses `add` with `EPOLLIN`.
+
+Client close while a wait is in flight is detected with a worker-thread
+wrapper around `ngx_http_test_reading`. Confirmed close finalizes once
+with `NGX_HTTP_CLIENT_CLOSED_REQUEST` (access log 499), then
+request-pool cleanup invalidates the identity and drops the host
+future.
+
+Worker `exit_process` rejects new work, invalidates senders/wakers,
+cancels/drops host futures, unregisters/closes eventfd once, and clears
+worker registries without touching request pointers. Long sleeps do not
+delay graceful worker exit (SIGQUIT). Graceful master shutdown cancels
+in-flight host futures instead of waiting them out.
+
+## Content output
+
+Content-phase `ngx::send_headers` / `ngx::print` / `ngx::say` /
+`ngx::flush` / `ngx::eof` copy payload on the worker thread into
+request-pool buffers and send through `ngx_http_output_filter`. Access
+rejects those imports at config time. Hosts never write the NGINX
+socket and never call `ngx_http_finalize_request`. The content handler
+remains the sole completion owner and sends `last_buf` if the script
+omitted `eof`.
+
+## Control flow
+
+Hosts set request-owned `RequestDisposition` then stop the VM. The
+phase handler is the sole finalizer: it returns the NGINX status.
+Ordinary `HostError` cannot forge control. First disposition wins.
+
+## Log phase
+
+`log_by_rss_file` is synchronous and fail-closed. It runs after the
+response is complete, never waits, and logs errors without mutating the
+already-sent response. `Waiting` logs `log handler cannot wait`, drops
+the VM, and never arms eventfd, a timer, or `r->main->count`. See
+[`log_by_rss_file`](directives.md#log_by_rss_file).
+
+## Sleep hosts
+
+`ngx::sleep` is a `pd-host-function` async host (`seconds:number -> null`).
+`seconds` is an OpenResty-style integer or float; negative, NaN,
+infinity, and duration overflow are rejected. `ngx::sleep_ms` is the
+millisecond integer form (`ms:int -> null`). The generated wrapper
+submits an owned host future; the impl validates the duration and
+awaits Tokio. The first host entry returns `VmStatus::Waiting`. Two
+sequential sleeps reuse the same generation-safe request identity and
+each wait once.
+
+## Time cache
+
+Time hosts use a process-local cached clock, not nginx `ngx_time` /
+`ngx_timeofday`. Reads reuse the snapshot while the event generation is
+unchanged and the snapshot is younger than 1s. Access-phase request
+execution and later eventfd resume/poll turns call
+`notify_cached_clock_event_boundary` so the cache may refresh like
+nginx `ngx_time_update` on the event loop. `ngx::update_time()` always
+samples the OS (or a test override) and replaces the snapshot.

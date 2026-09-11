@@ -1,5 +1,7 @@
 # Shared-dict fixed-window rate limiter
 
+[Documentation](../index.md) · [Directives](../directives.md) · [API](../api/shared-dict.md) · [Examples](index.md)
+
 Copy-paste example: `examples/rate-limit.rss` with `examples/rate-limit.nginx.conf`.
 The access script counts requests in `rss_shared_dict` shared memory and returns
 HTTP 429 with `Retry-After` when a trusted identity exceeds a fixed limit.

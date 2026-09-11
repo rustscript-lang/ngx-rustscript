@@ -1,5 +1,7 @@
 # ngx callback / scheduler execution contract
 
+[Documentation](../index.md) · [API](../api/index.md) · [Compatibility](../ngx-api-compatibility.md)
+
 Feasibility gate for OpenResty-oriented callable families:
 
 - `ngx::thread::{spawn,wait,kill}`

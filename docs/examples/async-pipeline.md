@@ -1,5 +1,7 @@
 # Async I/O, HTTP, SQLite, and shared-dict pipeline
 
+[Documentation](../index.md) · [Directives](../directives.md) · [Security](../security.md) · [API](../api/standard-async.md) · [Examples](index.md)
+
 Files:
 
 - `examples/async-pipeline.rss`

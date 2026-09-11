@@ -10,11 +10,21 @@ pool. Scripts that import pd-vm I/O, HTTP client, or SQLite hosts,
 `ngx::sleep`, `ngx::sleep_ms`, `ngx::socket::udp*`, or
 `ngx::socket::tcp*` / `ngx::socket::connect` bind a request-local VM,
 return `NGX_AGAIN` while a generic host future is pending, and resume the
-same VM from the eventfd callback. Client disconnect during a wait finalizes the request as HTTP
-499. Graceful master shutdown cancels in-flight host futures instead of
-waiting them out. `log_by_rss_file` is synchronous and fail-closed: it
-runs after the response is complete, never waits, and logs errors
-without mutating the already-sent response.
+same VM from the eventfd callback. Client disconnect during a wait
+finalizes the request as HTTP 499. Graceful master shutdown cancels
+in-flight host futures instead of waiting them out. `log_by_rss_file` is
+synchronous and fail-closed: it runs after the response is complete,
+never waits, and logs errors without mutating the already-sent response.
+
+## Documentation
+
+- [Documentation index](docs/index.md)
+- [Directives](docs/directives.md) — syntax, context, inheritance, defaults, errors
+- [API reference](docs/api/index.md) — 191 ngx hosts by family
+- [Execution model](docs/execution-model.md)
+- [Security and policy](docs/security.md)
+- [Examples](docs/examples/index.md)
+- [Compatibility](docs/ngx-api-compatibility.md)
 
 ## Requirements
 
@@ -178,7 +188,7 @@ dpkg-deb --info nginx-module-rustscript_<version>_amd64.deb
 dpkg-deb --contents nginx-module-rustscript_<version>_amd64.deb
 ```
 
-## NGINX configuration and usage
+## Quick start
 
 Load the cdylib and attach a script to a location:
 
@@ -201,56 +211,16 @@ http {
 }
 ```
 
-`access_by_rss_file` is location-only and takes exactly one argument.
-`content_by_rss_file` and `log_by_rss_file` are independent location-only
-slots with the same one-argument shape. Duplicate directives in the same
-location are rejected per slot. Unset nested locations inherit each
-parent slot independently; an explicit child directive overrides that
-slot only.
-`rss_shared_dict <name> <size>` is HTTP-main only and takes exactly two
-arguments. The pd-vm standard runtime domains are denied until location
-configuration grants them: `rss_io_root <path>`, `rss_io_write on|off`,
-`rss_http_scheme http|https`, one `rss_http_allow <host> <port>` pair per
-location, `rss_http_allow_private on|off`, and `rss_sqlite_root <path>`. These
-policy fields inherit independently. A second HTTP pair is rejected during
-configuration, and SQLite requires its root even for an in-memory database.
+`access_by_rss_file`, `content_by_rss_file`, and `log_by_rss_file` are
+location-only, one argument each, and inherit independently. pd-vm I/O,
+HTTP, and SQLite start denied: grant `rss_io_root`, `rss_io_write`,
+`rss_http_scheme`, one `rss_http_allow <host> <port>` pair per location,
+`rss_http_allow_private`, and `rss_sqlite_root` (required even for an
+in-memory database). A second HTTP pair is rejected during configuration.
 I/O process spawning and unsafe SQLite SQL remain disabled.
-Relative paths resolve with NGINX `ngx_conf_full_name` against the conf
-prefix (the directory of the config file). Absolute paths are unchanged.
-The file is read once at `nginx -t` / reload, must be a regular UTF-8 file,
-and is compiled with `compile_source`.
 
-Config accepts every production host in the access phase except the five
-content-only output hosts (`ngx::send_headers`, `ngx::print`, `ngx::say`,
-`ngx::flush`, and `ngx::eof`). This includes timers, codec, time, metadata,
-constants, logging, request read/write/body, `ngx.ctx`, response metadata,
-control, shared dict, and UDP/TCP cosocket hosts. Bare `print` is not a host
-(use `ngx::log`); `runtime::sleep`, unknown imports, and phase-forbidden
-imports are rejected at configuration time. Unknown modules fail compile or
-import check. Duplicate directives in the same location are rejected. Unset
-nested locations inherit the parent program; an explicit child directive
-overrides. Unconfigured locations keep the original access-phase decline.
-
-`log_by_rss_file` compiles under the Log phase against a closed
-positive allowlist keyed by family, capability, and import name.
-Accepted hosts are codec (OpenResty documents `ngx.escape_uri` and
-the other codec APIs for `log_by_lua*`), time, meta, log, constants,
-request reads, `ngx.ctx`, shared-dict, and response getters
-(`ngx::status::get`, `ngx::header::get`). OpenResty's `ngx.status` /
-`ngx.header.HEADER` context tables include `log_by_lua*` for both
-read and write; this module permits getters only. Sleep, UDP/TCP
-cosocket, output, control (`ngx::exit` / `ngx::redirect`), request
-writes, and response setters are rejected at `nginx -t`. A future
-family or capability is rejected until it is explicitly added.
-
-The handler runs when NGINX invokes the log phase for that request
-(current `r->loc_conf` after internal redirect / `error_page`).
-Subrequests require core `log_subrequest on` on the subrequest
-location (`ngx_http_finalize_request` in NGINX 1.30.4); otherwise
-NGINX skips the subrequest log phase. `Waiting` produces the exact
-`log handler cannot wait` error, drops the VM, and never arms
-eventfd, a timer, or `r->main->count`. Runtime errors and panics are
-logged and never change the already-sent response.
+Full syntax, inheritance, defaults, and error strings:
+[docs/directives.md](docs/directives.md).
 
 Prove load with an isolated prefix:
 
@@ -263,172 +233,6 @@ export NGX_RUSTSCRIPT_MODULE="$(readlink -f "$CARGO_TARGET_DIR/debug/libngx_rust
 cargo test --test module_load -- --nocapture
 nginx -t -p /path/to/prefix -c conf/nginx.conf
 ```
-
-## RustScript examples
-
-Complete deployment examples:
-
-- [Shared-dict fixed-window rate limiter](docs/examples/rate-limit.md) — [RSS](examples/rate-limit.rss) / [NGINX config](examples/rate-limit.nginx.conf)
-- [HMAC API-key authentication](docs/examples/key-auth.md) — [RSS](examples/key-auth.rss) / [NGINX config](examples/key-auth.nginx.conf) / [secret include template](examples/key-auth-secrets.conf.example)
-- [Async I/O → HTTP → SQLite → shared-dict → JSON pipeline](docs/examples/async-pipeline.md) — [RSS](examples/async-pipeline.rss) / [NGINX config](examples/async-pipeline.nginx.conf)
-
-Import-free access script (runs to `Halted`, then the content phase):
-
-```rss
-let x = 1 + 2;
-```
-
-One sleep, then the content phase:
-
-```rss
-use ngx;
-ngx::sleep(0.03);
-```
-
-Millisecond sleep for integer delays:
-
-```rss
-use ngx;
-ngx::sleep_ms(30);
-```
-
-Read a request body in `content_by_rss_file` (nullary like OpenResty; `get_post_args` still takes explicit `null` for the max-args adaptation):
-
-```rss
-use ngx;
-ngx::req::read_body();
-let data = ngx::req::get_body_data();
-ngx::say(data);
-```
-
-Replace the request body in `content_by_rss_file` (memory; `set_body_file` / builder APIs are in the compatibility doc):
-
-```rss
-use ngx;
-ngx::req::read_body();
-ngx::req::set_body_data("replacement");
-ngx::say(ngx::req::get_body_data());
-```
-
-Two sequential sleeps:
-
-```rss
-use ngx;
-ngx::sleep(0.01);
-ngx::sleep_ms(10);
-```
-
-UDP echo to a connected peer:
-
-```rss
-use ngx;
-let sock = ngx::socket::udp();
-ngx::socket::udp::settimeout(sock, 1000);
-ngx::socket::udp::setpeername(sock, "127.0.0.1", 53);
-ngx::socket::udp::send(sock, "ping");
-ngx::socket::udp::receive(sock, null);
-ngx::socket::udp::close(sock);
-```
-
-TCP echo to a connected peer:
-
-```rss
-use ngx;
-let sock = ngx::socket::tcp();
-ngx::socket::tcp::settimeout(sock, 1000);
-ngx::socket::tcp::connect(sock, "127.0.0.1", 8080);
-ngx::socket::tcp::send(sock, "ping");
-ngx::socket::tcp::receive(sock, 4);
-ngx::socket::tcp::close(sock);
-```
-
-TCP keepalive (worker-local pool) and TLS handshake (Tokio/rustls):
-
-```rss
-use ngx;
-let sock = ngx::socket::tcp();
-ngx::socket::tcp::settimeout(sock, 1000);
-ngx::socket::tcp::connect(sock, "127.0.0.1", 8080);
-let store = ngx::socket::tcp::trustedstore(ca_pem);
-ngx::socket::tcp::settrustedstore(sock, store);
-ngx::socket::tcp::sslhandshake(sock, null, "localhost", true, null);
-ngx::socket::tcp::send(sock, "ping");
-ngx::socket::tcp::receive(sock, 4);
-ngx::socket::tcp::setkeepalive(sock, 60000, 30);
-```
-
-`ngx::sleep` is a `pd-host-function` async host (`seconds:number -> null`).
-`seconds` is an OpenResty-style integer or float; negative, NaN, infinity,
-and duration overflow are rejected. `ngx::sleep_ms` is the millisecond
-integer form (`ms:int -> null`). The generated wrapper submits an owned
-host future; the impl validates the duration and awaits Tokio. The first
-host entry returns `VmStatus::Waiting`. Two sequential sleeps reuse the
-same generation-safe request identity and each wait once.
-
-On each request the access handler leases a worker-thread-local VM via
-`Vm::new_shared(Arc<Program>)`. Import-free programs run to
-`VmStatus::Halted` and return `NGX_OK` so the content phase proceeds. After
-`Halted` and after a recoverable runtime error the VM is reset with
-`Vm::reset_for_reuse` and parked only when `Vm::is_reusable` is true. Idle
-pool size is bounded. VM errors and unexpected `Waiting` on import-free
-programs fail the request with 500.
-
-Scripts that use pd-vm I/O, HTTP client, SQLite, `ngx::sleep`,
-`ngx::sleep_ms`, or UDP/TCP cosocket hosts bind a request-local VM instead
-of the pool. `Waiting` returns
-`NGX_AGAIN` without incrementing `r->main->count`.
-The eventfd callback polls the waiting host op, resumes the same VM on the
-worker main thread, and continues `ngx_http_core_run_phases` exactly once
-so the access handler can return `NGX_OK`. Host-bound waiting VMs are never
-returned to the pool.
-
-## Runtime and compatibility limits
-
-The current ngx host surface (signatures, phases, yield behavior,
-limits, and OpenResty adaptations) is listed in
-[docs/ngx-api-compatibility.md](docs/ngx-api-compatibility.md).
-`ngx::thread::{spawn,wait,kill}`, `ngx::timer::{at,every}`,
-`ngx::on_abort`, `ngx::semaphore::*`, and `ngx::run_worker_thread` are
-not production hosts; configuration compile rejects those imports.
-The callback execution contract is
-[docs/design/ngx-scheduler.md](docs/design/ngx-scheduler.md).
-Content-phase `ngx::send_headers` / `ngx::print` / `ngx::say` /
-`ngx::flush` / `ngx::eof` copy payload on the worker thread into
-request-pool buffers and send through `ngx_http_output_filter`. Access
-rejects those imports at config time.
-
-- Worker runtime is created only in NGINX worker `init_process` after fork,
-  and only when `ngx_process` is `NGX_PROCESS_WORKER` or
-  `NGX_PROCESS_SINGLE`. Helper processes skip initialization. `nginx -t`,
-  master, and config never create Tokio threads or the eventfd.
-  `exit_process` shuts the runtime down and is idempotent.
-- Tokio features: `rt` + `rt-multi-thread` + `time` + `net` + `sync` + `io-util`.
-  One worker thread named `ngx-rustscript-async` drives ngx cosockets and
-  pd-vm async I/O/HTTP host futures. SQLite operations use pd-vm's scoped
-  worker-backed operation path and resume through the same eventfd bridge.
-- Async wait capacity is `DEFAULT_MAX_IN_FLIGHT` (1024). Reserve is rejected
-  when full. Host futures and wakers own only a queue sender and request
-  identity — no NGINX request/pool/VM pointers cross into Tokio, and Tokio
-  never calls `ngx_post_event`.
-- Completions enqueue the request identity under a mutex, then write
-  `eventfd(2)` created with `EFD_NONBLOCK|EFD_CLOEXEC`. The worker main
-  thread registers the fd with `ngx_get_connection`. The pinned Linux epoll
-  path uses `add` with `EPOLLIN`.
-- Client close while a wait is in flight is detected with a worker-thread
-  wrapper around `ngx_http_test_reading`. Confirmed close finalizes once
-  with `NGX_HTTP_CLIENT_CLOSED_REQUEST` (access log 499), then request-pool
-  cleanup invalidates the identity and drops the host future.
-- Worker `exit_process` rejects new work, invalidates senders/wakers,
-  cancels/drops host futures, unregisters/closes eventfd once, and clears
-  worker registries without touching request pointers. Long sleeps do not
-  delay graceful worker exit (SIGQUIT).
-- `pd-vm` pin `4b749862ff1632ef1266d75709da3676de37356c`, packages `pd-vm`
-  and `pd-host-function`. This pin has `Vm::new_shared(Arc<Program>)`,
-  `HostAsyncBridge`, `Vm::set_async_bridge`, `VmStatus::Waiting`,
-  `Vm::poll_waiting_host_op`, and `Vm::resume`. `try_new` only wraps owned
-  `Vm::new` after frame-limit validation. Normal termination is
-  `Ok(VmStatus::Halted)`. Drop of `Vm` owns cancellation and resource
-  closure.
 
 ## Tests and acceptance
 
@@ -467,6 +271,12 @@ loopback port, and reaps only its own process. Isolated prefixes go under
 `tempfile.gettempdir()` (typically `$TMPDIR`). Set `NGX_RUSTSCRIPT_TASK_TMP`
 to a directory to place them elsewhere.
 
+Documentation links:
+
+```sh
+python3 scripts/check_docs_links.py
+```
+
 ## Troubleshooting
 
 - `dlopen() ... failed` — the module path is wrong, not a regular file, or
@@ -479,8 +289,8 @@ to a directory to place them elsewhere.
 - `script imports are not supported` / `failed to compile script` — only
   catalogued ngx hosts allowed in the active directive phase may be imported.
   `access_by_rss_file`, `content_by_rss_file`, and `log_by_rss_file` have
-  distinct phase allowlists; see the compatibility matrix. Bare `print` and
-  `runtime::sleep` are rejected.
+  distinct phase allowlists; see the [API reference](docs/api/index.md).
+  Bare `print` and `runtime::sleep` are rejected.
 - HTTP 500 from an access script — VM runtime error or unexpected Waiting on
   an import-free program. Check the error log.
 - HTTP 499 on a sleep route — the client closed the connection before the
