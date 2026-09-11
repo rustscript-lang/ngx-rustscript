@@ -949,13 +949,37 @@ ngx::ctx::set("k", 1);
     }
 
     fn wait_readable(fd: std::os::unix::io::RawFd) {
-        let mut pollfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let rc = unsafe { libc::poll(&mut pollfd, 1, 1_000) };
-        assert!(rc > 0, "sleep timer was not readable");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let mut pollfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "eventfd {fd} was not readable within 10s"
+            );
+            let timeout_ms = remaining.as_millis().min(1_000) as libc::c_int;
+            let rc = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+            if rc > 0 {
+                assert_ne!(
+                    pollfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP),
+                    0,
+                    "eventfd {fd} poll returned unexpected revents {}",
+                    pollfd.revents
+                );
+                return;
+            }
+            if rc < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                panic!("eventfd {fd} poll failed: {error}");
+            }
+        }
     }
 
     fn wait_ready(
