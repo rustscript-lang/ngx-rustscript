@@ -4,7 +4,7 @@
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and documents only
-the hosts in the [API reference](api/index.md) (191 ngx names, plus
+the hosts in the [API reference](api/index.md) (195 ngx names, plus
 pd-vm I/O/HTTP/SQLite). Host-by-host tables, phase sets, and hard caps
 live there; this page is the mapping and migration overview.
 
@@ -161,12 +161,16 @@ Not production hosts in this matrix (do not import them):
   `ngx::run_worker_thread`. Configuration compile rejects those names in
   access, content, and log (`UnsupportedImport`). The execution contract
   and upstream `pd-vm` gap are in
-  [docs/design/ngx-scheduler.md](design/ngx-scheduler.md). Host count stays
-  **191**.
-- Bare `ngx::semaphore` and `ngx::semaphore::{new,wait,post,count}` are
-  also absent. A counting semaphore could reuse generic `HostFuture` and
-  `ResourceHandle` without script callables; that does not unlock
-  thread/timer/`on_abort` APIs and is not registered.
+  [docs/design/ngx-scheduler.md](design/ngx-scheduler.md). Those callable
+  families keep the count at **191**.
+- `ngx::semaphore::{new,wait,post,count}` **are** production hosts: a
+  worker-owned counting semaphore reached through a VM-local
+  `resource<ngx.semaphore>` handle, waiting on the generic `HostFuture`
+  bridge without any script callable. The bare `ngx::semaphore` namespace
+  marker is not a callable and is rejected. Access and content only; Log
+  fails configuration compile. Registered count **195**. See
+  [semaphore](api/semaphore.md) and
+  [docs/design/ngx-scheduler.md](design/ngx-scheduler.md).
 - Stream subsystem, `ndk.set_var.*`, Lua `coroutine.*`
 - `tcpsock:getsslpointer` / `tcpsock:getsslctx` (no NGINX SSL FFI)
 - `print`, `runtime::sleep`, and test hosts `ngx::probe` / `ngx::ready` /

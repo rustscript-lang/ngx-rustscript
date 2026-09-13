@@ -367,8 +367,8 @@ fn runtime_host_names_are_unique() {
     );
     assert_eq!(
         names.len(),
-        191,
-        "production runtime host count must stay 191"
+        195,
+        "production runtime host count must stay 195"
     );
 }
 
@@ -545,6 +545,21 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
                     "{} Cosocket hosts must name ngx.socket.*, got {}",
                     entry.name,
                     entry.openresty_name
+                );
+            }
+            HostFamily::Semaphore => {
+                assert_eq!(entry.capabilities, &[HostCapability::Semaphore]);
+                assert!(
+                    entry.openresty_name.starts_with("ngx.semaphore."),
+                    "{} Semaphore hosts must name ngx.semaphore.*, got {}",
+                    entry.name,
+                    entry.openresty_name
+                );
+                assert_eq!(
+                    entry.phases,
+                    &[NgxPhase::Access, NgxPhase::Content],
+                    "{} stays fail-closed outside Access/Content",
+                    entry.name
                 );
             }
         }

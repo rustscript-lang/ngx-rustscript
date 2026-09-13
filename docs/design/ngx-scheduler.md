@@ -7,13 +7,15 @@ Feasibility gate for OpenResty-oriented callable families:
 - `ngx::thread::{spawn,wait,kill}`
 - `ngx::timer::{at,every}`
 - `ngx::on_abort`
-- semaphore (`ngx::semaphore::{new,wait,post,count}`)
+- semaphore (`ngx::semaphore::{new,wait,post,count}`) — **landed**, see below
 - `ngx::run_worker_thread`
 
 This document is the lifecycle contract. It is **not** permission to
-register scheduler hosts. The production surface stays **191** hosts
-until an upstream `pd-vm` public API that satisfies the invariants
-below is designed, released, and pinned.
+register callable scheduler hosts. The callable families stay absent and
+the callable baseline stays **191** hosts. The one landed exception is the
+semaphore family (`ngx::semaphore::{new,wait,post,count}`), which needs no
+script callable and takes the production surface to **195** hosts; its
+lifetime addendum is in [Semaphore](#5-semaphore-landed-worker-owned-counting-semaphore).
 
 Pinned `pd-vm` evidence in this file is taken from:
 
@@ -38,12 +40,15 @@ fail-closed.**
 | `ngx::timer::{at,every}` | **blocked** | Needs a detached Program/VM, attenuated capabilities, and a callable that must not retain request `raw` / ctx / parent VM. No public detached-VM or unforgeable callable handle. |
 | panic / error / shutdown / reload / limits for those families | **blocked** | No public cancellable child-task handle, no generation-safe detached identity, no exactly-once child completion protocol that composes with the request eventfd bridge. |
 | `ngx::on_abort` | **blocked** | Needs a single callable, request-abort timing, and cleanup that cannot re-enter the dying request VM with live FFI pointers. |
-| semaphore | **feasible now** (not registered) | Counter + `wait` can reuse generic `HostFuture` + `ResourceHandle` without invoking script callables. That does **not** unlock thread/timer/`on_abort`/`run_worker_thread`. |
+| semaphore | **landed** (195) | Worker-owned counter + FIFO waiter queue in a `thread_local` registry, reached through a VM-local `resource<ngx.semaphore>` handle. Waits reuse the generic `HostFuture` + `AccessExec` reservation path and invoke no script callable. That does **not** unlock thread/timer/`on_abort`/`run_worker_thread`. |
 | `ngx::run_worker_thread` | **blocked** | Needs a configured pool, module/function ABI, and an owned `Send` value boundary. `Value::Callable` / request resources must not cross the pool. |
 
-Semaphore remaining unregistered is intentional: host count stays 191,
-and a semaphore landing must still pass request-resource escape and
-reload budgets. Feasible ≠ implemented.
+The semaphore landing passed the request-resource escape and reload
+budgets: the worker registry is `thread_local` (one registry per worker),
+ids are never reused, the request VM only holds a typed handle entry in
+its **own** table, waits capture owned state plus an owned timeout, and
+worker `exit_process` closes live semaphores before the Tokio runtime is
+dropped. Every other row above is still fail-closed.
 
 Contract tests: `tests/ngx_scheduler_contract.rs`.
 
@@ -274,7 +279,7 @@ finalize.
 
 **Expressible now:** no.
 
-### 5. Semaphore — reuse of generic `HostFuture`
+### 5. Semaphore — landed worker-owned counting semaphore
 
 OpenResty `ngx.semaphore` is a worker-local counting semaphore:
 `new(n)`, `wait(timeout)`, `post(n)`, `count()`.
@@ -283,8 +288,8 @@ This **does not need a script callable**. It matches existing hosts:
 
 - `new` → insert a `Resource` into the current VM table, return
   `ResourceHandle` as `i64` (same pattern as `ngx::socket::udp`).
-- `wait` → `async` `pd-host-function` that captures the handle id and
-  an owned Tokio/async wait, submits `HostFuture`, parent VM
+- `wait` → `async` `pd-host-function` that captures the worker state and
+  an owned timeout (never the VM), submits `HostFuture`, parent VM
   `Waiting`, eventfd resume. Future holds **no** request/VM pointer.
 - `post` / `count` → sync, lookup handle in **this** VM table.
 
@@ -300,11 +305,49 @@ Why this does **not** unlock callable APIs:
 - A wait still occupies the **same** VM's single `Waiting` slot, like
   `ngx::sleep`. It cannot run a callback while waiting.
 
-Decision: **feasible now**, still **not registered**. Registering it
-requires a dedicated resource key, worker-local storage that survives
-the creating VM (OpenResty semaphores are process/worker objects, not
-request objects), reload policy, and a budget. Those are follow-up
-work, not this gate.
+#### Landed contract (195 hosts)
+
+Public callables: `ngx::semaphore::new(count)`,
+`ngx::semaphore::wait(sem, timeout)`, `ngx::semaphore::post(sem, count)`,
+`ngx::semaphore::count(sem)`. The bare `ngx::semaphore` marker is **not**
+a callable. Resource type key `ngx.semaphore`. Access + content only.
+
+Worker lifetime addendum (worker-owned state versus the request VM
+table):
+
+- The permit counter, the FIFO waiter queue, and the closed flag live in
+  `SemaphoreState` inside a `thread_local` worker registry keyed by a
+  never-reused id. `new` inserts a `SemaphoreHandle` resource entry into
+  the **current** VM table and returns its `i64` handle.
+- Waiters capture `Arc<SemaphoreState>` plus an owned timeout through
+  `CaptureAsyncHostContext::capture_with_args` on the worker main thread.
+  They never hold `r`, pool, `Vm`, `RequestLocalCtx`, or a foreign handle.
+- Permits are consumed only at grant, inside the same critical section
+  that observes the waiter at the FIFO front. `post` and `grant` wake at
+  most `min(permits, queued)` front waiters with registered wakers; each
+  grant cascades the next wake. Timeout, cancellation, and drop therefore
+  cannot leak or double-release a permit.
+- Cleanup is exactly-once and idempotent: the wait future owns a drop
+  guard that removes its FIFO entry if it is still queued. Typed
+  cancellation uses the existing bridge `request_cancel_op` /
+  `poll_cancel_op` protocol; there is no new cancellation protocol, no
+  second eventfd, and no scheduler callback engine.
+- Closing the **last** VM-local handle removes the worker entry
+  (last-handle removal). An in-flight wait keeps its own state alive, so
+  it can never observe a recycled id.
+- Worker `exit_process` (`WorkerRuntime::shutdown`) closes every live
+  semaphore, wakes every waiter, empties the registry, and only then drops
+  the Tokio runtime. Ids are never reused across a worker restart.
+- Configuration reload does not touch semaphores: they are worker objects
+  with no `Program` identity, and a new `Arc<Program>` cannot rebind a
+  live handle. Handles die with their VM table.
+
+Validation, phases, the negative-depth `count` mapping, budgets, and the
+full event table are in [docs/api/semaphore.md](../api/semaphore.md) and
+[Semantic differences](../ngx-api-compatibility.md).
+
+Decision: **landed as the only scheduler-family exception.** Everything
+else in this document stays fail-closed.
 
 ### 6. `ngx::run_worker_thread` — module/function ABI, owned args/results, configured pool
 
@@ -455,7 +498,7 @@ delivers at most one invocation.
 
 | Budget | Current | Scheduler implication |
 | --- | --- | --- |
-| In-flight HostFuture waits | 1024 / worker | Threads waiting, timer fires that invoke async hosts, and semaphore waits **share** this cap unless a new named cap is designed. Do not silent-bypass. |
+| In-flight HostFuture waits | 1024 / worker | Threads waiting, timer fires that invoke async hosts, and semaphore waits **share** this cap unless a new named cap is designed. Do not silent-bypass. Semaphore waits use the existing `AccessExec` reservation, so the cap is shared in practice (`tests/ngx_semaphore.rs`). |
 | Idle VM pool | 4 import-free VMs | Detached timer VMs are not pool VMs. Do not steal pool slots. |
 | Resource table | pd-vm default 1024 | Child VM gets its own table. Do not insert parent sockets into it. |
 | `ngx.ctx` | keys/depth/bytes caps | Callables rejected. Detached work gets no request ctx. |
@@ -463,7 +506,8 @@ delivers at most one invocation.
 | Codec / body / header caps | see compatibility matrix | Unchanged. |
 | Proposed live `thread` count | not set | Need a hard cap before enabling spawn (suggested 64/request, 256/worker — **proposal only**, not implemented). |
 | Proposed live timers | not set | Need a hard cap (suggested 256/worker). |
-| Proposed semaphores | not set | Worker-local objects need a cap and shm/heap policy. |
+| Live semaphores | 1024 / worker (`MAX_LIVE_SEMAPHORES`) | Worker-local `Arc<SemaphoreState>` in the worker registry; the VM table holds one handle entry per `new`. No shm; permits are process-local by design. |
+| Permits per semaphore | 1000000 (`MAX_SEMAPHORE_COUNT`) | `new`/`post` above the ceiling is a `HostError`; no silent saturation. |
 
 ## Worker generation, reload, Program ownership
 
@@ -643,10 +687,9 @@ ngx-rustscript will not add `src/scheduler.rs` or catalog entries.
    191. No scheduler module. Design published.
 2. **Upstream `pd-vm`.** Land the minimal public API above. Pin bump
    in ngx-rustscript with an audit against this file.
-3. **Semaphore (optional, independent).** Worker-local resource +
-   `HostFuture` wait. Still no callables. New design addendum for
-   worker lifetime vs request VM table (OpenResty semaphores outlive
-   the creating request).
+3. **Semaphore (landed, independent).** Worker-owned resource +
+   `HostFuture` wait, no callables. The addendum below covers worker
+   lifetime versus the request VM table.
 4. **`ngx.on_abort`.** Single handle, exactly-once, attenuated, runs
    on worker main before 499 finalize, cannot wait.
 5. **`ngx.timer.at` then `every`.** Detached `ChildVm`, attenuated
@@ -657,22 +700,26 @@ ngx-rustscript will not add `src/scheduler.rs` or catalog entries.
 7. **`ngx.run_worker_thread` last.** Configured pool + `DetachedValue`
    ABI. No request resources.
 
-A later phase must not skip 2. Semaphore (3) may precede 2 because it
-does not need callables; it still needs its own lifetime addendum and
-must not be smuggled in as "scheduler".
+A later phase must not skip 2. Semaphore (3) landed before 2 because it
+needs no callables; it is implemented as `src/semaphore.rs` plus
+`src/host/semaphore.rs`, **not** as a `scheduler` module, and must not be
+smuggled in as the callable scheduler engine.
 
 ## Observable fail-closed boundary (this crate)
 
 | Check | Expected |
 | --- | --- |
-| `ngx_host_manifest().len()` | 191 |
-| catalog / runtime name lists | same 191, no scheduler names |
-| `bind_ngx_hosts` | no scheduler functions |
-| `src/scheduler.rs` | absent |
-| `src/lib.rs` | no `mod scheduler` |
-| `HostFamily` / `HostCapability` | no Scheduler variant |
-| catalog `HostTypeSchema::Callable` | none |
+| `ngx_host_manifest().len()` | 195 (191 callable baseline + 4 semaphore hosts) |
+| catalog / runtime name lists | same 195 in the same order |
+| `bind_ngx_hosts` | installs the 4 semaphore hosts; no callable scheduler functions |
+| `src/scheduler.rs`, `src/host/scheduler.rs` | absent |
+| `src/lib.rs`, `src/host/mod.rs` | no `mod scheduler` |
+| `HostFamily` / `HostCapability` | no `Scheduler` variant; one reviewed `Semaphore` variant each |
+| catalog `HostTypeSchema::Callable` | none (semaphore hosts have none) |
 | compile `ngx::thread::spawn` etc. in Access/Content/Log | `ConfigError::UnsupportedImport` (or the same fail-closed class) at **configuration** compile, not at request runtime |
-| Log allowlist | synthetic log-allowlist probe `ngx::future::scheduler` (never a production import) is rejected; scheduler candidates stay rejected |
+| bare `ngx::semaphore` marker | never catalogued, never bound, rejected at configuration compile |
+| semaphore in Access/Content | accepted; `wait` may return `Waiting` |
+| semaphore in Log | `ConfigError::PhaseForbidden` at configuration compile |
+| Log allowlist | synthetic log-allowlist probe `ngx::future::scheduler` (never a production import) is rejected; scheduler candidates and the semaphore family stay rejected |
 
 Revisit this file before adding any of those names to the manifest.

@@ -88,7 +88,7 @@ const LIST_HOSTS: &[&str] = &[
 fn list_and_maintenance_hosts_are_catalogued() {
     assert_eq!(
         production_runtime_host_names().len(),
-        191,
+        195,
         "production host inventory must stay in sync"
     );
     let key = ResourceTypeKey::new("ngx.shared.dict").unwrap();

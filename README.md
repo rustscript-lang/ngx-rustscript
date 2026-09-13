@@ -20,7 +20,7 @@ never waits, and logs errors without mutating the already-sent response.
 
 - [Documentation index](docs/index.md)
 - [Directives](docs/directives.md) — syntax, context, inheritance, defaults, errors
-- [API reference](docs/api/index.md) — 191 ngx hosts by family
+- [API reference](docs/api/index.md) — 195 ngx hosts by family
 - [Execution model](docs/execution-model.md)
 - [Security and policy](docs/security.md)
 - [Examples](docs/examples/index.md)

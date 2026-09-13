@@ -184,12 +184,16 @@ impl WorkerRuntime {
 
     /// Reject new work, invalidate senders, drop the runtime (cancels timers
     /// and in-flight futures), then close eventfd with the existing fd gate.
+    ///
+    /// Live semaphores are closed and their waiters woken **before** the
+    /// runtime is dropped so a parked wait never resumes silently.
     pub fn shutdown(&mut self) {
         if self.stopped {
             return;
         }
         self.stopped = true;
         crate::socket::pool::shutdown_current();
+        crate::semaphore::shutdown_current();
         self.notify.reject_new();
         let _ = self.notify.reclaim_all();
         if let Some(runtime) = self.runtime.take() {

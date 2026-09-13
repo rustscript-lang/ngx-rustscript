@@ -331,6 +331,7 @@ fn request_state_required_by_imports(program: &Program) -> bool {
                     && (entry.sync == HostSyncKind::Async
                         || entry.family == HostFamily::RequestCtx
                         || entry.family == HostFamily::Cosocket
+                        || entry.family == HostFamily::Semaphore
                         || entry.capabilities.iter().any(|cap| {
                             matches!(
                                 cap,

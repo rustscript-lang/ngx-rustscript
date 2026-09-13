@@ -56,7 +56,7 @@ and never change the already-sent response. `Waiting` logs
 ## Compile-time import allowlists
 
 `compile_rss_source` compiles access scripts against `compile_host_catalog()`
-(the 191 ngx hosts plus pd-vm's HTTP import catalog) and then
+(the 195 ngx hosts plus pd-vm's HTTP import catalog) and then
 `validate_program_imports_for_phase(..., Access)`.
 `compile_rss_source_for_phase` performs the corresponding Content or
 Log validation. Unknown names, phase-forbidden names, arity, and type

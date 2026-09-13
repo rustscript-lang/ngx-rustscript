@@ -28,14 +28,15 @@ pub use catalog::{
     NGX_REQ_RAW_HEADER_NAME, NGX_REQ_READ_BODY_NAME, NGX_REQ_SET_BODY_DATA_NAME,
     NGX_REQ_SET_BODY_FILE_NAME, NGX_REQ_SET_HEADER_NAME, NGX_REQ_SET_METHOD_NAME,
     NGX_REQ_SET_URI_ARGS_NAME, NGX_REQ_SET_URI_NAME, NGX_REQ_START_TIME_NAME, NGX_SAY_NAME,
-    NGX_SEND_HEADERS_NAME, NGX_SHA1_BIN_NAME, NGX_SHARED_ADD_NAME, NGX_SHARED_CAPACITY_NAME,
-    NGX_SHARED_DELETE_NAME, NGX_SHARED_DICT_NAME, NGX_SHARED_EXPIRE_NAME,
-    NGX_SHARED_FLUSH_ALL_NAME, NGX_SHARED_FLUSH_EXPIRED_NAME, NGX_SHARED_FREE_SPACE_NAME,
-    NGX_SHARED_GET_KEYS_NAME, NGX_SHARED_GET_NAME, NGX_SHARED_GET_STALE_NAME, NGX_SHARED_INCR_NAME,
-    NGX_SHARED_LLEN_NAME, NGX_SHARED_LPOP_NAME, NGX_SHARED_LPUSH_NAME, NGX_SHARED_REPLACE_NAME,
-    NGX_SHARED_RPOP_NAME, NGX_SHARED_RPUSH_NAME, NGX_SHARED_SAFE_ADD_NAME,
-    NGX_SHARED_SAFE_SET_NAME, NGX_SHARED_SET_NAME, NGX_SHARED_TTL_NAME, NGX_SLEEP_MS_NAME,
-    NGX_SLEEP_NAME, NGX_SOCKET_CONNECT_NAME, NGX_SOCKET_TCP_CLIENTCERT_NAME,
+    NGX_SEMAPHORE_COUNT_NAME, NGX_SEMAPHORE_NEW_NAME, NGX_SEMAPHORE_POST_NAME,
+    NGX_SEMAPHORE_RESOURCE_KEY, NGX_SEMAPHORE_WAIT_NAME, NGX_SEND_HEADERS_NAME, NGX_SHA1_BIN_NAME,
+    NGX_SHARED_ADD_NAME, NGX_SHARED_CAPACITY_NAME, NGX_SHARED_DELETE_NAME, NGX_SHARED_DICT_NAME,
+    NGX_SHARED_EXPIRE_NAME, NGX_SHARED_FLUSH_ALL_NAME, NGX_SHARED_FLUSH_EXPIRED_NAME,
+    NGX_SHARED_FREE_SPACE_NAME, NGX_SHARED_GET_KEYS_NAME, NGX_SHARED_GET_NAME,
+    NGX_SHARED_GET_STALE_NAME, NGX_SHARED_INCR_NAME, NGX_SHARED_LLEN_NAME, NGX_SHARED_LPOP_NAME,
+    NGX_SHARED_LPUSH_NAME, NGX_SHARED_REPLACE_NAME, NGX_SHARED_RPOP_NAME, NGX_SHARED_RPUSH_NAME,
+    NGX_SHARED_SAFE_ADD_NAME, NGX_SHARED_SAFE_SET_NAME, NGX_SHARED_SET_NAME, NGX_SHARED_TTL_NAME,
+    NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_SOCKET_CONNECT_NAME, NGX_SOCKET_TCP_CLIENTCERT_NAME,
     NGX_SOCKET_TCP_CLOSE_NAME, NGX_SOCKET_TCP_CONNECT_NAME, NGX_SOCKET_TCP_GETREUSEDTIMES_NAME,
     NGX_SOCKET_TCP_NAME, NGX_SOCKET_TCP_RECEIVE_NAME, NGX_SOCKET_TCP_RECEIVEANY_NAME,
     NGX_SOCKET_TCP_RECEIVEUNTIL_NAME, NGX_SOCKET_TCP_RESOURCE_KEY, NGX_SOCKET_TCP_SEND_NAME,
@@ -144,6 +145,10 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
     &[
         NGX_SLEEP_NAME,
         NGX_SLEEP_MS_NAME,
+        NGX_SEMAPHORE_NEW_NAME,
+        NGX_SEMAPHORE_WAIT_NAME,
+        NGX_SEMAPHORE_POST_NAME,
+        NGX_SEMAPHORE_COUNT_NAME,
         NGX_ESCAPE_URI_NAME,
         NGX_UNESCAPE_URI_NAME,
         NGX_ENCODE_ARGS_NAME,
@@ -340,6 +345,10 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
 pub fn bind_ngx_hosts(vm: &mut Vm) {
     vm.bind_static_function(NGX_SLEEP_NAME, layout::helpers::functions::sleep);
     vm.bind_static_function(NGX_SLEEP_MS_NAME, layout::helpers::functions::sleep_ms);
+    vm.bind_static_function(NGX_SEMAPHORE_NEW_NAME, layout::helpers::semaphore::new);
+    vm.bind_static_function(NGX_SEMAPHORE_WAIT_NAME, layout::helpers::semaphore::wait);
+    vm.bind_static_function(NGX_SEMAPHORE_POST_NAME, layout::helpers::semaphore::post);
+    vm.bind_static_function(NGX_SEMAPHORE_COUNT_NAME, layout::helpers::semaphore::count);
     vm.bind_static_args_function(NGX_ESCAPE_URI_NAME, layout::helpers::codec::escape_uri);
     vm.bind_static_args_function(NGX_UNESCAPE_URI_NAME, layout::helpers::codec::unescape_uri);
     vm.bind_static_args_function(NGX_ENCODE_ARGS_NAME, layout::helpers::codec::encode_args);
@@ -913,6 +922,12 @@ mod layout {
         }
         pub mod socket {
             include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/socket.rs"));
+        }
+        pub mod semaphore {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/host/semaphore.rs"
+            ));
         }
         pub mod output {
             include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/output.rs"));

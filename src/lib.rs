@@ -16,6 +16,7 @@ pub mod phase;
 pub mod read_close;
 pub mod request_state;
 pub mod runtime;
+pub mod semaphore;
 pub mod shared_dict;
 pub(crate) mod socket;
 pub(crate) mod vm_pool;

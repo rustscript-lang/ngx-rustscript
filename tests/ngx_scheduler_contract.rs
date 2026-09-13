@@ -1,9 +1,13 @@
 //! Fail-closed scheduler / callable-family gate.
 //!
-//! Light threads, timer callbacks, `on_abort`, semaphore, and
-//! `run_worker_thread` stay absent from the 191-host production surface.
-//! Configuration compile rejects every candidate in Access, Content, and Log.
-//! Do not register these hosts without revisiting `docs/design/ngx-scheduler.md`.
+//! Light threads, timer callbacks, and `on_abort` callables, plus
+//! `run_worker_thread`, stay absent from the production surface. The
+//! worker-owned semaphore family (`ngx::semaphore::{new,wait,post,count}`) is
+//! the only landed scheduler-adjacent family: it needs no script callable and
+//! keeps the bare `ngx::semaphore` namespace marker unregistered.
+//! Configuration compile rejects every remaining candidate in Access, Content,
+//! and Log. Do not register the callable families without revisiting
+//! `docs/design/ngx-scheduler.md`.
 
 use ngx_rustscript_nginx_test_stubs as _;
 
@@ -23,7 +27,11 @@ use vm::{
     compile_source_with_flavor_and_options,
 };
 
-/// Exact candidate import list for the scheduler feasibility gate.
+/// Exact candidate import list for the still-gated scheduler families.
+///
+/// The four registered semaphore callables are deliberately absent: they
+/// landed with the worker-owned semaphore family. The bare `ngx::semaphore`
+/// namespace marker must **not** be registered, so it stays on this list.
 const SCHEDULER_CANDIDATES: &[&str] = &[
     "ngx::thread::spawn",
     "ngx::thread::wait",
@@ -34,11 +42,15 @@ const SCHEDULER_CANDIDATES: &[&str] = &[
     "ngx::timer::running_count",
     "ngx::on_abort",
     "ngx::semaphore",
+    "ngx::run_worker_thread",
+];
+
+/// The landed non-callable family. Exactly four callables, no marker.
+const REGISTERED_SEMAPHORE_HOSTS: &[&str] = &[
     "ngx::semaphore::new",
     "ngx::semaphore::wait",
     "ngx::semaphore::post",
     "ngx::semaphore::count",
-    "ngx::run_worker_thread",
 ];
 
 const CONFIG_PHASES: [NgxPhase; 3] = [NgxPhase::Access, NgxPhase::Content, NgxPhase::Log];
@@ -98,10 +110,12 @@ fn schema_contains_callable(schema: &HostTypeSchema) -> bool {
 fn assert_send<T: Send>() {}
 fn assert_sync<T: Sync>() {}
 
-/// Adding `HostFamily::Scheduler` must fail this match until the design is revisited.
-fn host_family_has_no_scheduler_variant(family: HostFamily) {
+/// Adding any other `HostFamily` must fail this match until the design is
+/// revisited. `Semaphore` is the one reviewed, callable-free addition.
+fn host_family_has_no_callable_scheduler_variant(family: HostFamily) {
     match family {
         HostFamily::Timer
+        | HostFamily::Semaphore
         | HostFamily::Codec
         | HostFamily::Time
         | HostFamily::Meta
@@ -116,10 +130,12 @@ fn host_family_has_no_scheduler_variant(family: HostFamily) {
     }
 }
 
-/// Adding `HostCapability::Scheduler` must fail this match until the design is revisited.
-fn host_capability_has_no_scheduler_variant(capability: HostCapability) {
+/// Adding any other `HostCapability` must fail this match until the design is
+/// revisited. `Semaphore` is the one reviewed, callable-free addition.
+fn host_capability_has_no_callable_scheduler_variant(capability: HostCapability) {
     match capability {
         HostCapability::Timer
+        | HostCapability::Semaphore
         | HostCapability::Codec
         | HostCapability::Time
         | HostCapability::Meta
@@ -137,10 +153,58 @@ fn host_capability_has_no_scheduler_variant(capability: HostCapability) {
 }
 
 #[test]
-fn production_host_count_stays_exactly_191() {
-    assert_eq!(ngx_host_manifest().len(), 191);
-    assert_eq!(ngx_host_catalog().functions().len(), 191);
-    assert_eq!(production_runtime_host_names().len(), 191);
+fn production_host_count_stays_exactly_195() {
+    assert_eq!(ngx_host_manifest().len(), 195);
+    assert_eq!(ngx_host_catalog().functions().len(), 195);
+    assert_eq!(production_runtime_host_names().len(), 195);
+    assert_eq!(
+        ngx_host_manifest().len(),
+        191 + REGISTERED_SEMAPHORE_HOSTS.len(),
+        "the only addition over the 191 callable-family baseline is the semaphore family"
+    );
+}
+
+#[test]
+fn semaphore_family_is_registered_without_the_namespace_marker() {
+    let catalog = ngx_host_catalog();
+    let manifest: HashSet<&str> = ngx_host_manifest().iter().map(|entry| entry.name).collect();
+    let runtime: HashSet<&str> = production_runtime_host_names().iter().copied().collect();
+    for name in REGISTERED_SEMAPHORE_HOSTS {
+        assert!(
+            catalog.function(name).is_some(),
+            "{name} must be in the compiler catalog"
+        );
+        assert!(manifest.contains(name), "{name} must be in the manifest");
+        assert!(runtime.contains(name), "{name} must be bound at runtime");
+    }
+    assert!(
+        catalog.function("ngx::semaphore").is_none(),
+        "the ngx::semaphore namespace marker must not be a callable"
+    );
+    let source = "use ngx;\nlet s = ngx::semaphore::new(1);\nngx::semaphore::wait(s, null);\n";
+    for phase in [NgxPhase::Access, NgxPhase::Content] {
+        compile_rss_source_for_phase(source, phase)
+            .unwrap_or_else(|err| panic!("{phase:?} must accept the semaphore family: {err}"));
+    }
+}
+
+#[test]
+fn semaphore_family_fails_configuration_compile_in_log() {
+    let phase = NgxPhase::Log;
+    for source in [
+        "use ngx;\nngx::semaphore::new(1);\n",
+        "use ngx;\nlet s = ngx::semaphore::new(1);\nngx::semaphore::count(s);\nngx::semaphore::post(s, 1);\n",
+    ] {
+        let err = compile_rss_source_for_phase(source, phase)
+            .expect_err("semaphore hosts must fail in Log");
+        match err {
+            ConfigError::PhaseForbidden { name, phase: got } => {
+                assert!(name.starts_with("ngx::semaphore::"), "{name}");
+                assert_eq!(got, phase);
+            }
+            other => panic!("Log must fail configuration compile, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -221,11 +285,11 @@ fn no_scheduler_production_module_is_registered() {
 }
 
 #[test]
-fn host_family_and_capability_have_no_scheduler_variant() {
+fn host_family_and_capability_have_no_callable_scheduler_variant() {
     for entry in ngx_host_manifest() {
-        host_family_has_no_scheduler_variant(entry.family);
+        host_family_has_no_callable_scheduler_variant(entry.family);
         for capability in entry.capabilities {
-            host_capability_has_no_scheduler_variant(*capability);
+            host_capability_has_no_callable_scheduler_variant(*capability);
         }
     }
 }

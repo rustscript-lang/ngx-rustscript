@@ -7,7 +7,7 @@ This matrix is the authoritative current ngx host surface for
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **191** names in the same order.
+Those three lists contain the same **195** names in the same order.
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and documents only
@@ -38,9 +38,10 @@ page can cite them without repeating the shared rules.
 - [Shared dictionary](shared-dict.md)
 - [UDP cosocket](udp.md)
 - [TCP cosocket](tcp.md)
+- [Semaphore](semaphore.md)
 - [pd-vm standard async hosts](standard-async.md)
 
-pd-vm I/O, HTTP, and SQLite hosts are not part of the 191 ngx names; see
+pd-vm I/O, HTTP, and SQLite hosts are not part of the 195 ngx names; see
 [pd-vm standard async hosts](standard-async.md).
 
 ## How to read the matrix
@@ -81,9 +82,10 @@ argument.
 | [Shared dict](shared-dict.md) | 22 | sync |
 | [Cosocket (UDP)](udp.md) | 7 | mixed |
 | [Cosocket (TCP)](tcp.md) | 16 | mixed |
+| [Semaphore](semaphore.md) | 4 | `wait` Waiting; `new`/`post`/`count` sync |
 | [Constants](constants.md) | 65 | sync |
 | of which HTTP status | 35 | sync |
-| **Production total** | **191** | |
+| **Production total** | **195** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
 the production manifest, catalog, or `bind_ngx_hosts`.
@@ -111,6 +113,7 @@ Shared sets used by the tables:
 | Set | Phases |
 | --- | --- |
 | `SLEEP_PHASES` | `rewrite`, `access`, `content`, `timer`, `ssl_certificate`, `ssl_session_fetch` |
+| `PHASE_SEMAPHORE` | `access`, `content` (fail-closed everywhere else, including `log`) |
 | `PHASE_ALL` | `init`, `init_worker`, `set`, `rewrite`, `access`, `content`, `header_filter`, `body_filter`, `log`, `timer`, `balancer`, `ssl_certificate`, `ssl_session_fetch`, `ssl_session_store`, `exit_worker`, `ssl_client_hello` |
 | `PHASE_ESCAPE_URI` | same as `PHASE_ALL` |
 | `PHASE_UNESCAPE_URI` | `PHASE_ALL` minus `ssl_session_fetch` and `ssl_session_store` |
@@ -193,7 +196,7 @@ host adds a further difference.
    messages containing NUL are host errors. The line is prefixed
    `ngx-rustscript: `. OpenResty varargs are a single string.
 9. **Phase and config import enforcement.** `compile_rss_source` compiles
-   access scripts against `compile_host_catalog()` (the 191 ngx hosts plus
+   access scripts against `compile_host_catalog()` (the 195 ngx hosts plus
    pd-vm's HTTP import catalog) and then
    `validate_program_imports_for_phase(..., Access)`;
    `compile_rss_source_for_phase` performs the corresponding Content or

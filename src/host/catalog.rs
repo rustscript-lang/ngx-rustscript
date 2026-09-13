@@ -19,6 +19,17 @@ pub const NGX_SLEEP_NAME: &str = "ngx::sleep";
 /// Millisecond sleep kept for existing scripts that used integer delays.
 pub const NGX_SLEEP_MS_NAME: &str = "ngx::sleep_ms";
 
+pub const NGX_SEMAPHORE_NEW_NAME: &str = "ngx::semaphore::new";
+pub const NGX_SEMAPHORE_WAIT_NAME: &str = "ngx::semaphore::wait";
+pub const NGX_SEMAPHORE_POST_NAME: &str = "ngx::semaphore::post";
+pub const NGX_SEMAPHORE_COUNT_NAME: &str = "ngx::semaphore::count";
+
+/// Resource type key of the VM-local semaphore handle entry.
+///
+/// The bare `ngx::semaphore` namespace marker is deliberately **not** a
+/// callable and must never be catalogued as one.
+pub const NGX_SEMAPHORE_RESOURCE_KEY: &str = "ngx.semaphore";
+
 pub const NGX_ESCAPE_URI_NAME: &str = "ngx::escape_uri";
 pub const NGX_UNESCAPE_URI_NAME: &str = "ngx::unescape_uri";
 pub const NGX_ENCODE_ARGS_NAME: &str = "ngx::encode_args";
@@ -187,6 +198,7 @@ impl fmt::Display for NgxPhase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostFamily {
     Timer,
+    Semaphore,
     Codec,
     Time,
     Meta,
@@ -212,6 +224,7 @@ pub enum HostSyncKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostCapability {
     Timer,
+    Semaphore,
     Codec,
     Time,
     Meta,
@@ -370,6 +383,7 @@ const PHASE_TIME: &[NgxPhase] = &[
 ];
 
 const TIMER_CAPABILITIES: &[HostCapability] = &[HostCapability::Timer];
+const SEMAPHORE_CAPABILITIES: &[HostCapability] = &[HostCapability::Semaphore];
 const CODEC_CAPABILITIES: &[HostCapability] = &[HostCapability::Codec];
 const TIME_CAPABILITIES: &[HostCapability] = &[HostCapability::Time];
 const META_CAPABILITIES: &[HostCapability] = &[HostCapability::Meta];
@@ -384,6 +398,7 @@ const CONTROL_CAPABILITIES: &[HostCapability] = &[HostCapability::Control];
 const SHARED_DICT_CAPABILITIES: &[HostCapability] = &[HostCapability::SharedDict];
 const COSOCKET_CAPABILITIES: &[HostCapability] = &[HostCapability::Cosocket];
 const PHASE_SOCKET_UDP: &[NgxPhase] = SLEEP_PHASES;
+const PHASE_SEMAPHORE: &[NgxPhase] = &[NgxPhase::Access, NgxPhase::Content];
 
 /// `ngx.req.get_method` contexts from OpenResty v0.10.29.
 const PHASE_REQ_GET_METHOD: &[NgxPhase] = &[
@@ -684,6 +699,38 @@ const MANIFEST: &[HostManifestEntry] = &[
         phases: SLEEP_PHASES,
         capabilities: TIMER_CAPABILITIES,
         openresty_name: "ngx.sleep",
+    },
+    HostManifestEntry {
+        name: NGX_SEMAPHORE_NEW_NAME,
+        family: HostFamily::Semaphore,
+        sync: HostSyncKind::Sync,
+        phases: PHASE_SEMAPHORE,
+        capabilities: SEMAPHORE_CAPABILITIES,
+        openresty_name: "ngx.semaphore.new",
+    },
+    HostManifestEntry {
+        name: NGX_SEMAPHORE_WAIT_NAME,
+        family: HostFamily::Semaphore,
+        sync: HostSyncKind::Async,
+        phases: PHASE_SEMAPHORE,
+        capabilities: SEMAPHORE_CAPABILITIES,
+        openresty_name: "ngx.semaphore.wait",
+    },
+    HostManifestEntry {
+        name: NGX_SEMAPHORE_POST_NAME,
+        family: HostFamily::Semaphore,
+        sync: HostSyncKind::Sync,
+        phases: PHASE_SEMAPHORE,
+        capabilities: SEMAPHORE_CAPABILITIES,
+        openresty_name: "ngx.semaphore.post",
+    },
+    HostManifestEntry {
+        name: NGX_SEMAPHORE_COUNT_NAME,
+        family: HostFamily::Semaphore,
+        sync: HostSyncKind::Sync,
+        phases: PHASE_SEMAPHORE,
+        capabilities: SEMAPHORE_CAPABILITIES,
+        openresty_name: "ngx.semaphore.count",
     },
     codec_entry(NGX_ESCAPE_URI_NAME, "ngx.escape_uri", PHASE_ESCAPE_URI),
     codec_entry(
@@ -1573,6 +1620,19 @@ pub fn tls_clientcert_resource_key() -> ResourceTypeKey {
         .expect("ngx.socket.tls.clientcert is a valid resource type key")
 }
 
+pub fn semaphore_resource_key() -> ResourceTypeKey {
+    ResourceTypeKey::new(NGX_SEMAPHORE_RESOURCE_KEY)
+        .expect("ngx.semaphore is a valid resource type key")
+}
+
+fn semaphore_param() -> HostParamSchema {
+    HostParamSchema::with_passing(
+        "sem",
+        HostTypeSchema::Resource(semaphore_resource_key()),
+        HostParamPassing::Borrow,
+    )
+}
+
 fn udp_sock_param() -> HostParamSchema {
     HostParamSchema::with_passing(
         "sock",
@@ -1675,6 +1735,32 @@ fn schema_for(name: &str) -> HostFunctionSchema {
     match name {
         NGX_SLEEP_NAME => sleep_schema(),
         NGX_SLEEP_MS_NAME => sleep_ms_schema(),
+        NGX_SEMAPHORE_NEW_NAME => HostFunctionSchema::with_return(
+            NGX_SEMAPHORE_NEW_NAME,
+            vec![HostParamSchema::value("count", HostTypeSchema::Int)],
+            HostTypeSchema::Resource(semaphore_resource_key()),
+        ),
+        NGX_SEMAPHORE_WAIT_NAME => HostFunctionSchema::with_return(
+            NGX_SEMAPHORE_WAIT_NAME,
+            vec![
+                semaphore_param(),
+                HostParamSchema::value("timeout", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Bool,
+        ),
+        NGX_SEMAPHORE_POST_NAME => HostFunctionSchema::with_return(
+            NGX_SEMAPHORE_POST_NAME,
+            vec![
+                semaphore_param(),
+                HostParamSchema::value("count", HostTypeSchema::Unknown),
+            ],
+            HostTypeSchema::Null,
+        ),
+        NGX_SEMAPHORE_COUNT_NAME => HostFunctionSchema::with_return(
+            NGX_SEMAPHORE_COUNT_NAME,
+            vec![semaphore_param()],
+            HostTypeSchema::Int,
+        ),
         NGX_ESCAPE_URI_NAME => HostFunctionSchema::with_return(
             NGX_ESCAPE_URI_NAME,
             vec![
@@ -2351,6 +2437,10 @@ pub fn ngx_host_catalog() -> HostApiCatalog {
         tls_clientcert_resource_key(),
         "VM-owned TLS client certificate and private key",
     ));
+    builder.resource(ResourceTypeSchema::new(
+        semaphore_resource_key(),
+        "VM-local handle to a worker-owned counting semaphore",
+    ));
     for entry in MANIFEST {
         builder.function(schema_for(entry.name));
     }
@@ -2465,7 +2555,9 @@ fn log_family_allowed(family: HostFamily) -> bool {
         | HostFamily::RequestCtx
         | HostFamily::SharedDict
         | HostFamily::Response => true,
-        HostFamily::Timer | HostFamily::Cosocket | HostFamily::Control => false,
+        HostFamily::Timer | HostFamily::Semaphore | HostFamily::Cosocket | HostFamily::Control => {
+            false
+        }
     }
 }
 
@@ -2481,6 +2573,7 @@ fn log_capability_allowed(cap: HostCapability) -> bool {
         | HostCapability::SharedDict
         | HostCapability::ResponseRead => true,
         HostCapability::Timer
+        | HostCapability::Semaphore
         | HostCapability::Cosocket
         | HostCapability::Control
         | HostCapability::RequestWrite
