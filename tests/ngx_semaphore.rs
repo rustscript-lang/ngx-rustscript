@@ -500,7 +500,7 @@ fn request_cleanup_releases_parked_waits_and_the_worker_handle() {
     assert_eq!(
         live_semaphore_count(),
         0,
-        "dropping the request VM removes the last semaphore handle"
+        "dropping the request-owned VM removes its VM-local semaphore handle"
     );
 }
 

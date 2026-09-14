@@ -45,10 +45,11 @@ fail-closed.**
 
 The semaphore landing passed the request-resource escape and reload
 budgets: the worker registry is `thread_local` (one registry per worker),
-ids are never reused, the request VM only holds a typed handle entry in
-its **own** table, waits capture owned state plus an owned timeout, and
-worker `exit_process` closes live semaphores before the Tokio runtime is
-dropped. Every other row above is still fail-closed.
+ids are never reused, and the current executing VM holds a typed handle entry
+in its **own** table. Sync-only programs use a pooled VM; programs that use
+async `wait` use request-owned `AccessExec`. Waits capture owned state plus an
+owned timeout, and worker `exit_process` closes live semaphores before the
+Tokio runtime is dropped. Every other row above is still fail-closed.
 
 Contract tests: `tests/ngx_scheduler_contract.rs` (fail-closed gate),
 `tests/ngx_semaphore.rs` (landed family).
@@ -317,7 +318,7 @@ Public callables: `ngx::semaphore::new(count)`,
 `ngx::semaphore::count(sem)`. The bare `ngx::semaphore` marker is **not**
 a callable. Resource type key `ngx.semaphore`. Access + content only.
 
-Worker lifetime addendum (worker-owned state versus the request VM
+Worker lifetime addendum (worker-owned state versus the current executing VM
 table):
 
 - The permit counter, the FIFO waiter queue, and the closed flag live in
@@ -340,9 +341,10 @@ table):
 - Closing a semaphore drains its waiter queue while taking and waking each
   registered waker. Closed wait futures return a typed closed error, and
   guard cleanup remains idempotent after the queue is drained.
-- Releasing a VM-local handle removes the worker entry; release is idempotent.
-  An in-flight wait keeps its own state alive, so it can never observe a
-  recycled id.
+- Each `new` creates one VM-local handle. Releasing that handle removes the
+  worker entry; release is idempotent. This is a single-handle lifecycle
+  without a shared handle count. An in-flight wait keeps its own state alive,
+  so it can never observe a recycled id.
 - Sync-only `new`/`post`/`count` programs stay on the pooled VM path. An
   async `wait` program selects request-owned `AccessExec` through its
   `HostSyncKind::Async` manifest entry. VM reset or drop closes every
@@ -596,12 +598,12 @@ configuration compile.
 
 ## Request resource escape prevention
 
-Escape means a detached or pool context using:
+Escape means a detached or pooled context using:
 
 - `*mut ngx_http_request_t`
 - request pool pointers
 - `RequestLocalCtx` of the creator
-- UDP/TCP/TLS/semaphore `ResourceHandle` minted in the request VM
+- UDP/TCP/TLS/semaphore `ResourceHandle` minted in a different VM
 - `Value::Callable` bound to the request VM
 - `HostFutureOutput::VmCompletion` closing over `&mut` request `Vm`
 
@@ -615,17 +617,20 @@ Prevention:
    invalidates the parent handle (exactly-once move).
 3. Wakers stay identity-only.
 4. `ngx::ctx` already rejects callables; keep that.
-5. A wait future owns worker state, not a handle: the semaphore `i64`
-   stays in the creating VM's table, and every host resolves it through
-   that table's typed `SemaphoreHandle` entry, so a token minted for
-   another table fails closed instead of reaching an entry.
+5. Semaphore hosts resolve the `i64` only through the current executing VM's
+   typed table. `new` inserts the entry there, and `post`/`count`/`wait` use
+   that same table. A sync-only program may use a pooled VM; a program using
+   async `wait` uses request-owned `AccessExec`. The wait future captures
+   worker state, not the handle, so it never carries a VM-local token across
+   the async boundary.
 
 Current `ResourceHandle::from_raw` will accept any well-shaped `u64`.
-That is forgeable across VMs on its own. The landed semaphore family
-stays safe because every handle is resolved through
-`Vm::host_context().borrow_resource` in the **calling** VM's own typed
-table, so a forged or foreign token fails closed
-(`resource_handle_wrong_table`); cosocket handles resolve the same way.
+That parse step does not transfer ownership across VMs. The landed semaphore
+family stays safe because every handle is then resolved through
+`Vm::host_context().borrow_resource` in the **calling** VM's own typed table.
+A token copied from a foreign or reset VM therefore fails closed
+(`resource_handle_wrong_table`) instead of reaching an entry; cosocket handles
+resolve the same way.
 Callable families cannot ship on the raw integer ABI alone: they would
 need an unforgeable identity, because a callable is not a table entry
 with an arena and a generation to validate.

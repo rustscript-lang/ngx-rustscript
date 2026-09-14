@@ -9,9 +9,11 @@ unlock `ngx.thread`, `ngx.timer`, `ngx.on_abort`, or
 `ngx.run_worker_thread`.
 
 Permit counters and the FIFO waiter queue live in a worker registry
-(`thread_local`, one registry per nginx worker). A request VM only holds
-a typed `resource<ngx.semaphore>` entry in **its own** resource table,
-so a handle is visible to the VM that created it and to nothing else.
+(`thread_local`, one registry per nginx worker). The current executing VM
+holds a typed `resource<ngx.semaphore>` entry in **its own** resource table.
+Sync-only programs use the pooled VM path; a program using async `wait` uses
+the request-owned VM path. A raw handle value does not transfer that entry to
+another VM.
 Wait futures hold worker state, an owned timeout, and a drop guard —
 never a request, pool, `Vm`, `RequestLocalCtx`, or raw pointer. The
 future is polled by the existing `NgxAsyncBridge`, and waking a waiter
@@ -59,7 +61,7 @@ the closed Log allowlist also rejects the family and capability.
 | Client close / 499 / request end | The bridge drops the future; the drop guard removes the FIFO entry exactly once and the reservation is released. |
 | Typed cancellation (`OperationCancelReason`) | Uses the existing bridge `request_cancel_op`/`poll_cancel_op` protocol; no new cancellation protocol or eventfd. |
 | Worker `exit_process` | Live semaphores are closed, every waiter is woken, the registry is emptied, and parked waits fail closed. Ids are never reused. |
-| Last handle removal | Closing the last VM-local handle removes the worker entry; an in-flight wait keeps its own state alive and cannot observe a recycled identity. |
+| VM-local handle release | Each `new` creates one VM-local handle. Releasing that handle removes the worker entry; repeated release is a no-op. This is a single-handle lifecycle. An in-flight wait keeps its own state alive and cannot observe a recycled identity. |
 | Double cleanup | Deregistration is idempotent: a granted waiter already left the queue, and a second release is a no-op. Permits are consumed only at grant time, so cleanup can never leak or double-release one. |
 
 ## Budgets

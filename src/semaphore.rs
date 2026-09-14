@@ -2,10 +2,11 @@
 //!
 //! OpenResty semaphores are worker-local objects, not request objects. Here the
 //! permit counter and the FIFO waiter queue live in a worker-owned registry
-//! (`thread_local`, one registry per nginx worker) and each request VM only
-//! holds a typed [`SemaphoreHandle`] resource entry in **its own** resource
-//! table. The script sees that entry as an `i64` handle, exactly like
-//! `ngx.socket.udp` / `ngx.socket.tcp`.
+//! (`thread_local`, one registry per nginx worker), while the current executing
+//! VM holds a typed [`SemaphoreHandle`] resource entry in **its own** resource
+//! table. A sync-only program may use a pooled VM; a program using async
+//! `wait` stays on the request-owned VM path. The script sees that entry as an
+//! `i64` handle, exactly like `ngx.socket.udp` / `ngx.socket.tcp`.
 //!
 //! # Ownership and escape rules
 //!
@@ -1170,9 +1171,21 @@ mod tests {
     fn pooled_vm_reuse_closes_semaphore_handles() {
         crate::vm_pool::reset_test_state();
         shutdown_current();
-        let program =
-            crate::config::compile_rss_source("use ngx;\nlet s = ngx::semaphore::new(1);\n")
-                .expect("compile pooled semaphore program");
+        // `vm_pool::run` exposes terminal status only; a mismatch raises a
+        // runtime error before the expected sentinel reaches `Halted`.
+        let program = crate::config::compile_rss_source(
+            r#"use ngx;
+let s = ngx::semaphore::new(1);
+ngx::semaphore::post(s, 2);
+let observed = ngx::semaphore::count(s);
+let sentinel = 3;
+if observed != sentinel {
+    1 / 0;
+}
+sentinel;
+"#,
+        )
+        .expect("compile pooled semaphore program");
         assert!(!crate::config::program_requires_request_state(&program));
 
         for _ in 0..2 {
@@ -1188,7 +1201,13 @@ mod tests {
         }
         assert_eq!(crate::vm_pool::created_count(), 1);
         crate::vm_pool::reset_test_state();
+        assert_eq!(
+            live_semaphore_count(),
+            0,
+            "resetting the reused pool must leave the worker registry empty"
+        );
         shutdown_current();
+        assert_eq!(live_semaphore_count(), 0);
     }
 
     #[test]
