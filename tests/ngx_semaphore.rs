@@ -311,7 +311,7 @@ fn script_round_trip_uses_openresty_count_semantics() {
     assert_eq!(
         live_semaphore_count(),
         0,
-        "a released VM table removes the last handle"
+        "a released VM table removes the semaphore handle"
     );
 }
 
@@ -360,6 +360,27 @@ fn forged_integer_handles_never_compile() {
             "{source} must name the resource typing failure, got {text}"
         );
     }
+}
+
+#[test]
+fn sync_only_semaphore_program_stays_on_pooled_path() {
+    let program = compile(
+        "use ngx;\nlet s = ngx::semaphore::new(1);\nngx::semaphore::post(s, 1);\nngx::semaphore::count(s);\n",
+    );
+    assert!(
+        !ngx_rustscript::config::program_requires_request_state(&program),
+        "sync-only semaphore imports must stay on the pooled VM path"
+    );
+}
+
+#[test]
+fn async_semaphore_wait_program_uses_request_owned_path() {
+    let program =
+        compile("use ngx;\nlet s = ngx::semaphore::new(0);\nngx::semaphore::wait(s, null);\n");
+    assert!(
+        ngx_rustscript::config::program_requires_request_state(&program),
+        "async semaphore wait must select the request-owned VM path"
+    );
 }
 
 #[test]

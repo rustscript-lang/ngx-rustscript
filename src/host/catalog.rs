@@ -28,7 +28,7 @@ pub const NGX_SEMAPHORE_COUNT_NAME: &str = "ngx::semaphore::count";
 ///
 /// The bare `ngx::semaphore` namespace marker is deliberately **not** a
 /// callable and must never be catalogued as one.
-pub const NGX_SEMAPHORE_RESOURCE_KEY: &str = "ngx.semaphore";
+pub use crate::semaphore::{NGX_SEMAPHORE_RESOURCE_KEY, semaphore_resource_key};
 
 pub const NGX_ESCAPE_URI_NAME: &str = "ngx::escape_uri";
 pub const NGX_UNESCAPE_URI_NAME: &str = "ngx::unescape_uri";
@@ -700,38 +700,26 @@ const MANIFEST: &[HostManifestEntry] = &[
         capabilities: TIMER_CAPABILITIES,
         openresty_name: "ngx.sleep",
     },
-    HostManifestEntry {
-        name: NGX_SEMAPHORE_NEW_NAME,
-        family: HostFamily::Semaphore,
-        sync: HostSyncKind::Sync,
-        phases: PHASE_SEMAPHORE,
-        capabilities: SEMAPHORE_CAPABILITIES,
-        openresty_name: "ngx.semaphore.new",
-    },
-    HostManifestEntry {
-        name: NGX_SEMAPHORE_WAIT_NAME,
-        family: HostFamily::Semaphore,
-        sync: HostSyncKind::Async,
-        phases: PHASE_SEMAPHORE,
-        capabilities: SEMAPHORE_CAPABILITIES,
-        openresty_name: "ngx.semaphore.wait",
-    },
-    HostManifestEntry {
-        name: NGX_SEMAPHORE_POST_NAME,
-        family: HostFamily::Semaphore,
-        sync: HostSyncKind::Sync,
-        phases: PHASE_SEMAPHORE,
-        capabilities: SEMAPHORE_CAPABILITIES,
-        openresty_name: "ngx.semaphore.post",
-    },
-    HostManifestEntry {
-        name: NGX_SEMAPHORE_COUNT_NAME,
-        family: HostFamily::Semaphore,
-        sync: HostSyncKind::Sync,
-        phases: PHASE_SEMAPHORE,
-        capabilities: SEMAPHORE_CAPABILITIES,
-        openresty_name: "ngx.semaphore.count",
-    },
+    semaphore_entry(
+        NGX_SEMAPHORE_NEW_NAME,
+        HostSyncKind::Sync,
+        "ngx.semaphore.new",
+    ),
+    semaphore_entry(
+        NGX_SEMAPHORE_WAIT_NAME,
+        HostSyncKind::Async,
+        "ngx.semaphore.wait",
+    ),
+    semaphore_entry(
+        NGX_SEMAPHORE_POST_NAME,
+        HostSyncKind::Sync,
+        "ngx.semaphore.post",
+    ),
+    semaphore_entry(
+        NGX_SEMAPHORE_COUNT_NAME,
+        HostSyncKind::Sync,
+        "ngx.semaphore.count",
+    ),
     codec_entry(NGX_ESCAPE_URI_NAME, "ngx.escape_uri", PHASE_ESCAPE_URI),
     codec_entry(
         NGX_UNESCAPE_URI_NAME,
@@ -1585,6 +1573,21 @@ const fn shared_dict_entry(
     }
 }
 
+const fn semaphore_entry(
+    name: &'static str,
+    sync: HostSyncKind,
+    openresty_name: &'static str,
+) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::Semaphore,
+        sync,
+        phases: PHASE_SEMAPHORE,
+        capabilities: SEMAPHORE_CAPABILITIES,
+        openresty_name,
+    }
+}
+
 const fn cosocket_entry(
     name: &'static str,
     sync: HostSyncKind,
@@ -1618,11 +1621,6 @@ pub fn tls_trustedstore_resource_key() -> ResourceTypeKey {
 pub fn tls_clientcert_resource_key() -> ResourceTypeKey {
     ResourceTypeKey::new(NGX_SOCKET_TLS_CLIENTCERT_RESOURCE_KEY)
         .expect("ngx.socket.tls.clientcert is a valid resource type key")
-}
-
-pub fn semaphore_resource_key() -> ResourceTypeKey {
-    ResourceTypeKey::new(NGX_SEMAPHORE_RESOURCE_KEY)
-        .expect("ngx.semaphore is a valid resource type key")
 }
 
 fn semaphore_param() -> HostParamSchema {

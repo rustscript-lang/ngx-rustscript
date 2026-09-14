@@ -54,6 +54,11 @@ use vm::{
 /// Resource type key of the VM-local semaphore handle entry.
 pub const NGX_SEMAPHORE_RESOURCE_KEY: &str = "ngx.semaphore";
 
+pub fn semaphore_resource_key() -> ResourceTypeKey {
+    ResourceTypeKey::new(NGX_SEMAPHORE_RESOURCE_KEY)
+        .expect("ngx.semaphore is a valid resource type key")
+}
+
 /// Maximum permits a single semaphore can hold (and post in one call).
 pub const MAX_SEMAPHORE_COUNT: u64 = 1_000_000;
 
@@ -111,21 +116,21 @@ impl SemaphoreState {
     }
 
     /// Readily available permits minus queued FIFO waiters, matching
-    /// `ngx.semaphore:count()`.
-    pub(crate) fn count(&self) -> i64 {
+    /// `ngx.semaphore:count()`. Closed semaphores fail closed.
+    pub(crate) fn count(&self) -> VmResult<i64> {
         let inner = lock(&self.inner);
-        inner.count as i64 - inner.waiters.len() as i64
+        if inner.closed {
+            return Err(VmError::HostError(
+                "semaphore is closed: worker is shutting down".to_string(),
+            ));
+        }
+        Ok(inner.count as i64 - inner.waiters.len() as i64)
     }
 
     /// Number of queued waiters (test and shutdown observability).
     #[cfg(test)]
     pub(crate) fn waiting_count(&self) -> usize {
         lock(&self.inner).waiters.len()
-    }
-
-    /// True once the worker closed this semaphore.
-    pub(crate) fn is_closed(&self) -> bool {
-        lock(&self.inner).closed
     }
 
     /// Adds `amount` permits and wakes queued waiters in FIFO order.
@@ -164,12 +169,11 @@ impl SemaphoreState {
     ///
     /// Runs in a single critical section so a concurrent `post` can never be
     /// lost between "check count" and "register waker".
-    fn acquire_or_register(&self, waiter_id: u64, waker: Option<&Waker>) -> Acquire {
+    fn acquire_or_register(&self, waiter_id: u64, waker: &Waker) -> Acquire {
         let mut wakes = Vec::new();
         let outcome = {
             let mut inner = lock(&self.inner);
             if inner.closed {
-                inner.waiters.retain(|waiter| waiter.id != waiter_id);
                 Acquire::Closed
             } else if inner.count > 0 {
                 let front = inner
@@ -222,8 +226,8 @@ impl SemaphoreState {
         {
             let mut inner = lock(&self.inner);
             inner.closed = true;
-            for waiter in inner.waiters.iter_mut() {
-                if let Some(waker) = waiter.waker.take() {
+            for waiter in inner.waiters.drain(..) {
+                if let Some(waker) = waiter.waker {
                     wakes.push(waker);
                 }
             }
@@ -244,20 +248,18 @@ impl fmt::Debug for SemaphoreState {
     }
 }
 
-fn register_waiter(inner: &mut SemaphoreInner, waiter_id: u64, waker: Option<&Waker>) {
+fn register_waiter(inner: &mut SemaphoreInner, waiter_id: u64, waker: &Waker) {
     if let Some(waiter) = inner
         .waiters
         .iter_mut()
         .find(|waiter| waiter.id == waiter_id)
     {
-        if let Some(waker) = waker {
-            waiter.waker = Some(waker.clone());
-        }
+        waiter.waker = Some(waker.clone());
         return;
     }
     inner.waiters.push_back(Waiter {
         id: waiter_id,
-        waker: waker.cloned(),
+        waker: Some(waker.clone()),
     });
 }
 
@@ -281,7 +283,6 @@ fn wake_all(wakes: Vec<Waker>) {
 pub(crate) struct SemaphoreHandle {
     id: u64,
     state: Arc<SemaphoreState>,
-    released: bool,
 }
 
 impl SemaphoreHandle {
@@ -289,7 +290,6 @@ impl SemaphoreHandle {
         Self {
             id: state.id(),
             state,
-            released: false,
         }
     }
 
@@ -301,23 +301,23 @@ impl SemaphoreHandle {
     pub(crate) fn state(&self) -> &Arc<SemaphoreState> {
         &self.state
     }
+
+    fn release(&self) {
+        release_worker_handle(self.id);
+    }
 }
 
 impl fmt::Debug for SemaphoreHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SemaphoreHandle")
             .field("id", &self.id)
-            .field("released", &self.released)
             .finish()
     }
 }
 
 impl Drop for SemaphoreHandle {
     fn drop(&mut self) {
-        if !self.released {
-            self.released = true;
-            release_worker_handle(self.id);
-        }
+        self.release();
     }
 }
 
@@ -326,29 +326,18 @@ impl HostResource for SemaphoreHandle {
     where
         Self: Sized,
     {
-        Some(
-            ResourceTypeKey::new(NGX_SEMAPHORE_RESOURCE_KEY)
-                .expect("ngx.semaphore is a valid resource type key"),
-        )
+        Some(semaphore_resource_key())
     }
 
     fn begin_close(&mut self, _reason: ResourceCloseReason) -> ResourceResult<CloseProgress> {
-        if !self.released {
-            self.released = true;
-            release_worker_handle(self.id);
-        }
+        self.release();
         Ok(CloseProgress::Ready)
     }
 }
 
 struct WorkerSemaphores {
     next_id: u64,
-    live: HashMap<u64, LiveSemaphore>,
-}
-
-struct LiveSemaphore {
-    state: Arc<SemaphoreState>,
-    handles: usize,
+    live: HashMap<u64, Arc<SemaphoreState>>,
 }
 
 thread_local! {
@@ -377,13 +366,7 @@ pub(crate) fn create_worker_semaphore(count: u64) -> VmResult<Arc<SemaphoreState
             VmError::HostError("ngx::semaphore::new exhausted worker semaphore ids".into())
         })?;
         let state = Arc::new(SemaphoreState::new(id, count));
-        registry.live.insert(
-            id,
-            LiveSemaphore {
-                state: Arc::clone(&state),
-                handles: 1,
-            },
-        );
+        registry.live.insert(id, Arc::clone(&state));
         Ok(state)
     })
 }
@@ -391,25 +374,14 @@ pub(crate) fn create_worker_semaphore(count: u64) -> VmResult<Arc<SemaphoreState
 /// Looks up a live worker semaphore by id.
 #[cfg(test)]
 pub(crate) fn lookup_worker_semaphore(id: u64) -> Option<Arc<SemaphoreState>> {
-    REGISTRY.with(|slot| {
-        slot.borrow()
-            .live
-            .get(&id)
-            .map(|entry| Arc::clone(&entry.state))
-    })
+    REGISTRY.with(|slot| slot.borrow().live.get(&id).map(Arc::clone))
 }
 
-/// Releases one VM-local handle. The last handle removes the worker entry.
+/// Removes the worker entry for one VM-local handle. Repeated calls are no-ops.
 pub(crate) fn release_worker_handle(id: u64) {
     REGISTRY.with(|slot| {
         let mut registry = slot.borrow_mut();
-        let Some(entry) = registry.live.get_mut(&id) else {
-            return;
-        };
-        entry.handles = entry.handles.saturating_sub(1);
-        if entry.handles == 0 {
-            registry.live.remove(&id);
-        }
+        registry.live.remove(&id);
     })
 }
 
@@ -432,7 +404,7 @@ pub fn shutdown_current() {
         registry
             .live
             .drain()
-            .map(|(_, live)| live.state)
+            .map(|(_, state)| state)
             .collect::<Vec<_>>()
     });
     for state in states {
@@ -456,7 +428,6 @@ pub(crate) fn parse_new_count(value: i64, host: &str) -> VmResult<u64> {
             "{host} expects a non-negative integer count, got {value}"
         ))
     })?;
-    validate_count(count, host)?;
     Ok(count)
 }
 
@@ -659,10 +630,7 @@ impl std::future::Future for SemaphoreWaitFuture {
                 "ngx::semaphore::wait future polled after completion".to_string(),
             )));
         }
-        match this
-            .state
-            .acquire_or_register(this.guard.id, Some(cx.waker()))
-        {
+        match this.state.acquire_or_register(this.guard.id, cx.waker()) {
             Acquire::Granted => return Poll::Ready(this.finish(WaitOutcome::Acquired)),
             Acquire::Closed => {
                 return Poll::Ready(Err(VmError::HostError(
@@ -716,9 +684,8 @@ mod tests {
     #[test]
     fn creates_worker_semaphore_with_validated_initial_count() {
         let state = fresh_state(3);
-        assert_eq!(state.count(), 3);
+        assert_eq!(state.count().expect("count"), 3);
         assert_eq!(state.waiting_count(), 0);
-        assert!(!state.is_closed());
         assert_eq!(live_semaphore_count(), 1);
         assert_eq!(live_semaphore_ids(), vec![state.id()]);
         shutdown_current();
@@ -748,7 +715,7 @@ mod tests {
         assert_eq!(wakes.load(Ordering::SeqCst), 0, "zero post wakes nobody");
 
         assert_eq!(state.post(2).expect("post"), 2);
-        assert_eq!(state.count(), 1);
+        assert_eq!(state.count().expect("count"), 1);
         assert_eq!(
             wakes.load(Ordering::SeqCst),
             1,
@@ -758,7 +725,7 @@ mod tests {
             waiter.as_mut().poll(&mut cx),
             Poll::Ready(Ok(true))
         ));
-        assert_eq!(state.count(), 1);
+        assert_eq!(state.count().expect("count"), 1);
         assert_eq!(state.waiting_count(), 0);
         shutdown_current();
     }
@@ -769,7 +736,7 @@ mod tests {
         assert_eq!(state.post(1).expect("exact ceiling"), MAX_SEMAPHORE_COUNT);
         let err = state.post(1).expect_err("overflow");
         assert!(err.to_string().contains("ceiling"), "{err}");
-        assert_eq!(state.count(), MAX_SEMAPHORE_COUNT as i64);
+        assert_eq!(state.count().expect("count"), MAX_SEMAPHORE_COUNT as i64);
         shutdown_current();
     }
 
@@ -783,7 +750,7 @@ mod tests {
             waiter.as_mut().poll(&mut cx),
             Poll::Ready(Ok(true))
         ));
-        assert_eq!(state.count(), 0);
+        assert_eq!(state.count().expect("count"), 0);
         assert_eq!(
             state.waiting_count(),
             0,
@@ -811,7 +778,7 @@ mod tests {
             waiter.as_mut().poll(&mut cx),
             Poll::Ready(Ok(true))
         ));
-        assert_eq!(state.count(), 0);
+        assert_eq!(state.count().expect("count"), 0);
         shutdown_current();
     }
 
@@ -824,13 +791,13 @@ mod tests {
         let mut second = Box::pin(SemaphoreWaitFuture::new(Arc::clone(&state), None));
         assert!(matches!(first.as_mut().poll(&mut cx), Poll::Pending));
         assert!(matches!(second.as_mut().poll(&mut cx), Poll::Pending));
-        assert_eq!(state.count() as i64, -2);
+        assert_eq!(state.count().expect("count"), -2);
         assert_eq!(state.post(1).expect("post"), 1);
         assert!(matches!(
             first.as_mut().poll(&mut cx),
             Poll::Ready(Ok(true))
         ));
-        assert_eq!(state.count() as i64, -1);
+        assert_eq!(state.count().expect("count"), -1);
         shutdown_current();
     }
 
@@ -864,7 +831,7 @@ mod tests {
             "the oldest waiter must win the only permit"
         );
         assert!(matches!(third.as_mut().poll(&mut cx_three), Poll::Pending));
-        assert_eq!(state.count(), -2);
+        assert_eq!(state.count().expect("count"), -2);
 
         assert_eq!(state.post(1).expect("post"), 1);
         assert_eq!(wakes_two.load(Ordering::SeqCst), 1);
@@ -899,7 +866,7 @@ mod tests {
         drop(first);
         assert_eq!(state.waiting_count(), 1);
         assert_eq!(
-            state.count(),
+            state.count().expect("count"),
             0,
             "one permit is ready for the remaining waiter"
         );
@@ -912,7 +879,7 @@ mod tests {
             second.as_mut().poll(&mut cx_two),
             Poll::Ready(Ok(true))
         ));
-        assert_eq!(state.count(), 0);
+        assert_eq!(state.count().expect("count"), 0);
         assert_eq!(state.waiting_count(), 0);
         shutdown_current();
     }
@@ -927,10 +894,10 @@ mod tests {
             waiter.as_mut().poll(&mut cx),
             Poll::Ready(Ok(true))
         ));
-        assert_eq!(state.count(), 0);
+        assert_eq!(state.count().expect("count"), 0);
         drop(waiter);
         assert_eq!(
-            state.count(),
+            state.count().expect("count"),
             0,
             "cleanup must not release a granted permit"
         );
@@ -992,7 +959,7 @@ mod tests {
             matches!(polled, Poll::Ready(Ok(false))),
             "a zero timeout must time out without a permit, got {polled:?}"
         );
-        assert_eq!(state.count(), 0);
+        assert_eq!(state.count().expect("count"), 0);
         assert_eq!(state.waiting_count(), 0);
         drop(waiter);
         shutdown_current();
@@ -1013,7 +980,7 @@ mod tests {
             )))
             .expect("wait result");
         assert!(!outcome, "timeout must remain false at the host boundary");
-        assert_eq!(state.count(), 0);
+        assert_eq!(state.count().expect("count"), 0);
         shutdown_current();
     }
 
@@ -1053,7 +1020,11 @@ mod tests {
             0,
             "timeout must deregister the waiter"
         );
-        assert_eq!(state.count(), 0, "timeout must not consume a permit");
+        assert_eq!(
+            state.count().expect("count"),
+            0,
+            "timeout must not consume a permit"
+        );
         assert_eq!(state.post(1).expect("post"), 1);
         shutdown_current();
     }
@@ -1067,7 +1038,6 @@ mod tests {
         assert!(matches!(waiter.as_mut().poll(&mut cx), Poll::Pending));
         shutdown_current();
         assert_eq!(live_semaphore_count(), 0);
-        assert!(state.is_closed());
         assert_eq!(
             wakes.load(Ordering::SeqCst),
             1,
@@ -1088,31 +1058,37 @@ mod tests {
     }
 
     #[test]
-    fn closed_semaphore_rejects_post_and_count() {
-        let state = fresh_state(2);
+    fn close_drains_waiter_queue_immediately() {
+        let state = fresh_state(0);
+        let mut waiter = Box::pin(SemaphoreWaitFuture::new(Arc::clone(&state), None));
+        let (waker, wakes) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(waiter.as_mut().poll(&mut cx), Poll::Pending));
+
         state.close();
-        assert!(state.is_closed());
-        let err = state.post(1).expect_err("closed post");
-        assert!(err.to_string().contains("closed"), "{err}");
-        assert_eq!(
-            state.count(),
-            2,
-            "a rejected post must not change the count"
-        );
+        assert_eq!(state.waiting_count(), 0);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
         shutdown_current();
     }
 
     #[test]
-    fn registry_removes_the_entry_when_the_last_handle_is_released() {
+    fn closed_semaphore_rejects_post_and_count() {
+        let state = fresh_state(2);
+        state.close();
+        let err = state.post(1).expect_err("closed post");
+        assert!(err.to_string().contains("closed"), "{err}");
+        let err = state.count().expect_err("closed count");
+        assert!(err.to_string().contains("closed"), "{err}");
+        shutdown_current();
+    }
+
+    #[test]
+    fn handle_release_removes_the_worker_entry() {
         let state = fresh_state(1);
         let id = state.id();
         assert!(lookup_worker_semaphore(id).is_some());
         release_worker_handle(id);
-        assert_eq!(
-            live_semaphore_count(),
-            0,
-            "last-handle removal drops the entry"
-        );
+        assert_eq!(live_semaphore_count(), 0, "handle release drops the entry");
         assert!(lookup_worker_semaphore(id).is_none());
         release_worker_handle(id);
         assert_eq!(live_semaphore_count(), 0, "double release is a no-op");
@@ -1140,8 +1116,7 @@ mod tests {
         assert_eq!(live_semaphore_count(), 0);
         let second = fresh_state(1);
         assert_ne!(second.id(), first_id, "worker ids are never reused");
-        assert_eq!(second.count(), 1);
-        assert!(!second.is_closed());
+        assert_eq!(second.count().expect("count"), 1);
         shutdown_current();
     }
 
@@ -1184,24 +1159,36 @@ mod tests {
     }
 
     #[test]
-    fn wait_future_is_send_and_free_of_request_state() {
+    fn semaphore_boundary_types_are_send() {
         fn assert_send<T: Send + 'static>() {}
         assert_send::<SemaphoreWaitFuture>();
         assert_send::<SemaphoreWaitContext>();
         assert_send::<SemaphoreHandle>();
-        for name in [
-            std::any::type_name::<SemaphoreWaitFuture>(),
-            std::any::type_name::<SemaphoreWaitContext>(),
-            std::any::type_name::<SemaphoreState>(),
-        ] {
-            assert!(
-                !name.contains("ngx_http")
-                    && !name.contains("ngx_connection")
-                    && !name.contains("ngx_pool")
-                    && !name.contains("RequestLocalCtx"),
-                "semaphore types must not hold request state: {name}"
+    }
+
+    #[test]
+    fn pooled_vm_reuse_closes_semaphore_handles() {
+        crate::vm_pool::reset_test_state();
+        shutdown_current();
+        let program =
+            crate::config::compile_rss_source("use ngx;\nlet s = ngx::semaphore::new(1);\n")
+                .expect("compile pooled semaphore program");
+        assert!(!crate::config::program_requires_request_state(&program));
+
+        for _ in 0..2 {
+            assert_eq!(
+                crate::vm_pool::run(&program).expect("pooled run"),
+                vm::VmStatus::Halted
+            );
+            assert_eq!(
+                live_semaphore_count(),
+                0,
+                "pool reset must close the VM-local semaphore handle"
             );
         }
+        assert_eq!(crate::vm_pool::created_count(), 1);
+        crate::vm_pool::reset_test_state();
+        shutdown_current();
     }
 
     #[test]
@@ -1354,7 +1341,11 @@ mod tests {
             Poll::Ready(Ok(()))
         ));
         assert_eq!(vm.resume().expect("resume"), vm::VmStatus::Halted);
-        assert_eq!(state.count(), 0, "the granted permit is consumed");
+        assert_eq!(
+            state.count().expect("count"),
+            0,
+            "the granted permit is consumed"
+        );
         assert_eq!(state.waiting_count(), 0, "the grant removed the FIFO entry");
         assert_eq!(
             live_semaphore_count(),
@@ -1412,7 +1403,7 @@ mod tests {
             "cancellation must deregister the FIFO entry exactly once"
         );
         assert_eq!(
-            state.count(),
+            state.count().expect("count"),
             0,
             "cancellation must not consume or release a permit"
         );
@@ -1438,7 +1429,6 @@ mod tests {
 
         shutdown_current();
         assert_eq!(live_semaphore_count(), 0, "shutdown empties the registry");
-        assert!(state.is_closed());
 
         let noop = Waker::noop();
         let mut cx = Context::from_waker(noop);

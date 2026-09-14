@@ -80,10 +80,9 @@ pub fn post(vm: &mut Vm, sem: i64, count: Value) -> VmResult<CallOutcome> {
 #[pd_host_function(name = "ngx::semaphore::count")]
 pub fn count(vm: &mut Vm, sem: i64) -> VmResult<CallOutcome> {
     let state = semaphore::resolve_handle(vm, sem, NGX_SEMAPHORE_COUNT_NAME)?;
-    if state.is_closed() {
-        return Err(vm::VmError::HostError(format!(
-            "{NGX_SEMAPHORE_COUNT_NAME}: semaphore is closed: worker is shutting down"
-        )));
-    }
-    ret(state.count())
+    ret(
+        state
+            .count()
+            .map_err(|error| named(NGX_SEMAPHORE_COUNT_NAME, error))?,
+    )
 }

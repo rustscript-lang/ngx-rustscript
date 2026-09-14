@@ -62,9 +62,13 @@ and never change the already-sent response. `Waiting` logs
 Log validation. Unknown names, phase-forbidden names, arity, and type
 mismatches fail distinctly at `nginx -t` / reload.
 
-`ngx::thread::{spawn,wait,kill}`, `ngx::timer::{at,every}`,
-`ngx::on_abort`, `ngx::semaphore::*`, and `ngx::run_worker_thread` are
-not production hosts; configuration compile rejects those imports.
+`ngx::thread::{spawn,wait,kill}`, `ngx::timer::{at,every,pending_count,running_count}`,
+`ngx::on_abort`, and `ngx::run_worker_thread` are not production hosts;
+configuration compile rejects those imports. The production
+`ngx::semaphore::{new,wait,post,count}` family uses a worker-owned registry:
+sync-only calls can run on a pooled VM, while async `wait` uses the
+request-owned host-future bridge. Its VM-local handle is closed on reset or
+drop, and worker shutdown closes the state and wakes parked waiters.
 
 ## Request isolation
 

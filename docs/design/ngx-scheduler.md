@@ -62,9 +62,10 @@ ngx-rustscript runs one RustScript program per configured phase slot
 nginx worker main thread
   AccessHandler / ContentHandler / LogHandler
     LocationConf.program : Arc<Program>          // config-time, shared
-    no request-state imports (pure-sync) -> worker VM pool
+    no request-state imports (pure-sync, including semaphore new/post/count)
+        -> worker VM pool
                                              // Vm::new_shared, reset_for_reuse
-    async / ctx / cosocket / semaphore / mutation / control
+    async / ctx / cosocket / semaphore wait / mutation / control
                          -> request-owned AccessExec
                               Vm on worker main thread
                               NgxAsyncBridge : HostOpId -> HostFuture
@@ -336,20 +337,22 @@ table):
   cancellation uses the existing bridge `request_cancel_op` /
   `poll_cancel_op` protocol; there is no new cancellation protocol, no
   second eventfd, and no scheduler callback engine.
-- Closing the **last** VM-local handle removes the worker entry
-  (last-handle removal). An in-flight wait keeps its own state alive, so
-  it can never observe a recycled id.
+- Closing a semaphore drains its waiter queue while taking and waking each
+  registered waker. Closed wait futures return a typed closed error, and
+  guard cleanup remains idempotent after the queue is drained.
+- Releasing a VM-local handle removes the worker entry; release is idempotent.
+  An in-flight wait keeps its own state alive, so it can never observe a
+  recycled id.
+- Sync-only `new`/`post`/`count` programs stay on the pooled VM path. An
+  async `wait` program selects request-owned `AccessExec` through its
+  `HostSyncKind::Async` manifest entry. VM reset or drop closes every
+  VM-local semaphore handle, so reuse leaves no worker registry entry.
 - Worker `exit_process` (`WorkerRuntime::shutdown`) closes every live
   semaphore, wakes every waiter, empties the registry, and only then drops
   the Tokio runtime. Ids are never reused across a worker restart.
 - Configuration reload does not touch semaphores: they are worker objects
   with no `Program` identity, and a new `Arc<Program>` cannot rebind a
   live handle. Handles die with their VM table.
-- Importing any semaphore host selects the request-owned path: the
-  routing metadata treats the `Semaphore` family as request-state
-  required (`src/config.rs`), so `new`/`post`/`count` never run on the
-  pooled sync VM that has no request-table lifetime of its own.
-
 Validation, phases, the negative-depth `count` mapping, budgets, and the
 full event table are in [docs/api/semaphore.md](../api/semaphore.md) and
 [Out of scope](../ngx-api-compatibility.md#out-of-scope).

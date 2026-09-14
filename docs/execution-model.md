@@ -26,18 +26,21 @@ eventfd bridge.
 On each request the access (or content) handler leases a
 worker-thread-local VM via `Vm::new_shared(Arc<Program>)`.
 
-**Pooled, import-free programs** run to `VmStatus::Halted` and return
-`NGX_OK` so the next phase proceeds. After `Halted` and after a
+**Pooled programs without request-state requirements** run to
+`VmStatus::Halted` and return `NGX_OK` so the next phase proceeds. This
+includes import-free and pure-sync host programs, including sync-only
+`ngx::semaphore::new`, `post`, and `count`. After `Halted` and after a
 recoverable runtime error the VM is reset with `Vm::reset_for_reuse`
 and parked only when `Vm::is_reusable` is true. Idle pool size is 4.
-VM errors and unexpected `Waiting` on import-free programs fail the
-request with 500.
+VM errors and unexpected `Waiting` on pooled programs fail the request
+with 500.
 
 **Request-owned programs** bind a request-local VM instead of the pool
 when the compiled script uses pd-vm I/O, HTTP client, SQLite,
-`ngx::sleep`, `ngx::sleep_ms`, UDP/TCP cosocket, `ngx.ctx`, or
-mutation/control capabilities (`RequestWrite`, `ResponseWrite`,
-`Control`). Pure-sync request-read stays pooled.
+`ngx::sleep`, `ngx::sleep_ms`, UDP/TCP cosocket, `ngx.ctx`, an async
+`ngx::semaphore::wait`, or mutation/control capabilities
+(`RequestWrite`, `ResponseWrite`, `Control`). Pure-sync request-read and
+sync-only semaphore programs stay pooled.
 
 `pd-vm` pin (see the crate README) provides `Vm::new_shared(Arc<Program>)`,
 `HostAsyncBridge`, `Vm::set_async_bridge`, `VmStatus::Waiting`,
