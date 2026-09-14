@@ -2,10 +2,10 @@
 
 [Documentation](../index.md) · [API](../api/index.md) · [Compatibility](../ngx-api-compatibility.md)
 
-Feasibility gate for OpenResty-oriented callable families:
+Feasibility gate for the OpenResty-oriented scheduler families:
 
 - `ngx::thread::{spawn,wait,kill}`
-- `ngx::timer::{at,every}`
+- `ngx::timer::{at,every}` and the timer counters `ngx::timer::{pending_count,running_count}`
 - `ngx::on_abort`
 - semaphore (`ngx::semaphore::{new,wait,post,count}`) — **landed**, see below
 - `ngx::run_worker_thread`
@@ -37,7 +37,7 @@ fail-closed.**
 | Family | Decision | Why |
 | --- | --- | --- |
 | `ngx::thread::{spawn,wait,kill}` | **blocked** | Needs concurrent child frames / independent invocation while the parent VM is live and possibly `Waiting`. Public `Vm::start_callable` / `invoke_callable` / `start_invocation` require a halted VM and a single active invocation. |
-| `ngx::timer::{at,every}` | **blocked** | Needs a detached Program/VM, attenuated capabilities, and a callable that must not retain request `raw` / ctx / parent VM. No public detached-VM or unforgeable callable handle. |
+| `ngx::timer::{at,every,pending_count,running_count}` | **blocked** | Needs a detached Program/VM, attenuated capabilities, and a callable that must not retain request `raw` / ctx / parent VM. No public detached-VM or unforgeable callable handle. The counters would also need a worker timer registry that does not exist. |
 | panic / error / shutdown / reload / limits for those families | **blocked** | No public cancellable child-task handle, no generation-safe detached identity, no exactly-once child completion protocol that composes with the request eventfd bridge. |
 | `ngx::on_abort` | **blocked** | Needs a single callable, request-abort timing, and cleanup that cannot re-enter the dying request VM with live FFI pointers. |
 | semaphore | **landed** (195) | Worker-owned counter + FIFO waiter queue in a `thread_local` registry, reached through a VM-local `resource<ngx.semaphore>` handle. Waits reuse the generic `HostFuture` + `AccessExec` reservation path and invoke no script callable. That does **not** unlock thread/timer/`on_abort`/`run_worker_thread`. |
@@ -50,7 +50,8 @@ its **own** table, waits capture owned state plus an owned timeout, and
 worker `exit_process` closes live semaphores before the Tokio runtime is
 dropped. Every other row above is still fail-closed.
 
-Contract tests: `tests/ngx_scheduler_contract.rs`.
+Contract tests: `tests/ngx_scheduler_contract.rs` (fail-closed gate),
+`tests/ngx_semaphore.rs` (landed family).
 
 ## Current execution architecture
 
@@ -61,8 +62,9 @@ ngx-rustscript runs one RustScript program per configured phase slot
 nginx worker main thread
   AccessHandler / ContentHandler / LogHandler
     LocationConf.program : Arc<Program>          // config-time, shared
-    import-free / pure-sync  -> worker VM pool   // Vm::new_shared, reset_for_reuse
-    async / ctx / cosocket / mutation / control
+    no request-state imports (pure-sync) -> worker VM pool
+                                             // Vm::new_shared, reset_for_reuse
+    async / ctx / cosocket / semaphore / mutation / control
                          -> request-owned AccessExec
                               Vm on worker main thread
                               NgxAsyncBridge : HostOpId -> HostFuture
@@ -93,10 +95,12 @@ work):
    cancels in-flight futures and closes eventfd through the fd gate.
 6. `ngx::ctx` deep-owns scalars/containers and **rejects**
    `Value::Callable` (`src/host/request_ctx.rs`).
-7. Cosocket / shared-dict / TLS objects are `ResourceHandle` values in
-   the **current** VM execution-scope table. Script sees them as `i64`
-   (`src/socket/udp.rs` `parse_handle`, TCP/TLS equivalents). Handles
-   are generation-tagged integers, not transferable identities.
+7. Cosocket / shared-dict / TLS / semaphore objects are `ResourceHandle`
+   values in the **current** VM execution-scope table. Script sees them
+   as `i64` (`src/socket/udp.rs` `parse_handle`, TCP/TLS equivalents;
+   `src/semaphore.rs` `resolve_handle`). Handles are generation-tagged
+   integers, not transferable identities: resolving one from another
+   VM's table fails closed.
 
 Root execution is `Vm::run` / `Vm::resume`. The module does not use
 `ScriptCallback`, `Store`, `Invocation`, or `Vm::invoke_callable` for
@@ -116,7 +120,7 @@ type). **C** = crate-private / `pub(super)` / `pub(crate)`.
 | `CallableValue { prototype_id, kind, env }` | P | `src/bytecode.rs` | No Program identity field. Env is `Option<Arc<CallableEnvironment>>` with `pub(crate) cells: Mutex<Vec<SharedCaptureCell>>`. |
 | `ExportedCallable { name, local_slot }` | P | `src/bytecode.rs` | Metadata only; not a handle. |
 | `HostTypeSchema::Callable { params, result }` | P | `src/host_api.rs` | Catalog type. ngx catalog currently has **zero** Callable params/returns (enforced by contract tests). |
-| `HostTypeSchema::Resource(ResourceTypeKey)` | P | `src/host_api.rs` | Used by UDP/TCP/TLS/shared-dict. Runtime passing is integer handle ids. |
+| `HostTypeSchema::Resource(ResourceTypeKey)` | P | `src/host_api.rs` | Used by UDP/TCP/TLS/shared-dict and by the semaphore handle. Runtime passing is integer handle ids. |
 | `ResourceHandle(u64)` | P | `src/vm/resource/handle.rs` | `from_raw` / `raw`. Arena + slot + generation. Table-local. |
 | `ResourceTable` | P | `src/vm/resource/table.rs` | Per VM execution scope. Default max 1024. |
 
@@ -144,7 +148,7 @@ These APIs are first-class **same-VM, halted-root, single-invocation**
 callbacks. They are not first-class **ngx.thread / ngx.timer**
 callbacks.
 
-### Async host / wake path (public, reusable for semaphore only)
+### Async host / wake path (public; reused by the landed semaphore family)
 
 | Item | Vis | Path | Notes |
 | --- | --- | --- | --- |
@@ -152,7 +156,7 @@ callbacks.
 | `HostFutureOutput::{Return, VmCompletion}` | P | same | `VmCompletion` is `FnOnce(&mut Vm) -> VmResult<T> + Send + 'static` and **must run on the originating VM**. |
 | `CaptureAsyncHostContext` | P | same | Capture owned `'static` context **before** submit; cannot borrow VM across poll. |
 | `Vm::submit_host_future` | P | same | Needs a configured `HostAsyncBridge`. |
-| `HostAsyncBridge: Send` | P | `src/vm/host.rs` | `submit_op` / `poll_submitted_op` / `cancel_op`. |
+| `HostAsyncBridge: Send` | P | `src/vm/host.rs` | `submit_op` / `poll_submitted_op` / `cancel_op`; typed cancellation adds `request_cancel_op` / `poll_cancel_op`. |
 | `Vm::set_async_bridge` | P | `src/vm/host.rs` | ngx installs `NgxAsyncBridge`. |
 | `Vm::poll_waiting_host_op` | P | `src/vm/host.rs` | Worker-main resume path. |
 | `VmStatus::{Halted, Yielded, Waiting(HostOpId)}` | P | `src/vm/mod.rs` | One waiting op per VM run. |
@@ -247,11 +251,11 @@ Required mapping (contract, not implemented):
 | Event | Required behavior |
 | --- | --- |
 | Child / timer script `VmError` | Log; parent `wait` sees a structured error value; request is not 500 unless the parent itself errors. |
-| Panic in host future | Existing AccessExec catch_unwind path; child/timer must not unwind the worker. |
-| Client abort | Request-owned children die with the request (see `on_abort`). Detached timers do **not** hold `r`. |
-| Worker `exit_process` | Cancel all detached tasks and request children; drop Tokio runtime; close eventfd once. |
+| Panic in host future | Existing `catch_unwind` guards in the content handler, the log handler, and the eventfd read handler (`src/content.rs`, `src/log.rs`, `src/runtime.rs`); child/timer must not unwind the worker. |
+| Client abort | Request-owned children die with the request (see `on_abort`). Detached timers do **not** hold `r`. A parked semaphore wait drops with the request and its drop guard leaves the FIFO queue. |
+| Worker `exit_process` | Cancel all detached tasks and request children; close live semaphores and wake their waiters; drop Tokio runtime; close eventfd once. |
 | Config reload | New `Arc<Program>` identity. Old callable handles must fail closed. In-flight detached work bound to the old Program is cancelled; it must not run against the new Program. |
-| Limits | Per-worker cap on live threads + timers + semaphores + in-flight waits. Existing wait cap is 1024 (`DEFAULT_MAX_IN_FLIGHT`). A scheduler must not bypass it. |
+| Limits | Per-worker cap on live threads + timers + semaphores + in-flight waits. Live semaphores are already capped at 1024 (`MAX_LIVE_SEMAPHORES`); live threads and timers still need their own caps. The wait cap is 1024 (`DEFAULT_MAX_IN_FLIGHT`). A scheduler must not bypass these. |
 
 Public API gap: no task handle, no Program-generation on callables,
 no supervisor distinct from the request `AccessExec` identity
@@ -341,10 +345,14 @@ table):
 - Configuration reload does not touch semaphores: they are worker objects
   with no `Program` identity, and a new `Arc<Program>` cannot rebind a
   live handle. Handles die with their VM table.
+- Importing any semaphore host selects the request-owned path: the
+  routing metadata treats the `Semaphore` family as request-state
+  required (`src/config.rs`), so `new`/`post`/`count` never run on the
+  pooled sync VM that has no request-table lifetime of its own.
 
 Validation, phases, the negative-depth `count` mapping, budgets, and the
 full event table are in [docs/api/semaphore.md](../api/semaphore.md) and
-[Semantic differences](../ngx-api-compatibility.md).
+[Out of scope](../ngx-api-compatibility.md#out-of-scope).
 
 Decision: **landed as the only scheduler-family exception.** Everything
 else in this document stays fail-closed.
@@ -369,7 +377,10 @@ Needs:
 
 `Arc<Program>` is shareable. `Vm` is request/worker-main policy even
 if some internals happen to be `Send`. `Value::Callable` is not a
-pool ABI. Resource `i64`s are forgeable across tables.
+pool ABI. A resource `i64` is only ever meaningful against the VM table
+that minted it (the semaphore and cosocket families both validate that
+way), and a pool thread has no such table, so request handles cannot be
+passed in at all.
 
 **Expressible now:** no.
 
@@ -400,6 +411,15 @@ pool ABI. Resource `i64`s are forgeable across tables.
    it does not unwind the nginx worker or the parent request VM.
 10. **Log phase.** Scheduler imports stay rejected in Log. Log still
     cannot wait.
+
+The landed semaphore family already satisfies these where they apply:
+request VMs stay on the worker main thread (1), wait futures are
+identity-only and free of request pointers (2), nothing request-scoped
+crosses the handle boundary (4), a wait uses the one `Waiting` slot of
+its own VM (5), cleanup and completion are exactly-once (8), and the
+family is rejected in Log (10). Callables are not involved, so the
+unforgeable-callable and attenuation clauses (3, 6) are not yet
+exercised by a landed host.
 
 ## Lifetime / state diagrams (text)
 
@@ -478,6 +498,11 @@ request end  all TH cancelled unless explicitly detached
 | Stale generation wake | ignore | already released | no | n/a |
 | Duplicate op id | rejected, no replace | n/a | n/a | config/runtime error |
 
+Result/error/cancel remove the future from `NgxAsyncBridge`'s table.
+Semaphore waits ride this same table, so their timeout, cancellation,
+and drop paths reuse this contract rather than adding a second one
+(`tests/ngx_semaphore.rs`, `src/semaphore.rs`).
+
 ### Callable families (required; not implementable now)
 
 | Event | `thread.spawn` child | `timer.at` | `timer.every` | `on_abort` |
@@ -499,7 +524,7 @@ delivers at most one invocation.
 | Budget | Current | Scheduler implication |
 | --- | --- | --- |
 | In-flight HostFuture waits | 1024 / worker | Threads waiting, timer fires that invoke async hosts, and semaphore waits **share** this cap unless a new named cap is designed. Do not silent-bypass. Semaphore waits use the existing `AccessExec` reservation, so the cap is shared in practice (`tests/ngx_semaphore.rs`). |
-| Idle VM pool | 4 import-free VMs | Detached timer VMs are not pool VMs. Do not steal pool slots. |
+| Idle VM pool | 4 VMs without request-state imports (`MAX_IDLE_VMS`) | Detached timer VMs are not pool VMs. Do not steal pool slots. |
 | Resource table | pd-vm default 1024 | Child VM gets its own table. Do not insert parent sockets into it. |
 | `ngx.ctx` | keys/depth/bytes caps | Callables rejected. Detached work gets no request ctx. |
 | Script call depth | `DEFAULT_MAX_SCRIPT_CALL_DEPTH` 1024 | Child VM has its own depth; spawn is not a recursive same-stack call. |
@@ -525,7 +550,9 @@ delivers at most one invocation.
 - Worker `init_process` starts Tokio + eventfd; `exit_process`
   invalidates senders, cancels futures, closes fd once
   (`src/runtime.rs`). Detached scheduler state would have to hook
-  **that** shutdown, not a new one.
+  **that** shutdown, not a new one. The landed semaphore family already
+  does: `WorkerRuntime::shutdown` closes live semaphores and wakes their
+  waiters before the Tokio runtime is dropped.
 
 ## Capability attenuation
 
@@ -556,6 +583,14 @@ Until a runner can install a scope that is **narrower** than the
 creator and cannot be widened by the script, callable families stay
 blocked.
 
+The landed semaphore family is not a runner: it invokes no script, so
+it needs no narrowed scope. Its hosts run under the access/content
+`AllowedOps` already installed for the phase and touch no request state
+of their own — `new`/`post`/`count` only borrow the calling VM's
+resource table, and `wait` captures owned worker state plus an owned
+timeout. Access and content accept the family; Log rejects it at
+configuration compile.
+
 ## Request resource escape prevention
 
 Escape means a detached or pool context using:
@@ -563,7 +598,7 @@ Escape means a detached or pool context using:
 - `*mut ngx_http_request_t`
 - request pool pointers
 - `RequestLocalCtx` of the creator
-- UDP/TCP/TLS `ResourceHandle` minted in the request VM
+- UDP/TCP/TLS/semaphore `ResourceHandle` minted in the request VM
 - `Value::Callable` bound to the request VM
 - `HostFutureOutput::VmCompletion` closing over `&mut` request `Vm`
 
@@ -577,10 +612,20 @@ Prevention:
    invalidates the parent handle (exactly-once move).
 3. Wakers stay identity-only.
 4. `ngx::ctx` already rejects callables; keep that.
+5. A wait future owns worker state, not a handle: the semaphore `i64`
+   stays in the creating VM's table, and every host resolves it through
+   that table's typed `SemaphoreHandle` entry, so a token minted for
+   another table fails closed instead of reaching an entry.
 
 Current `ResourceHandle::from_raw` will accept any well-shaped `u64`.
-That is forgeable across VMs. Callable families cannot ship on that
-ABI.
+That is forgeable across VMs on its own. The landed semaphore family
+stays safe because every handle is resolved through
+`Vm::host_context().borrow_resource` in the **calling** VM's own typed
+table, so a forged or foreign token fails closed
+(`resource_handle_wrong_table`); cosocket handles resolve the same way.
+Callable families cannot ship on the raw integer ABI alone: they would
+need an unforgeable identity, because a callable is not a table entry
+with an arena and a generation to validate.
 
 ## Panic / error mapping
 
@@ -589,7 +634,7 @@ ABI.
 | Script `VmError` | existing 500 / log-phase log-only | log; drop timer VM | return error value to caller |
 | HostError | existing | log; drop | return error |
 | `Waiting` in log | `LOG_CANNOT_WAIT` | n/a | n/a |
-| Panic in script/host on worker main | catch_unwind in handlers; 500 | catch_unwind; log; drop | catch_unwind; error result |
+| Panic in script/host on worker main | content and log handlers guard with `catch_unwind`; resume runs inside the guarded eventfd read handler | `catch_unwind`; log; drop | `catch_unwind`; error result |
 | Panic in Tokio future | future error → resume error path | future error → no request | future error → caller wait |
 | Control `ngx::exit` in child | defined later; default: child stop, parent continues unless wait observes it | forbidden by attenuation | forbidden |
 
@@ -679,16 +724,19 @@ Constraints the embedder will still impose:
 - `Value::Callable` remains in-VM only.
 
 Until this (or an equivalent reviewed public API) ships in a pin bump,
-ngx-rustscript will not add `src/scheduler.rs` or catalog entries.
+ngx-rustscript will not add `src/scheduler.rs` or register a callable
+scheduler host. That is independent of the landed, callable-free
+semaphore family.
 
 ## Phased follow-up order
 
-1. **This gate (done by the contract tests).** Fail-closed. Host count
-   191. No scheduler module. Design published.
+1. **This gate (done by the contract tests).** Fail-closed. No scheduler
+   module; the callable families stay absent from the 195-name manifest.
+   Design published.
 2. **Upstream `pd-vm`.** Land the minimal public API above. Pin bump
    in ngx-rustscript with an audit against this file.
 3. **Semaphore (landed, independent).** Worker-owned resource +
-   `HostFuture` wait, no callables. The addendum below covers worker
+   `HostFuture` wait, no callables. The addendum above covers worker
    lifetime versus the request VM table.
 4. **`ngx.on_abort`.** Single handle, exactly-once, attenuated, runs
    on worker main before 499 finalize, cannot wait.
@@ -716,10 +764,11 @@ smuggled in as the callable scheduler engine.
 | `src/lib.rs`, `src/host/mod.rs` | no `mod scheduler` |
 | `HostFamily` / `HostCapability` | no `Scheduler` variant; one reviewed `Semaphore` variant each |
 | catalog `HostTypeSchema::Callable` | none (semaphore hosts have none) |
-| compile `ngx::thread::spawn` etc. in Access/Content/Log | `ConfigError::UnsupportedImport` (or the same fail-closed class) at **configuration** compile, not at request runtime |
+| compile `ngx::thread::spawn`, `ngx::timer::at`, `ngx::timer::pending_count` etc. in Access/Content/Log | `ConfigError::UnsupportedImport` (or the same fail-closed class) at **configuration** compile, not at request runtime |
 | bare `ngx::semaphore` marker | never catalogued, never bound, rejected at configuration compile |
 | semaphore in Access/Content | accepted; `wait` may return `Waiting` |
-| semaphore in Log | `ConfigError::PhaseForbidden` at configuration compile |
+| semaphore in Log | `ConfigError::PhaseForbidden` at configuration compile (phase set and closed Log allowlist both reject) |
+| semaphore in Rewrite / Timer / Init etc. | rejected at configuration compile; catalog phases are exactly `[Access, Content]` |
 | Log allowlist | synthetic log-allowlist probe `ngx::future::scheduler` (never a production import) is rejected; scheduler candidates and the semaphore family stay rejected |
 
 Revisit this file before adding any of those names to the manifest.
