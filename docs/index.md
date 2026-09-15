@@ -17,7 +17,7 @@ metadata on each directive. The prose is ngx-rustscript's own.
 | --- | --- |
 | [README](../README.md) | Requirements, NGINX 1.30.4 ABI, build, release packages, tests |
 | [Directives](directives.md) | `access_by_rss_file`, `content_by_rss_file`, `log_by_rss_file`, shared dict, I/O/HTTP/SQLite policy |
-| [API reference](api/index.md) | 195 ngx hosts, split by family, plus pd-vm async I/O/HTTP/SQLite |
+| [API reference](api/index.md) | 199 ngx hosts, split by family, plus pd-vm async I/O/HTTP/SQLite |
 | [Execution model](execution-model.md) | Worker runtime, VM pool vs request-owned VM, Waiting/eventfd, log phase |
 | [Security and policy](security.md) | Denied-by-default grants, one HTTP allow pair, SQLite root, fail-closed log |
 | [Examples](examples/index.md) | Rate limiter, HMAC API-key auth, async pipeline |
@@ -39,9 +39,10 @@ points yet. See [phase sets](api/index.md#phase-sets).
 ## Facts that apply everywhere
 
 - Official NGINX **1.30.4** (`nginx_version` 1030004).
-- Production ngx host count is **195**: the 191 callable-family baseline
+- Production ngx host count is **199**: the 191 callable-family baseline
   plus `ngx::semaphore::{new,wait,post,count}` (worker-owned state, no
-  script callables). Typed fixed result structs
+  script callables) and `ngx::timer::{at,every,pending_count,running_count}`
+  (worker-owned fake requests with one owned callback each). Typed fixed result structs
   (`SharedStoreResult`, `DecodedArgsResult`, …) are the script-facing
   envelopes; dynamic-key collections stay `map` fields inside those
   envelopes.

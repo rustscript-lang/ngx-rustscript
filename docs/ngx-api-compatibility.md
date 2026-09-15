@@ -4,7 +4,7 @@
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and documents only
-the hosts in the [API reference](api/index.md) (195 ngx names, plus
+the hosts in the [API reference](api/index.md) (199 ngx names, plus
 pd-vm I/O/HTTP/SQLite). Host-by-host tables, phase sets, and hard caps
 live there; this page is the mapping and migration overview.
 
@@ -168,8 +168,17 @@ Not production hosts in this matrix (do not import them):
   `resource<ngx.semaphore>` handle, waiting on the generic `HostFuture`
   bridge without any script callable. The bare `ngx::semaphore` namespace
   marker is not a callable and is rejected. Access and content only; Log
-  fails configuration compile. Registered count **195**. See
+  fails configuration compile. Registered count **199**. See
   [semaphore](api/semaphore.md) and
+  [docs/design/ngx-scheduler.md](design/ngx-scheduler.md).
+- `ngx.timer.{at,every,pending_count,running_count}` are adapted as
+  `ngx::timer::{at,every,pending_count,running_count}`. The registration
+  hosts consume their callback through `HostParamPassing::TakeOwned` and run
+  it later on a timer-owned VM that outlives the creating request. The family
+  is bound through the timer-host registry (owned dispatch has no name-binding
+  API) and is therefore not part of the 195-name per-name bind list. Access and
+  content only; Log fails configuration compile. Registered count **199**
+  (191 + 4 semaphore + 4 timer). See [timer](api/timer.md) and
   [docs/design/ngx-scheduler.md](design/ngx-scheduler.md).
 - Stream subsystem, `ndk.set_var.*`, Lua `coroutine.*`
 - `tcpsock:getsslpointer` / `tcpsock:getsslctx` (no NGINX SSL FFI)

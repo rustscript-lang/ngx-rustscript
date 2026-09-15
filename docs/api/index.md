@@ -7,7 +7,13 @@ This matrix is the authoritative current ngx host surface for
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **195** names in the same order.
+Those three lists contain the same **199** names in the same order.
+
+The owned `ngx::timer::{at,every}` registrations have no name-binding API, so
+the timer family resolves through the timer-host registry
+(`ngx_host_registry`) instead of the per-name bind list; the per-name list
+therefore keeps the 195 callable entries and the manifest/catalog add the four
+timer hosts (191 + 4 semaphore + 4 timer = 199). See [timer](timer.md).
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and documents only
@@ -41,7 +47,7 @@ page can cite them without repeating the shared rules.
 - [Semaphore](semaphore.md)
 - [pd-vm standard async hosts](standard-async.md)
 
-pd-vm I/O, HTTP, and SQLite hosts are not part of the 195 ngx names; see
+pd-vm I/O, HTTP, and SQLite hosts are not part of the 199 ngx names; see
 [pd-vm standard async hosts](standard-async.md).
 
 ## How to read the matrix
@@ -83,9 +89,10 @@ argument.
 | [Cosocket (UDP)](udp.md) | 7 | mixed |
 | [Cosocket (TCP)](tcp.md) | 16 | mixed |
 | [Semaphore](semaphore.md) | 4 | `wait` Waiting; `new`/`post`/`count` sync |
+| [Timer](timer.md) | 4 | `at`/`every` register and return; callbacks run on a timer-owned VM |
 | [Constants](constants.md) | 65 | sync |
 | of which HTTP status | 35 | sync |
-| **Production total** | **195** | |
+| **Production total** | **199** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
 the production manifest, catalog, or `bind_ngx_hosts`.
@@ -196,7 +203,7 @@ host adds a further difference.
    messages containing NUL are host errors. The line is prefixed
    `ngx-rustscript: `. OpenResty varargs are a single string.
 9. **Phase and config import enforcement.** `compile_rss_source` compiles
-   access scripts against `compile_host_catalog()` (the 195 ngx hosts plus
+   access scripts against `compile_host_catalog()` (the 199 ngx hosts plus
    pd-vm's HTTP import catalog) and then
    `validate_program_imports_for_phase(..., Access)`;
    `compile_rss_source_for_phase` performs the corresponding Content or
