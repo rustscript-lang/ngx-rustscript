@@ -82,7 +82,7 @@ duplicate headers survive.
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `status` | `int` | HTTP status code. |
-| `headers` | `array` of `{ name: string, value: { kind: "text", text: string } \| { kind: "bytes", bytes: bytes } }` | Response headers in order, duplicates preserved. |
+| `headers` | `array` of `{ name: string, value: { kind: "text", text: string } \| { kind: "bytes", bytes: bytes } }` | Response headers; duplicates are retained, but the adapter sorts and normalizes entries by name, so the original wire order is not guaranteed. |
 | `body` | `bytes` | Buffered response body. Convert with `bytes::to_utf8` when text is required. |
 | `url` | `string` | Final URL after redirects. |
 
@@ -100,7 +100,7 @@ use bytes as builtin_bytes;
 let response: map = http::client::request({
     method: "GET",
     url: "http://127.0.0.1:8081/data",
-    headers: { "accept": "application/json" },
+    headers: [{ name: "accept", value: "application/json" }],
     body: null
 });
 let status: int = response["status"];

@@ -426,17 +426,22 @@ callable. Access + content only; Log fails configuration compile.
   owner of the callback VMs. Each accepted registration owns one **ordinary**
   `RequestIdentity` and one callback VM with its own `NgxAsyncBridge`. There is
   no second identity type, no second eventfd, and no second completion queue.
-- Identity: the fake request id is drawn from the worker-unique request-id
-  sequence (`crate::access::next_request_id`, never reused), so a timer
-  identity can never equal a request identity and both dispatch paths stay
-  disjoint **without** a reserved generation. Every `every` round rotates its
-  identity: when a round reaches a terminal state the completed identity is
-  retired from the registry, a fresh monotonically advancing generation is
+- Identity: the fake request id is drawn from a worker-local monotonic
+  fake-request-id allocator; every id is tagged with `FAKE_REQUEST_ID_TAG`
+  (the high bit real request ids never set — `crate::access::next_request_id`
+  hands out ascending untagged ids from 1), so a timer identity can never
+  equal a real request identity and both dispatch paths stay disjoint
+  **without** a reserved generation. Fake ids are never reused, and the
+  allocator fails closed on exhaustion instead of wrapping. Every `every`
+  round rotates its identity: when a round reaches a terminal state the
+  completed identity is retired from the registry, a fresh monotonically
+  advancing generation (generations start nonzero and only advance) is
   allocated for the same fake request id, and only then is the next deadline
   scheduled. A stale or duplicate wake of a finished round (a coalesced
   duplicate of the deadline wake, or a leftover async-step wake of the round
-  that just completed) therefore matches no live entry: it cannot start the
-  pending round early, cannot break the interval, and cannot overlap rounds.
+  that just completed) therefore misses the exact identity of any live
+  entry: it cannot start the pending round early, cannot break the interval,
+  and cannot overlap rounds.
   The freshly minted identity is held by exactly one deadline task, so nothing
   else can wake it; that is what closes the duplicate-wake race the previous
   fixed-identity design had.
