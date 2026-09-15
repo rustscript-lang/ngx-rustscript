@@ -2525,84 +2525,35 @@ pub fn ngx_host_catalog() -> HostApiCatalog {
         .expect("ngx host catalog must be a valid HostApiCatalog")
 }
 
-/// Compiler catalog containing ngx hosts and pd-vm HTTP host imports.
+/// Compiler catalog for production ngx scripts.
 ///
-/// pd-vm I/O and SQLite are compiler builtins dispatched through the standard
-/// composition. Adding their schemas as external host imports would bypass
-/// that builtin path and produce unbindable imports.
+/// It carries exactly the ngx host surface; the pd-vm standard families are
+/// deliberately **not** merged, for one reason each:
+///
+/// - I/O and SQLite are compiler builtins dispatched through the standard
+///   composition ([`crate::host::install_standard_runtime`]). Cataloguing their
+///   schemas as external host imports would bypass that builtin path and
+///   produce unbindable imports.
+/// - The pinned pd-vm HTTP client catalog declares its request/response
+///   positions as named records (`HttpRequest` / `HttpResponse` / SSE records)
+///   and registers its HTTP adapters byte-for-byte from that same catalog.
+///   RustScript object literals are exact record types, so a compile-time
+///   schema for those positions could never match the documented loose scripts
+///   *and* be registered in the owned-dispatch host registry at the same time:
+///   a relaxed compile schema has no registered adapter, and the exact schema
+///   rejects the documented scripts. The merged catalog therefore leaves the
+///   HTTP surface dynamic (`http::client::*` compile as ordinary host imports
+///   against the documented `map` interface of `docs/api/standard-async.md`),
+///   configuration still validates them by name ([`is_standard_host_import`]),
+///   and the pd-vm adapter validates the concrete request contents at runtime
+///   and returns the pd-vm contract payload shapes unchanged (duplicate header
+///   entries, `HttpHeaderValue` text/bytes variants).
+///
+/// No standard-family position is relaxed here: with the functions left out
+/// there is nothing to relax, so no name, parameter, or result of a standard
+/// family can silently become dynamic.
 pub fn compile_host_catalog() -> HostApiCatalog {
-    let ngx = ngx_host_catalog();
-    let standard_imports = vm::http_host_catalog();
-    let mut builder = HostApiBuilder::new();
-    for resource in ngx.resources() {
-        builder.resource(resource.clone());
-    }
-    for structure in ngx.structs() {
-        builder.named_struct(structure.clone());
-    }
-    for function in ngx.functions() {
-        builder.function(function.clone());
-    }
-    for resource in standard_imports.resources() {
-        builder.resource(resource.clone());
-    }
-    for structure in standard_imports.structs() {
-        builder.named_struct(structure.clone());
-    }
-    for function in standard_imports.functions() {
-        builder.function(relaxed_standard_function(function));
-    }
-    builder
-        .build()
-        .expect("merged ngx and standard host catalog must be valid")
-}
-
-/// Presents one standard host function with the permissive shapes ngx scripts
-/// are documented against.
-///
-/// The pinned pd-vm HTTP client catalog declares its request/response positions
-/// as named records (`HttpRequest` / `HttpResponse` / SSE records). ngx's
-/// documented scripts pass object literals and index map results, so the merged
-/// compiler catalog relaxes those positions: named arguments become `unknown`
-/// and named results become `map<unknown>`, recursively through containers and
-/// callback signatures. Scalar, resource, and dynamic positions are unchanged.
-fn relaxed_standard_function(function: &vm::HostFunctionSchema) -> vm::HostFunctionSchema {
-    let mut relaxed = function.clone();
-    for param in &mut relaxed.params {
-        param.ty = relax_argument(&param.ty);
-    }
-    relaxed.return_type = relax_result(&function.return_type);
-    relaxed
-}
-
-fn relax_argument(schema: &HostTypeSchema) -> HostTypeSchema {
-    match schema {
-        HostTypeSchema::Named { .. } => HostTypeSchema::Unknown,
-        HostTypeSchema::Optional(inner) => {
-            HostTypeSchema::Optional(Box::new(relax_argument(inner)))
-        }
-        HostTypeSchema::Array(inner) => HostTypeSchema::Array(Box::new(relax_argument(inner))),
-        HostTypeSchema::Map(inner) => HostTypeSchema::Map(Box::new(relax_argument(inner))),
-        HostTypeSchema::Callable { params, result } => HostTypeSchema::Callable {
-            params: params.iter().map(relax_argument).collect(),
-            result: Box::new(relax_result(result)),
-        },
-        other => other.clone(),
-    }
-}
-
-fn relax_result(schema: &HostTypeSchema) -> HostTypeSchema {
-    match schema {
-        HostTypeSchema::Named { .. } => HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
-        HostTypeSchema::Optional(inner) => HostTypeSchema::Optional(Box::new(relax_result(inner))),
-        HostTypeSchema::Array(inner) => HostTypeSchema::Array(Box::new(relax_result(inner))),
-        HostTypeSchema::Map(inner) => HostTypeSchema::Map(Box::new(relax_result(inner))),
-        HostTypeSchema::Callable { params, result } => HostTypeSchema::Callable {
-            params: params.iter().map(relax_argument).collect(),
-            result: Box::new(relax_result(result)),
-        },
-        other => other.clone(),
-    }
+    ngx_host_catalog()
 }
 
 fn standard_host_names() -> &'static HashSet<String> {

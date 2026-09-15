@@ -415,21 +415,47 @@ callable. Access + content only; Log fails configuration compile.
 - The family binds through `ngx_host_registry` (owned entries have no
   name-binding API): the registry carries every production host binding plus
   the standard composition, and is handed to `register_owned_timer` so the
-  callback VM shares the same host surface.
+  callback VM shares the same host surface. It is built from an empty registry
+  so a program may import a standard HTTP host (`http::client::request`) next
+  to the timer family: the timer entries resolve from the exact ngx catalog,
+  and the standard import resolves from the staged standard composition.
 - Worker lifetime: one `thread_local` registry holds a bounded pool of fake
-  requests (1024). Each accepted registration owns one **ordinary**
-  `RequestIdentity` (timer generation 0, ids never reused) and one callback VM
-  with its own `NgxAsyncBridge`. There is no second identity type, no second
-  eventfd, and no second completion queue.
+  requests (1024). The registry is the same generic
+  `request_state::IdentityRegistry` (exact identity lookup, hard capacity) the
+  request path uses for `Waiting` identities, and its entries are the only
+  owner of the callback VMs. Each accepted registration owns one **ordinary**
+  `RequestIdentity` and one callback VM with its own `NgxAsyncBridge`. There is
+  no second identity type, no second eventfd, and no second completion queue.
+- Identity: the fake request id is drawn from the worker-unique request-id
+  sequence (`crate::access::next_request_id`, never reused), so a timer
+  identity can never equal a request identity and both dispatch paths stay
+  disjoint **without** a reserved generation. Every `every` round rotates its
+  identity: when a round reaches a terminal state the completed identity is
+  retired from the registry, a fresh monotonically advancing generation is
+  allocated for the same fake request id, and only then is the next deadline
+  scheduled. A stale or duplicate wake of a finished round (a coalesced
+  duplicate of the deadline wake, or a leftover async-step wake of the round
+  that just completed) therefore matches no live entry: it cannot start the
+  pending round early, cannot break the interval, and cannot overlap rounds.
+  The freshly minted identity is held by exactly one deadline task, so nothing
+  else can wake it; that is what closes the duplicate-wake race the previous
+  fixed-identity design had.
 - Scheduling: the deadline task holds only a `CompletionSender` and that
-  identity. It wakes through the worker eventfd; the eventfd handler
-  dispatches timer identities before request identities. Script bytecode and
-  NGINX FFI stay on the worker main thread.
+  identity. It wakes through the worker eventfd; the eventfd handler routes
+  every ready identity through the timer dispatch on the worker main thread
+  before request identities are routed, and identities that are not a live
+  registration are ignored. Script bytecode and NGINX FFI stay on the worker
+  main thread; there is no second dispatch path.
 - Callback phase: every round runs under `NgxPhase::Timer` with
   `AllowedOps::LOG`. Log, `ngx::sleep`/`sleep_ms`, outbound async I/O
   (cosocket), the shared dictionary, the semaphore family, and the timer
   family work; request reads/writes, `ngx.ctx`, response output, and control
   (`ngx::exit`, `ngx::redirect`) fail closed because there is no live request.
+  The pd-vm standard I/O, HTTP, and SQLite policies are per-VM and are **not**
+  inherited by a callback VM: a `http::client::request` inside a callback fails
+  closed with the standard "HTTP host is not configured" error, exactly like an
+  unconfigured location. (The callback VM shares the host surface, not another
+  VM's policy grants.)
 - `every` schedules the next deadline only after terminal completion, so a
   slow callback never overlaps itself and its mutable capture cells persist
   between rounds. A callback error is reported through the worker log, resets
@@ -631,12 +657,14 @@ delivers at most one invocation.
 | --- | --- |
 | rewrite / access / content | read/write request, log, ctx, response read/write, control |
 | log | read request, log, ctx, response **read** |
-| other catalog phases including `timer` | `EMPTY` |
+| timer (timer callbacks) | log only (`AllowedOps::LOG`); request/response/ctx/control hosts fail closed |
+| other catalog phases | `EMPTY` |
 
-Today `NgxPhase::Timer` exists in catalog metadata for OpenResty
-allowlists (`SLEEP_PHASES` includes it) but **there is no timer
-directive** and `for_phase(Timer)` is empty. Sleep in a future timer
-VM would still need an explicit scope; it must not reuse Access ops.
+`NgxPhase::Timer` is the scope installed for a timer callback round: it has no
+live request, so request-, response-, ctx-, and control-coupled hosts fail
+closed while log, `ngx::sleep`/`sleep_ms`, cosocket I/O, the shared dictionary,
+the semaphore family, and the timer family work. The scope never inherits the
+creating request's `AllowedOps::for_phase`.
 
 Required attenuation table (future):
 

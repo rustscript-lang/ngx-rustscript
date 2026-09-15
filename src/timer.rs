@@ -9,6 +9,26 @@
 //! that identity, and it wakes through the same worker eventfd queue as
 //! `ngx::sleep` and the semaphore family.
 //!
+//! # Identity and generations
+//!
+//! - The registration map is the generic
+//!   [`crate::request_state::IdentityRegistry`] keyed by exact identity: the
+//!   same bounded exact-generation lookup the request path uses.
+//! - A fake request id is worker-unique and never reused: the allocator hands
+//!   out [`FAKE_REQUEST_ID_TAG`]-tagged ids, while real request ids are
+//!   ascending integers from 1 ([`crate::access::next_request_id`]). A timer
+//!   identity can therefore never equal a live request identity, so both
+//!   dispatch paths stay disjoint without a reserved generation, and the
+//!   request path may be inside its own worker-access borrow while a script
+//!   registers a timer.
+//! - Every `every` round terminates by **retiring its identity**: the
+//!   completed round's identity leaves the registry, a fresh monotonically
+//!   advancing generation is allocated for the same fake request id, and only
+//!   then is the next deadline scheduled. A stale or duplicate wake of a
+//!   completed round therefore matches no live entry and can never start the
+//!   pending round early or break the interval. The freshly minted identity is
+//!   held by exactly one deadline task, so nothing else can wake it.
+//!
 //! # Threading
 //!
 //! - Registration, callback execution, polling, and shutdown run on the NGINX
@@ -17,7 +37,10 @@
 //!   it holds no VM, no request, no pool, and no raw pointer.
 //! - A callback that needs to wait (`ngx::sleep`, outbound async I/O) suspends
 //!   on its **own** `NgxAsyncBridge`, installed before the first round; the
-//!   wake carries the same timer identity.
+//!   wake carries the round's current identity.
+//! - Dispatch is eventfd-only: the worker eventfd handler routes every ready
+//!   identity through [`on_worker_event`] on the worker main thread, which
+//!   ignores identities that are not a live timer registration.
 //!
 //! # Lifecycle
 //!
@@ -34,7 +57,6 @@
 //!   worker state, ids never reused).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -50,22 +72,33 @@ use vm::{
 use crate::async_bridge::NgxAsyncBridge;
 use crate::host::{AllowedOps, NgxPhase, StandardHostPolicy, ngx_host_registry};
 use crate::notify::{CompletionSender, RequestIdentity, eventfd_waker};
+use crate::request_state::{IdentityRegistry, RegistryError};
 
 /// Maximum live timer registrations ("fake requests") per nginx worker.
 ///
 /// The installed [`TimerConfig`] additionally caps registrations per runtime
 /// ([`vm::DEFAULT_MAX_PENDING_TIMERS`] = 1024, [`vm::DEFAULT_MAX_RUNNING_TIMERS`]
-/// = 256 by default); this constant is the hard worker pool bound the backend
-/// enforces under the same critical section as its insertion.
+/// = 256 by default); this constant is the hard worker pool bound: it is the
+/// capacity of the worker registry ([`IdentityRegistry`]), enforced under the
+/// same critical section as its insertion.
 pub const MAX_LIVE_TIMER_REQUESTS: usize = 1024;
 
-/// Identity generation reserved for timer registrations.
+/// High bit that separates fake request ids from real request ids.
 ///
-/// Request scopes always allocate generation `>= 1` (`allocate_scope_identity`
-/// wraps back to 1), so a timer identity can never collide with a request
-/// identity and the two dispatch paths stay disjoint. Timer ids are never
-/// reused within one worker process.
-const TIMER_GENERATION: u64 = 0;
+/// Real request ids are ascending integers from 1
+/// ([`crate::access::next_request_id`]); fake request ids set this bit, so a
+/// timer identity can never equal a live request identity even though both are
+/// ordinary `(generation, request_id)` pairs. Dispatch stays disjoint without
+/// a reserved generation, and a script may register a timer while the request
+/// path is inside its own worker-access borrow (the fake id allocator never
+/// touches it).
+pub const FAKE_REQUEST_ID_TAG: u64 = 1 << 63;
+
+/// Fake request ids available per worker (the untagged half of the space).
+///
+/// The allocator fails closed instead of wrapping, so a fake id always stays
+/// tagged.
+const MAX_FAKE_REQUEST_IDS: u64 = FAKE_REQUEST_ID_TAG;
 
 /// Upper bound of immediate `Yielded` resumptions inside one round.
 const MAX_YIELD_RESUMES_PER_ROUND: usize = 64;
@@ -88,8 +121,11 @@ enum RoundPhase {
 
 /// One accepted registration: the backend-owned "fake request".
 struct TimerEntry {
-    /// Worker-unique registration id, never reused.
+    /// Worker-unique fake request id, never reused. The identity's request id
+    /// is always this value; only the generation rotates between rounds.
     id: u64,
+    /// Current round identity. Retired generations are removed from the
+    /// registry and never match a live entry again.
     identity: RequestIdentity,
     callback: OwnedTimerCallback,
     /// `Some` for `ngx::timer::every`.
@@ -108,8 +144,16 @@ struct WorkerTimers {
     /// `TimerHostState::callback`), so the strong reference must outlive every
     /// creating request: it lives here, next to the worker registry.
     backend: Arc<NgxTimerBackend>,
-    next_id: u64,
-    entries: HashMap<RequestIdentity, Rc<RefCell<TimerEntry>>>,
+    /// Next per-round identity generation. Monotonic across the worker's
+    /// registrations and rounds; never zero, so it always differs from the
+    /// uninitialised state.
+    next_generation: u64,
+    /// Next untagged fake request id. Monotonic; ids are never reused and the
+    /// tagged id always stays in the fake-request half of the id space.
+    next_fake_request_id: u64,
+    /// Exact-generation registration map with a hard capacity: the same
+    /// bounded registry the request path uses for `Waiting` identities.
+    entries: IdentityRegistry<Rc<RefCell<TimerEntry>>>,
     closed: bool,
     /// Live callback rounds, including callbacks suspended on async host work.
     running: usize,
@@ -119,6 +163,14 @@ struct WorkerTimers {
 
 thread_local! {
     static TIMERS: RefCell<Option<WorkerTimers>> = const { RefCell::new(None) };
+}
+
+/// Advances a worker generation counter, wrapping past zero.
+fn advance_generation(generation: &mut u64) {
+    *generation = generation.wrapping_add(1);
+    if *generation == 0 {
+        *generation = 1;
+    }
 }
 
 /// Links the worker timer registry to the worker runtime.
@@ -131,8 +183,9 @@ pub(crate) fn install_worker_timers(handle: Handle, sender: CompletionSender) {
         *slot.borrow_mut() = Some(WorkerTimers {
             scheduler: TimerScheduler { handle, sender },
             backend: Arc::new(NgxTimerBackend),
-            next_id: 1,
-            entries: HashMap::new(),
+            next_generation: 1,
+            next_fake_request_id: 0,
+            entries: IdentityRegistry::with_capacity(MAX_LIVE_TIMER_REQUESTS),
             closed: false,
             running: 0,
             callback_errors: 0,
@@ -183,10 +236,12 @@ pub fn callback_error_count() -> usize {
     })
 }
 
-/// Identities of the live timer registrations in this worker, in id order.
+/// Current identities of the live timer registrations in this worker, in fake
+/// request id order.
 ///
-/// Every registration owns one ordinary [`RequestIdentity`] (timer generation);
-/// timers never allocate a second identity type.
+/// Every registration owns one ordinary [`RequestIdentity`]; the identity of an
+/// `every` registration changes (generation advances) on every re-arm, so this
+/// returns the **current** round identity of each live registration.
 pub fn live_timer_identities() -> Vec<RequestIdentity> {
     TIMERS.with(|slot| {
         slot.borrow()
@@ -194,7 +249,7 @@ pub fn live_timer_identities() -> Vec<RequestIdentity> {
             .map(|state| {
                 let mut entries: Vec<(u64, RequestIdentity)> = state
                     .entries
-                    .values()
+                    .iter_values()
                     .filter_map(|entry| {
                         let entry = entry.try_borrow().ok()?;
                         Some((entry.id, entry.identity))
@@ -224,7 +279,9 @@ pub fn shutdown_current() {
         };
         state.closed = true;
         state.running = 0;
-        state.entries.drain().map(|(_, entry)| entry).collect()
+        let drained: Vec<Rc<RefCell<TimerEntry>>> = state.entries.iter_values().cloned().collect();
+        state.entries.clear();
+        drained
     });
     let backend = NgxTimerBackend;
     for entry in drained {
@@ -307,31 +364,24 @@ fn install_standard_policy(vm: &mut Vm, policy: &StandardHostPolicy) -> Result<(
     Ok(())
 }
 
-/// Dispatches every ready identity that belongs to the timer registry.
+/// Dispatches every ready identity that is a live timer registration.
 ///
-/// Called by the worker eventfd handler before request identities are routed;
-/// request identities are not in the timer registry and are left untouched.
+/// Called by the worker eventfd handler before request identities are routed.
+/// Identities that no live registration currently owns — request identities,
+/// and stale or duplicate wakes of retired generations — match no registry
+/// entry and are ignored, so both dispatch paths stay disjoint and a retired
+/// generation can never start a pending round.
 pub fn on_worker_event(ready: &[RequestIdentity]) {
     for identity in ready {
-        if is_timer_identity(*identity) {
-            dispatch_timer(*identity);
-        }
+        dispatch_timer(*identity);
     }
-}
-
-fn is_timer_identity(identity: RequestIdentity) -> bool {
-    TIMERS.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .is_some_and(|state| state.entries.contains_key(&identity))
-    })
 }
 
 fn lookup_entry(identity: RequestIdentity) -> Option<Rc<RefCell<TimerEntry>>> {
     TIMERS.with(|slot| {
         slot.borrow()
             .as_ref()
-            .and_then(|state| state.entries.get(&identity).cloned())
+            .and_then(|state| state.entries.get(identity).cloned())
     })
 }
 
@@ -340,32 +390,41 @@ fn dispatch_timer(identity: RequestIdentity) {
         return;
     };
     let backend = NgxTimerBackend;
-    let mut entry = entry.borrow_mut();
-    let step = match entry.phase {
-        RoundPhase::Pending => {
-            let has_slot = with_timers(|state| state.running < entry.max_running).unwrap_or(false);
-            if !has_slot {
-                // The running cap is full: the due callback stays pending and
-                // starts when a running slot is released.
-                entry.due = true;
-                return;
-            }
-            with_timers(|state| state.running += 1);
-            entry.phase = RoundPhase::Live;
-            entry.due = false;
-            let identity = entry.identity;
-            let state =
-                with_timer_scope(identity, || entry.callback.start_reporting(false, &backend));
-            Step::Settled(state)
+    let step = {
+        let mut entry = entry.borrow_mut();
+        // Exact-generation guard: only the registration's current identity is a
+        // deadline. A lookup that raced an identity rotation must never start
+        // the pending round early.
+        if entry.identity != identity {
+            return;
         }
-        RoundPhase::Live => {
-            if !matches!(entry.callback.state(), TimerCallbackState::Waiting(_)) {
-                return;
+        match entry.phase {
+            RoundPhase::Pending => {
+                let has_slot =
+                    with_timers(|state| state.running < entry.max_running).unwrap_or(false);
+                if !has_slot {
+                    // The running cap is full: the due callback stays pending and
+                    // starts when a running slot is released.
+                    entry.due = true;
+                    return;
+                }
+                with_timers(|state| state.running += 1);
+                entry.phase = RoundPhase::Live;
+                entry.due = false;
+                let identity = entry.identity;
+                let state =
+                    with_timer_scope(identity, || entry.callback.start_reporting(false, &backend));
+                Step::Settled(state)
             }
-            poll_step(&mut entry, &backend)
+            RoundPhase::Live => {
+                if !matches!(entry.callback.state(), TimerCallbackState::Waiting(_)) {
+                    return;
+                }
+                poll_step(&mut entry, &backend)
+            }
         }
     };
-    drive_round(&mut entry, &backend, step);
+    drive_round(&entry, &backend, step);
 }
 
 /// Outcome of one callback-driving step.
@@ -397,11 +456,12 @@ fn poll_step(entry: &mut TimerEntry, backend: &dyn TimerBackend) -> Step {
 /// Drives one round to a terminal state or a parked `Waiting` state.
 ///
 /// A callback that suspends (`ngx::sleep`, outbound async I/O) is polled once
-/// so the submitted host future registers with this registration's identity
-/// waker; the wake then arrives through the worker eventfd queue and the next
-/// event turn polls the same round again. Rounds never overlap: the next
-/// `every` deadline is scheduled only after the round is terminal.
-fn drive_round(entry: &mut TimerEntry, backend: &dyn TimerBackend, step: Step) {
+/// so the submitted host future registers with this round's identity waker; the
+/// wake then arrives through the worker eventfd queue and the next event turn
+/// polls the same round again. Rounds never overlap: the next `every` deadline
+/// is scheduled only after the round is terminal, and it uses a **fresh**
+/// identity so no wake of the completed round can trigger it.
+fn drive_round(entry: &Rc<RefCell<TimerEntry>>, backend: &dyn TimerBackend, step: Step) {
     let mut step = step;
     let mut steps = 0usize;
     loop {
@@ -425,27 +485,65 @@ fn drive_round(entry: &mut TimerEntry, backend: &dyn TimerBackend, step: Step) {
                             "timer callback did not make progress after resumption".to_string(),
                         ),
                     });
-                    let _ = entry.callback.cancel();
+                    let _ = entry.borrow_mut().callback.cancel();
                     retire_round(entry, true);
                     return;
                 }
                 steps += 1;
-                step = poll_step(entry, backend);
+                step = {
+                    let mut entry = entry.borrow_mut();
+                    poll_step(&mut entry, backend)
+                };
             }
         }
     }
 }
 
-/// Releases one finished round and schedules the next `every` deadline.
-fn retire_round(entry: &mut TimerEntry, cancelled: bool) {
-    let identity = entry.identity;
+/// Releases one finished round and, for `every`, re-arms it under a fresh
+/// identity.
+///
+/// The completed round's identity is retired **before** the new one is
+/// registered, and the new generation is never the identity any earlier wake
+/// carried. A stale or duplicate wake of the finished round therefore matches
+/// no live entry: it cannot start the pending round early and cannot break the
+/// `every` interval or start an overlapping round.
+fn retire_round(entry: &Rc<RefCell<TimerEntry>>, cancelled: bool) {
+    let (identity, interval, request_id) = {
+        let entry = entry.borrow();
+        (entry.identity, entry.interval, entry.id)
+    };
     with_timers(|state| state.running = state.running.saturating_sub(1));
-    match (cancelled, entry.interval) {
+    match (cancelled, interval) {
         (false, Some(interval)) => {
-            // `every`: re-arm only after terminal completion, so rounds serialize.
-            entry.phase = RoundPhase::Pending;
-            entry.due = false;
-            spawn_deadline(identity, interval);
+            let rotated = TIMERS.with(|slot| {
+                let mut guard = slot.borrow_mut();
+                let state = guard.as_mut()?;
+                state.entries.remove(identity);
+                let generation = state.next_generation;
+                advance_generation(&mut state.next_generation);
+                let next = RequestIdentity::new(generation, request_id);
+                match state.entries.insert_new(next, Rc::clone(entry)) {
+                    // The finished identity made room for exactly one entry, so
+                    // a full or duplicate registry is an internal invariant
+                    // violation; fail closed by leaving the registration out.
+                    Ok(()) => Some(next),
+                    Err(RegistryError::Full | RegistryError::Duplicate) => None,
+                }
+            });
+            match rotated {
+                Some(next) => {
+                    {
+                        let mut entry = entry.borrow_mut();
+                        entry.identity = next;
+                        entry.phase = RoundPhase::Pending;
+                        entry.due = false;
+                    }
+                    // Only the freshly minted identity reaches the deadline
+                    // task; nothing else can wake the pending round.
+                    spawn_deadline(next, interval);
+                }
+                None => remove_entry(identity),
+            }
         }
         _ => remove_entry(identity),
     }
@@ -460,10 +558,11 @@ fn start_due_entries() {
             .map(|state| {
                 state
                     .entries
-                    .values()
+                    .iter_values()
                     .filter_map(|entry| {
-                        // The entry whose round is finishing is still mutably
-                        // borrowed by the dispatcher and is never "due".
+                        // The entry whose round is finishing is never borrowed
+                        // here and is not "due"; a mutably borrowed entry can
+                        // only be an executing callback.
                         let entry = entry.try_borrow().ok()?;
                         (entry.phase == RoundPhase::Pending && entry.due).then_some(entry.identity)
                     })
@@ -479,7 +578,7 @@ fn start_due_entries() {
 fn remove_entry(identity: RequestIdentity) {
     TIMERS.with(|slot| {
         if let Some(state) = slot.borrow_mut().as_mut() {
-            state.entries.remove(&identity);
+            state.entries.remove(identity);
         }
     });
 }
@@ -543,14 +642,9 @@ impl TimerBackend for NgxTimerBackend {
                     "ngx.timer: worker is shutting down".to_string(),
                 ));
             }
-            if state.entries.len() >= MAX_LIVE_TIMER_REQUESTS {
-                return Err(VmError::HostError(format!(
-                    "ngx.timer: worker timer limit reached ({MAX_LIVE_TIMER_REQUESTS})"
-                )));
-            }
             let pending = state
                 .entries
-                .values()
+                .iter_values()
                 .filter(|entry| {
                     // An executing callback's own entry is mutably borrowed by
                     // the dispatcher and is Live, so it never counts as pending.
@@ -564,13 +658,22 @@ impl TimerBackend for NgxTimerBackend {
                     "ngx.timer: pending timer limit reached ({max_pending})"
                 )));
             }
-            let id = state.next_id;
-            state.next_id = state.next_id.checked_add(1).ok_or_else(|| {
-                VmError::HostError("ngx.timer: worker timer ids exhausted".to_string())
-            })?;
-            let identity = RequestIdentity::new(TIMER_GENERATION, id);
+            // One ordinary identity per registration: the fake request id is
+            // worker-unique, never reused, and tagged out of the real
+            // request-id space.
+            let untagged = state.next_fake_request_id;
+            if untagged >= MAX_FAKE_REQUEST_IDS {
+                return Err(VmError::HostError(
+                    "ngx.timer: worker timer ids exhausted".to_string(),
+                ));
+            }
+            state.next_fake_request_id += 1;
+            let request_id = FAKE_REQUEST_ID_TAG | untagged;
+            let generation = state.next_generation;
+            advance_generation(&mut state.next_generation);
+            let identity = RequestIdentity::new(generation, request_id);
             let entry = Rc::new(RefCell::new(TimerEntry {
-                id,
+                id: request_id,
                 identity,
                 callback,
                 interval,
@@ -578,8 +681,15 @@ impl TimerBackend for NgxTimerBackend {
                 phase: RoundPhase::Pending,
                 due: false,
             }));
-            state.entries.insert(identity, Rc::clone(&entry));
-            Ok(identity)
+            match state.entries.insert_new(identity, Rc::clone(&entry)) {
+                Ok(()) => Ok(identity),
+                Err(RegistryError::Full) => Err(VmError::HostError(format!(
+                    "ngx.timer: worker timer limit reached ({MAX_LIVE_TIMER_REQUESTS})"
+                ))),
+                Err(RegistryError::Duplicate) => Err(VmError::HostError(
+                    "ngx.timer: worker timer identity was already registered".to_string(),
+                )),
+            }
         })?;
         spawn_deadline_with(&scheduler, identity, delay);
         Ok(())
@@ -592,7 +702,7 @@ impl TimerBackend for NgxTimerBackend {
                 .map(|state| {
                     state
                         .entries
-                        .values()
+                        .iter_values()
                         .filter(|entry| {
                             entry
                                 .try_borrow()
@@ -645,14 +755,140 @@ fn log_callback_error(error: &TimerCallbackError) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notify::DEFAULT_MAX_IN_FLIGHT;
 
     #[test]
-    fn timer_generation_never_collides_with_request_generations() {
-        let timer = RequestIdentity::new(TIMER_GENERATION, 7);
-        for request_generation in 1..=4u64 {
-            assert_ne!(timer, RequestIdentity::new(request_generation, 7));
+    fn worker_registry_is_the_shared_identity_registry_at_the_pool_bound() {
+        let mut worker = crate::runtime::WorkerRuntime::start().expect("worker runtime");
+        let (capacity, len) = TIMERS.with(|slot| {
+            let guard = slot.borrow();
+            let state = guard.as_ref().expect("installed worker timers");
+            (state.entries.capacity(), state.entries.len())
+        });
+        assert_eq!(
+            capacity, MAX_LIVE_TIMER_REQUESTS,
+            "the timer registry reuses the request_state::IdentityRegistry at the worker pool bound"
+        );
+        assert_eq!(len, 0);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn fake_request_ids_are_tagged_and_never_reused() {
+        shutdown_current();
+        let mut worker = crate::runtime::WorkerRuntime::start().expect("worker runtime");
+        // Two registrations take two distinct tagged ids: the fake-request half
+        // of the worker id space is separate from the ascending request ids, so
+        // a timer identity can never equal a request identity.
+        let program = crate::config::compile_rss_source(
+            "use ngx;\nngx::timer::at(30, |premature| null);\nngx::timer::at(20, |premature| null);\n",
+        )
+        .expect("compile timer script");
+        let mut vm = Vm::new_shared(program);
+        install_timer_vm(&mut vm, &StandardHostPolicy::fail_closed()).expect("install timer vm");
+        vm.set_async_bridge(Box::new(NgxAsyncBridge::new(
+            worker.handle().expect("worker handle"),
+        )))
+        .expect("async bridge");
+        vm.run().expect("registrations");
+
+        let identities = live_timer_identities();
+        assert_eq!(identities.len(), 2);
+        let first = identities[0];
+        let second = identities[1];
+        assert_ne!(
+            first.request_id(),
+            second.request_id(),
+            "fake request ids are never reused"
+        );
+        for identity in [first, second] {
+            assert_ne!(
+                identity.request_id() & FAKE_REQUEST_ID_TAG,
+                0,
+                "a fake request id sets the tag bit: {identity:?}"
+            );
         }
-        assert_eq!(timer.generation(), 0);
+        // A real request id never carries the tag.
+        let next_request_id = crate::access::next_request_id();
+        assert_eq!(
+            next_request_id & FAKE_REQUEST_ID_TAG,
+            0,
+            "request ids stay in the untagged half"
+        );
+        shutdown_current();
+        worker.shutdown();
+    }
+
+    #[test]
+    fn registry_capacity_and_duplicate_are_exact() {
+        let mut registry: IdentityRegistry<u64> = IdentityRegistry::with_capacity(1);
+        let first = RequestIdentity::new(1, 7);
+        let second = RequestIdentity::new(2, 7);
+        assert_eq!(registry.insert_new(first, 7), Ok(()));
+        assert_eq!(
+            registry.insert_new(first, 7),
+            Err(RegistryError::Duplicate),
+            "an existing identity is rejected even with an equal value"
+        );
+        assert_eq!(
+            registry.insert_new(second, 7),
+            Err(RegistryError::Full),
+            "capacity is enforced with the same insertion"
+        );
+        assert_eq!(registry.remove(first), Some(7));
+        assert_eq!(registry.insert_new(second, 7), Ok(()));
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn worker_registry_rejects_a_duplicate_live_identity() {
+        shutdown_current();
+        let mut worker = crate::runtime::WorkerRuntime::start().expect("worker runtime");
+        let program =
+            crate::config::compile_rss_source("use ngx;\nngx::timer::at(30, |premature| null);\n")
+                .expect("compile timer script");
+        let mut vm = Vm::new_shared(program);
+        install_timer_vm(&mut vm, &StandardHostPolicy::fail_closed()).expect("install timer vm");
+        vm.set_async_bridge(Box::new(NgxAsyncBridge::new(
+            worker.handle().expect("worker handle"),
+        )))
+        .expect("async bridge");
+        vm.run().expect("registration");
+
+        let identities = live_timer_identities();
+        assert_eq!(identities.len(), 1);
+        let duplicate = TIMERS.with(|slot| {
+            let mut guard = slot.borrow_mut();
+            let state = guard.as_mut().expect("installed worker timers");
+            let entry = state
+                .entries
+                .get(identities[0])
+                .cloned()
+                .expect("live entry");
+            state.entries.insert_new(identities[0], entry)
+        });
+        assert_eq!(duplicate, Err(RegistryError::Duplicate));
+        assert_eq!(
+            live_timer_count(),
+            1,
+            "a rejected duplicate must not add a fake request"
+        );
+
+        shutdown_current();
+        assert_eq!(live_timer_count(), 0);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn every_generation_never_collides_with_request_generations() {
+        // A timer identity is an ordinary `(generation, request_id)` pair from
+        // worker-unique sequences; the reserved-generation scheme is gone.
+        let timer = RequestIdentity::new(3, 7);
+        for request_generation in 1..=4u64 {
+            assert_ne!(timer, RequestIdentity::new(request_generation, 8));
+        }
+        assert_eq!(timer.generation(), 3);
+        assert_eq!(timer.request_id(), 7);
     }
 
     #[test]
@@ -661,5 +897,12 @@ mod tests {
         shutdown_current();
         assert_eq!(live_timer_count(), 0);
         assert_eq!(callback_error_count(), 0);
+    }
+
+    #[test]
+    fn max_in_flight_default_matches_the_timer_pool() {
+        // The registry is a bounded exact map exactly like the request path's
+        // waiting registry; both default to a hard 1024 in-flight bound.
+        assert_eq!(DEFAULT_MAX_IN_FLIGHT, MAX_LIVE_TIMER_REQUESTS);
     }
 }

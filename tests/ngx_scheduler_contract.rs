@@ -24,8 +24,8 @@ use ngx_rustscript::config::{
     ConfigError, compile_rss_source_for_phase, validate_program_imports_for_phase,
 };
 use ngx_rustscript::host::{
-    HostCapability, HostFamily, NgxPhase, bind_ngx_hosts, ngx_host_catalog, ngx_host_manifest,
-    production_runtime_host_names,
+    HostCapability, HostFamily, NgxHostWrapper, NgxPhase, bind_ngx_hosts, ngx_host_bindings,
+    ngx_host_catalog, ngx_host_manifest, ngx_host_registry, production_runtime_host_names,
 };
 use ngx_rustscript::notify::{CompletionSender, NgxWake, RequestIdentity};
 use vm::{
@@ -198,6 +198,102 @@ fn production_host_count_reaches_199_with_the_timer_family() {
     for name in &manifest {
         assert!(partitioned.contains(name), "{name} must be bound");
     }
+}
+
+/// Positional (ordered) parity of the four production name sources.
+///
+/// `ngx_host_manifest` and `ngx_host_catalog` are compared entry-for-entry, the
+/// per-name binding table (`ngx_host_bindings`) must equal the manifest minus
+/// the registry-bound timer family in the same order, and
+/// `production_runtime_host_names` must repeat that binding order exactly. A
+/// swapped or transcribed entry in any of the four lists fails the comparison.
+#[test]
+fn manifest_catalog_bindings_and_runtime_names_are_ordered_and_partitioned() {
+    let manifest: Vec<&str> = ngx_host_manifest().iter().map(|entry| entry.name).collect();
+    let catalog_owned = ngx_host_catalog();
+    let catalog: Vec<&str> = catalog_owned
+        .functions()
+        .iter()
+        .map(|schema| schema.name.as_str())
+        .collect();
+    assert_eq!(
+        catalog, manifest,
+        "the compiler catalog must follow the manifest order exactly"
+    );
+
+    let bindings: Vec<&str> = ngx_host_bindings().iter().map(|(name, _)| *name).collect();
+    let registry_bound: Vec<&str> = manifest
+        .iter()
+        .copied()
+        .filter(|name| name.starts_with("ngx::timer::"))
+        .collect();
+    assert_eq!(
+        registry_bound, REGISTERED_TIMER_HOSTS,
+        "the registry-bound family is exactly the four timer hosts in manifest order"
+    );
+    let per_name_expected: Vec<&str> = manifest
+        .iter()
+        .copied()
+        .filter(|name| !name.starts_with("ngx::timer::"))
+        .collect();
+    assert_eq!(
+        bindings, per_name_expected,
+        "the per-name binding table must be the manifest minus the timer family, in order"
+    );
+    assert_eq!(
+        production_runtime_host_names(),
+        bindings.as_slice(),
+        "the documented runtime name list must repeat the binding order"
+    );
+
+    // No two names may share one wrapper: a transcribed entry would bind the
+    // same host function twice under different names.
+    let mut wrapper_addresses = HashSet::new();
+    for (name, wrapper) in ngx_host_bindings() {
+        let address = match wrapper {
+            NgxHostWrapper::Static(function) => *function as usize,
+            NgxHostWrapper::Args(function) => *function as usize,
+        };
+        assert!(
+            wrapper_addresses.insert(address),
+            "{name} reuses a host wrapper address already bound by another name"
+        );
+    }
+
+    // The registry genuinely carries the registry-bound family, and the
+    // per-name lists genuinely do not.
+    let registry = ngx_host_registry().expect("timer host registry");
+    for name in &registry_bound {
+        assert!(
+            registry.contains_name(name),
+            "{name} must resolve through ngx_host_registry"
+        );
+    }
+    for name in &bindings {
+        assert!(
+            !name.starts_with("ngx::timer::"),
+            "{name} must stay out of the per-name bind list"
+        );
+    }
+
+    // The comparisons above are positional: a swap in any list must fail.
+    let mut swapped_catalog = catalog.clone();
+    swapped_catalog.swap(0, 1);
+    assert_ne!(
+        swapped_catalog, manifest,
+        "a swapped catalog entry must fail the ordered parity check"
+    );
+    let mut swapped_bindings = bindings.clone();
+    swapped_bindings.swap(0, 1);
+    assert_ne!(
+        swapped_bindings, per_name_expected,
+        "a swapped binding entry must fail the ordered parity check"
+    );
+    assert_ne!(
+        swapped_bindings.as_slice(),
+        production_runtime_host_names(),
+        "a swapped binding entry must fail against the runtime name list"
+    );
 }
 
 #[test]

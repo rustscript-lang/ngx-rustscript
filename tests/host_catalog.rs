@@ -37,17 +37,27 @@ fn error_text(err: &ConfigError) -> String {
 }
 
 #[test]
-fn compiler_catalog_merges_http_imports_and_leaves_io_sqlite_as_builtins() {
+fn compiler_catalog_adds_no_standard_family_schema() {
     let ngx = ngx_host_catalog();
     let merged = compile_host_catalog();
+    // The compile catalog is the ngx surface exactly: no standard family
+    // schema is merged, so no standard position can be relaxed. HTTP stays a
+    // dynamic host import that configuration validates by name.
+    assert_eq!(
+        merged.functions(),
+        ngx.functions(),
+        "the merged catalog must carry exactly the ngx functions"
+    );
+    assert_eq!(merged.functions().len(), ngx.functions().len());
+    assert_eq!(
+        merged.structs(),
+        ngx.structs(),
+        "the merged catalog must not inherit the pd-vm HTTP named records"
+    );
     for name in ["http::client::request", "http::client::sse"] {
         assert!(
-            ngx.function(name).is_none(),
-            "ngx-only catalog leaked {name}"
-        );
-        assert!(
-            merged.function(name).is_some(),
-            "merged catalog misses {name}"
+            merged.function(name).is_none(),
+            "{name} must stay a dynamic standard import, not a catalog function"
         );
         assert!(
             is_standard_host_import(name),
@@ -70,6 +80,188 @@ fn compiler_catalog_merges_http_imports_and_leaves_io_sqlite_as_builtins() {
             "{name} must stay on pd-vm's builtin dispatch path"
         );
         assert!(!is_standard_host_import(name));
+    }
+}
+
+#[test]
+fn standard_http_imports_compile_dynamically_and_keep_the_runtime_contract() {
+    // The documented loose object-literal scripts compile against the dynamic
+    // import, and the runtime payload variants of the pd-vm contract stay
+    // intact in the catalog the adapter validates against.
+    let program = compile(
+        r#"
+        use http;
+        let response: map = http::client::request({
+            method: "GET",
+            url: "http://127.0.0.1:8081/data",
+            headers: { "accept": "application/json" },
+            body: null
+        });
+        let status: int = response["status"];
+        "#,
+    );
+    assert!(
+        program
+            .imports
+            .iter()
+            .any(|import| import.name == "http::client::request"),
+        "the HTTP call must be recorded as an import for configuration validation"
+    );
+    assert!(program_requires_request_state(&program));
+
+    // The runtime contract still declares the duplicate-header array and the
+    // text/bytes header-value payload variants: the merged catalog must not
+    // degrade them.
+    let contract = vm::http_host_catalog();
+    let request = contract
+        .function("http::client::request")
+        .expect("contract request schema");
+    let request_fields = match &request.params[0].ty {
+        HostTypeSchema::Named { fields, .. } => fields.clone(),
+        other => panic!("request param must stay a named record, got {other:?}"),
+    };
+    let headers = request_fields
+        .iter()
+        .find(|field| field.name == "headers")
+        .expect("request record carries headers");
+    match &headers.ty {
+        HostTypeSchema::Optional(inner) => match inner.as_ref() {
+            HostTypeSchema::Array(inner) => match inner.as_ref() {
+                HostTypeSchema::Named { name, .. } => assert_eq!(
+                    name, "HttpRequestHeader",
+                    "headers stay an array of typed header entries (duplicates allowed)"
+                ),
+                other => panic!("header entry must stay named, got {other:?}"),
+            },
+            other => panic!("headers must stay an array, got {other:?}"),
+        },
+        other => panic!("headers must stay optional, got {other:?}"),
+    }
+    let response = contract
+        .function("http::client::request")
+        .expect("contract request schema")
+        .return_type
+        .clone();
+    let response_headers = match &response {
+        HostTypeSchema::Named { fields, .. } => fields
+            .iter()
+            .find(|field| field.name == "headers")
+            .expect("response record carries headers")
+            .ty
+            .clone(),
+        other => panic!("response must stay a named record, got {other:?}"),
+    };
+    match response_headers {
+        HostTypeSchema::Array(inner) => match inner.as_ref() {
+            HostTypeSchema::Named { fields, .. } => {
+                let value = fields
+                    .iter()
+                    .find(|field| field.name == "value")
+                    .expect("response header carries the value variant");
+                match &value.ty {
+                    HostTypeSchema::Named { name, fields } => {
+                        assert_eq!(name, "HttpHeaderValue");
+                        let kinds: HashSet<&str> =
+                            fields.iter().map(|field| field.name.as_str()).collect();
+                        assert!(
+                            kinds.contains("text") && kinds.contains("bytes"),
+                            "the header-value payload stays a text/bytes variant: {kinds:?}"
+                        );
+                    }
+                    other => panic!("header value must stay named, got {other:?}"),
+                }
+            }
+            other => panic!("response header entry must stay named, got {other:?}"),
+        },
+        other => panic!("response headers must stay an array, got {other:?}"),
+    }
+}
+
+#[test]
+fn timer_callback_capability_metadata_matches_the_manifest_capabilities() {
+    // Consume the callback capability metadata: the deny list is exactly the
+    // request/response/ctx/control set, and every manifest entry is admitted
+    // to a timer callback if and only if it requires none of them.
+    use ngx_rustscript::host::{
+        TIMER_CALLBACK_DENIED_CAPABILITIES, TIMER_CALLBACK_PHASE, host_allowed_in_timer_callback,
+    };
+    assert_eq!(TIMER_CALLBACK_PHASE, NgxPhase::Timer);
+    assert_eq!(
+        TIMER_CALLBACK_DENIED_CAPABILITIES,
+        [
+            HostCapability::RequestRead,
+            HostCapability::RequestWrite,
+            HostCapability::RequestCtx,
+            HostCapability::ResponseRead,
+            HostCapability::ResponseWrite,
+            HostCapability::Control,
+        ],
+        "the callback deny list is the reviewed request/response/ctx/control set"
+    );
+    for entry in ngx_host_manifest() {
+        let denied = entry
+            .capabilities
+            .iter()
+            .any(|capability| TIMER_CALLBACK_DENIED_CAPABILITIES.contains(capability));
+        assert_eq!(
+            host_allowed_in_timer_callback(entry.name),
+            !denied,
+            "{} callback admission must agree with its capabilities",
+            entry.name
+        );
+    }
+    // The documented callback surface works without a request; the request-,
+    // response-, ctx-, and control-coupled hosts stay out.
+    for name in [
+        NGX_SLEEP_MS_NAME,
+        "ngx::timer::at",
+        "ngx::timer::every",
+        "ngx::timer::pending_count",
+        "ngx::timer::running_count",
+        "ngx::shared::set",
+        "ngx::semaphore::new",
+        "ngx::log",
+    ] {
+        assert!(
+            host_allowed_in_timer_callback(name),
+            "{name} must be admitted to a timer callback"
+        );
+    }
+    for name in [
+        "ngx::req::get_method",
+        "ngx::header::get",
+        "ngx::var::get",
+        "ngx::ctx::get",
+        "ngx::exit",
+        "ngx::print",
+    ] {
+        assert!(
+            !host_allowed_in_timer_callback(name),
+            "{name} must stay denied in a timer callback"
+        );
+    }
+    assert!(
+        !host_allowed_in_timer_callback("ngx::unknown_host"),
+        "an unlisted host is never admitted to a callback"
+    );
+}
+
+#[test]
+fn timer_catalog_callback_schema_is_the_declared_callable() {
+    use ngx_rustscript::host::{NGX_TIMER_AT_NAME, NGX_TIMER_EVERY_NAME, timer_callback_schema};
+    let catalog = ngx_host_catalog();
+    let expected = timer_callback_schema();
+    for name in [NGX_TIMER_AT_NAME, NGX_TIMER_EVERY_NAME] {
+        let schema = catalog.function(name).expect("timer registration schema");
+        let callback = schema
+            .params
+            .iter()
+            .find(|param| param.name == "callback")
+            .unwrap_or_else(|| panic!("{name} must declare a callback parameter"));
+        assert_eq!(
+            callback.ty, expected,
+            "{name} callback must use the declared `fn(bool) -> unknown` schema"
+        );
     }
 }
 

@@ -63,21 +63,26 @@ addresses require `rss_http_allow_private on`.
 http::client::request(request: map) -> map
 ```
 
-The request object has this interface:
+The request object has this interface. The pinned pd-vm adapter validates the
+concrete contents at runtime, so the accepted payload shapes are the pinned
+contract's: a header list (duplicates are preserved in order) and a discriminated
+body.
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `method` | `string` | yes | `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, or `OPTIONS`; matching is case-insensitive. |
 | `url` | `string` | yes | Absolute URL allowed by the location scheme, host, port, and private-address policy. |
-| `headers` | `map<string, string>` | no | Dynamic header names. `Host`, `Content-Length`, `Transfer-Encoding`, and `Connection` are client-managed and rejected here. |
-| `body` | `string`, `bytes`, or `null` | no | Request payload. Omitted and `null` mean no body. |
+| `headers` | `array` of `{ name: string, value: string }` | no | Header entries in order. Repeating one name sends duplicate headers; `Host`, `Content-Length`, `Transfer-Encoding`, and `Connection` are client-managed and rejected here. |
+| `body` | `{ kind: "text", text: string }` or `{ kind: "bytes", bytes: bytes }` or `null` | no | Request payload variant. Omitted and `null` mean no body. |
 
-The response is a dynamic pd-vm map with these fixed top-level keys:
+The response is a dynamic pd-vm map with these fixed top-level keys; response
+header entries keep the pd-vm `HttpHeaderValue` text/bytes payload variant so
+duplicate headers survive.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `status` | `int` | HTTP status code. |
-| `headers` | `map<string, unknown>` | Dynamic response headers. |
+| `headers` | `array` of `{ name: string, value: { kind: "text", text: string } \| { kind: "bytes", bytes: bytes } }` | Response headers in order, duplicates preserved. |
 | `body` | `bytes` | Buffered response body. Convert with `bytes::to_utf8` when text is required. |
 | `url` | `string` | Final URL after redirects. |
 
@@ -244,14 +249,19 @@ sqlite::close(db);
 ## Runtime and policy summary
 
 I/O and SQLite are pd-vm compiler builtins dispatched through its public
-standard composition. HTTP is merged into the ngx compiler catalog from
-pd-vm's public `http_host_catalog()` and exact-bound through the same
-composition. These maps and handles follow the pinned pd-vm public contract;
+standard composition. HTTP is a pd-vm standard host whose dynamic `map`
+interface is what ngx scripts are written against: the compile catalog leaves
+it dynamic, configuration validates the name and phase, and the pd-vm adapter
+is bound through the standard composition (the per-name path for request VMs,
+and the same composition staged by the timer-host registry for owned-dispatch
+programs). These maps and handles follow the pinned pd-vm public contract;
 ngx-rustscript does not modify RustScript or pd-vm core types.
 
 The executable end-to-end acceptance is
 `nginx_async_pipeline_runs_io_http_sqlite_shared_dict_and_json` in
-`tests/access_nginx.rs`. Deployable files are
+`tests/access_nginx.rs`, and the timer + HTTP combination is covered by
+`http_standard_import_and_ngx_timer_run_together_through_the_registry` in
+`tests/timer_nginx.rs`. Deployable files are
 `examples/async-pipeline.rss` and `examples/async-pipeline.nginx.conf`.
 Walkthrough: [Async pipeline example](../examples/async-pipeline.md).
 

@@ -156,13 +156,11 @@ unsafe SQL remain disabled. Details:
 Not production hosts in this matrix (do not import them):
 
 - `ngx.exec` / internal redirect (`set_uri jump=true`)
-- Timer callbacks/counters and light threads: `ngx::thread::{spawn,wait,kill}`,
-  `ngx::timer::{at,every,pending_count,running_count}`, `ngx::on_abort`,
-  `ngx::run_worker_thread`. Configuration compile rejects those names in
-  access, content, and log (`UnsupportedImport`). The execution contract
-  and upstream `pd-vm` gap are in
-  [docs/design/ngx-scheduler.md](design/ngx-scheduler.md). Those callable
-  families keep the count at **191**.
+- Light threads and abort callbacks: `ngx::thread::{spawn,wait,kill}`,
+  `ngx::on_abort`, `ngx::run_worker_thread`. Configuration compile rejects
+  those names in access, content, and log (`UnsupportedImport`). The execution
+  contract and upstream `pd-vm` gap are in
+  [docs/design/ngx-scheduler.md](design/ngx-scheduler.md).
 - `ngx::semaphore::{new,wait,post,count}` **are** production hosts: a
   worker-owned counting semaphore reached through a VM-local
   `resource<ngx.semaphore>` handle, waiting on the generic `HostFuture`
@@ -176,7 +174,10 @@ Not production hosts in this matrix (do not import them):
   hosts consume their callback through `HostParamPassing::TakeOwned` and run
   it later on a timer-owned VM that outlives the creating request. The family
   is bound through the timer-host registry (owned dispatch has no name-binding
-  API) and is therefore not part of the 195-name per-name bind list. Access and
+  API) and is therefore not part of the 195-name per-name bind list. Each
+  registration owns one ordinary `RequestIdentity` whose fake request id is
+  tagged out of the request-id space, and every `every` round re-arms under a
+  fresh generation so stale wakes cannot start a round early. Access and
   content only; Log fails configuration compile. Registered count **199**
   (191 + 4 semaphore + 4 timer). See [timer](api/timer.md) and
   [docs/design/ngx-scheduler.md](design/ngx-scheduler.md).
@@ -184,6 +185,13 @@ Not production hosts in this matrix (do not import them):
 - `tcpsock:getsslpointer` / `tcpsock:getsslctx` (no NGINX SSL FFI)
 - `print`, `runtime::sleep`, and test hosts `ngx::probe` / `ngx::ready` /
   `ngx::fail`
+
+A timer callback round runs under `NgxPhase::Timer` with a log-only
+`AllowedOps` allowlist: log, `ngx::sleep`/`sleep_ms`, cosocket I/O, the shared
+dictionary, the semaphore family, and the timer family work, while request,
+response, ctx, and control hosts fail closed and are reported through the
+worker log. The standard I/O, HTTP, and SQLite policies are per-VM; a callback
+VM does not inherit the registering location's policy.
 
 `log_by_rss_file` is the executable Log-phase directive: synchronous
 and fail-closed. Config uses a closed positive allowlist (family +

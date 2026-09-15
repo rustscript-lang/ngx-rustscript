@@ -271,6 +271,24 @@ impl<T> IdentityRegistry<T> {
         }
     }
 
+    /// Inserts `identity` exactly once, without comparing values.
+    ///
+    /// An identity that is already present is always
+    /// [`RegistryError::Duplicate`], and capacity is enforced with
+    /// [`RegistryError::Full`] under the same call. Callers that rotate
+    /// identities (a fresh generation per round) need "this exact identity is
+    /// new" as an insertion precondition rather than a value-equality merge.
+    pub fn insert_new(&mut self, identity: RequestIdentity, value: T) -> Result<(), RegistryError> {
+        if self.map.contains_key(&identity) {
+            return Err(RegistryError::Duplicate);
+        }
+        if self.map.len() >= self.cap {
+            return Err(RegistryError::Full);
+        }
+        self.map.insert(identity, value);
+        Ok(())
+    }
+
     pub fn get(&self, identity: RequestIdentity) -> Option<&T> {
         self.map.get(&identity)
     }

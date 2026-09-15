@@ -1194,7 +1194,15 @@ fn build_ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
     // The catalog fingerprint is a whole-catalog hash. Compute it once and
     // reuse it for every exact import schema instead of paying it per host.
     let fingerprint = catalog.fingerprint();
-    let mut registry = vm::HostFunctionRegistry::new();
+    // Build from `empty()`, not `new()`: `new()` pre-registers pd-vm's own
+    // standard catalog snapshot (HTTP named-record schemas with the *standard*
+    // catalog fingerprint). This registry owns every entry itself — the ngx
+    // hosts and timer family from the ngx catalog, and the standard surface
+    // through the composition — so a program's exact import schemas resolve
+    // against exactly the catalog it was compiled with, and a standard import
+    // that the compiler leaves dynamic resolves through the staged standard
+    // composition by name.
+    let mut registry = vm::HostFunctionRegistry::empty();
     registry
         .install_named_struct_schemas(vm::catalog_named_struct_schemas(&catalog))
         .map_err(|error| format!("install named struct schemas: {error}"))?;
