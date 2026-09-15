@@ -24,6 +24,24 @@ pub const NGX_SEMAPHORE_WAIT_NAME: &str = "ngx::semaphore::wait";
 pub const NGX_SEMAPHORE_POST_NAME: &str = "ngx::semaphore::post";
 pub const NGX_SEMAPHORE_COUNT_NAME: &str = "ngx::semaphore::count";
 
+/// Registers one owned callback that runs once after `seconds`.
+///
+/// Consumes the callback through `HostParamPassing::TakeOwned`; the callback VM
+/// is isolated and survives the creating request. The bare `ngx::timer`
+/// namespace marker is deliberately **not** a callable and must never be
+/// catalogued as one.
+pub const NGX_TIMER_AT_NAME: &str = "ngx::timer::at";
+
+/// Registers one owned repeating callback driven by `seconds`.
+pub const NGX_TIMER_EVERY_NAME: &str = "ngx::timer::every";
+
+/// Number of accepted registrations waiting to begin.
+pub const NGX_TIMER_PENDING_COUNT_NAME: &str = "ngx::timer::pending_count";
+
+/// Number of live callback executions, including callbacks waiting on async
+/// host work.
+pub const NGX_TIMER_RUNNING_COUNT_NAME: &str = "ngx::timer::running_count";
+
 /// Resource type key of the VM-local semaphore handle entry.
 ///
 /// The bare `ngx::semaphore` namespace marker is deliberately **not** a
@@ -400,6 +418,12 @@ const COSOCKET_CAPABILITIES: &[HostCapability] = &[HostCapability::Cosocket];
 const PHASE_SOCKET_UDP: &[NgxPhase] = SLEEP_PHASES;
 const PHASE_SEMAPHORE: &[NgxPhase] = &[NgxPhase::Access, NgxPhase::Content];
 
+/// `ngx::timer` registration and count hosts run in Access and Content only.
+///
+/// Log registration is rejected at configuration compile: the phase set below
+/// omits Log and the closed Log allowlist rejects the family independently.
+const PHASE_TIMER_HOSTS: &[NgxPhase] = &[NgxPhase::Access, NgxPhase::Content];
+
 /// `ngx.req.get_method` contexts from OpenResty v0.10.29.
 const PHASE_REQ_GET_METHOD: &[NgxPhase] = &[
     NgxPhase::Set,
@@ -720,6 +744,10 @@ const MANIFEST: &[HostManifestEntry] = &[
         HostSyncKind::Sync,
         "ngx.semaphore.count",
     ),
+    timer_host_entry(NGX_TIMER_AT_NAME, "ngx.timer.at"),
+    timer_host_entry(NGX_TIMER_EVERY_NAME, "ngx.timer.every"),
+    timer_host_entry(NGX_TIMER_PENDING_COUNT_NAME, "ngx.timer.pending_count"),
+    timer_host_entry(NGX_TIMER_RUNNING_COUNT_NAME, "ngx.timer.running_count"),
     codec_entry(NGX_ESCAPE_URI_NAME, "ngx.escape_uri", PHASE_ESCAPE_URI),
     codec_entry(
         NGX_UNESCAPE_URI_NAME,
@@ -1588,6 +1616,23 @@ const fn semaphore_entry(
     }
 }
 
+/// One `ngx::timer` family member.
+///
+/// Every member is synchronous at the host boundary: `at`/`every` accept the
+/// registration and return, and the counters read the worker registry. Callback
+/// execution happens on a timer-owned VM under [`NgxPhase::Timer`], never on the
+/// registering request.
+const fn timer_host_entry(name: &'static str, openresty_name: &'static str) -> HostManifestEntry {
+    HostManifestEntry {
+        name,
+        family: HostFamily::Timer,
+        sync: HostSyncKind::Sync,
+        phases: PHASE_TIMER_HOSTS,
+        capabilities: TIMER_CAPABILITIES,
+        openresty_name,
+    }
+}
+
 const fn cosocket_entry(
     name: &'static str,
     sync: HostSyncKind,
@@ -1628,6 +1673,35 @@ fn semaphore_param() -> HostParamSchema {
         "sem",
         HostTypeSchema::Resource(semaphore_resource_key()),
         HostParamPassing::Borrow,
+    )
+}
+
+/// The `fn(bool) -> unknown` timer callback type.
+///
+/// The callback observes the OpenResty-compatible `premature` flag and its
+/// return value is discarded, so the declared result is `unknown`. This is the
+/// one deliberate dynamic occurrence on the ngx host surface and the only
+/// catalogued callable parameter.
+pub fn timer_callback_schema() -> HostTypeSchema {
+    HostTypeSchema::Callable {
+        params: vec![HostTypeSchema::Bool],
+        result: Box::new(HostTypeSchema::Unknown),
+    }
+}
+
+/// `ngx::timer::{at,every}`: checked seconds plus one owned callback.
+fn timer_registration_schema(owner: &str) -> HostFunctionSchema {
+    HostFunctionSchema::with_return(
+        owner,
+        vec![
+            HostParamSchema::value("seconds", HostTypeSchema::Number),
+            HostParamSchema::with_passing(
+                "callback",
+                timer_callback_schema(),
+                HostParamPassing::TakeOwned,
+            ),
+        ],
+        HostTypeSchema::Bool,
     )
 }
 
@@ -1759,6 +1833,10 @@ fn schema_for(name: &str) -> HostFunctionSchema {
             vec![semaphore_param()],
             HostTypeSchema::Int,
         ),
+        NGX_TIMER_AT_NAME | NGX_TIMER_EVERY_NAME => timer_registration_schema(name),
+        NGX_TIMER_PENDING_COUNT_NAME | NGX_TIMER_RUNNING_COUNT_NAME => {
+            HostFunctionSchema::with_return(name, Vec::new(), HostTypeSchema::Int)
+        }
         NGX_ESCAPE_URI_NAME => HostFunctionSchema::with_return(
             NGX_ESCAPE_URI_NAME,
             vec![
@@ -2459,18 +2537,72 @@ pub fn compile_host_catalog() -> HostApiCatalog {
     for resource in ngx.resources() {
         builder.resource(resource.clone());
     }
+    for structure in ngx.structs() {
+        builder.named_struct(structure.clone());
+    }
     for function in ngx.functions() {
         builder.function(function.clone());
     }
     for resource in standard_imports.resources() {
         builder.resource(resource.clone());
     }
+    for structure in standard_imports.structs() {
+        builder.named_struct(structure.clone());
+    }
     for function in standard_imports.functions() {
-        builder.function(function.clone());
+        builder.function(relaxed_standard_function(function));
     }
     builder
         .build()
         .expect("merged ngx and standard host catalog must be valid")
+}
+
+/// Presents one standard host function with the permissive shapes ngx scripts
+/// are documented against.
+///
+/// The pinned pd-vm HTTP client catalog declares its request/response positions
+/// as named records (`HttpRequest` / `HttpResponse` / SSE records). ngx's
+/// documented scripts pass object literals and index map results, so the merged
+/// compiler catalog relaxes those positions: named arguments become `unknown`
+/// and named results become `map<unknown>`, recursively through containers and
+/// callback signatures. Scalar, resource, and dynamic positions are unchanged.
+fn relaxed_standard_function(function: &vm::HostFunctionSchema) -> vm::HostFunctionSchema {
+    let mut relaxed = function.clone();
+    for param in &mut relaxed.params {
+        param.ty = relax_argument(&param.ty);
+    }
+    relaxed.return_type = relax_result(&function.return_type);
+    relaxed
+}
+
+fn relax_argument(schema: &HostTypeSchema) -> HostTypeSchema {
+    match schema {
+        HostTypeSchema::Named { .. } => HostTypeSchema::Unknown,
+        HostTypeSchema::Optional(inner) => {
+            HostTypeSchema::Optional(Box::new(relax_argument(inner)))
+        }
+        HostTypeSchema::Array(inner) => HostTypeSchema::Array(Box::new(relax_argument(inner))),
+        HostTypeSchema::Map(inner) => HostTypeSchema::Map(Box::new(relax_argument(inner))),
+        HostTypeSchema::Callable { params, result } => HostTypeSchema::Callable {
+            params: params.iter().map(relax_argument).collect(),
+            result: Box::new(relax_result(result)),
+        },
+        other => other.clone(),
+    }
+}
+
+fn relax_result(schema: &HostTypeSchema) -> HostTypeSchema {
+    match schema {
+        HostTypeSchema::Named { .. } => HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+        HostTypeSchema::Optional(inner) => HostTypeSchema::Optional(Box::new(relax_result(inner))),
+        HostTypeSchema::Array(inner) => HostTypeSchema::Array(Box::new(relax_result(inner))),
+        HostTypeSchema::Map(inner) => HostTypeSchema::Map(Box::new(relax_result(inner))),
+        HostTypeSchema::Callable { params, result } => HostTypeSchema::Callable {
+            params: params.iter().map(relax_argument).collect(),
+            result: Box::new(relax_result(result)),
+        },
+        other => other.clone(),
+    }
 }
 
 fn standard_host_names() -> &'static HashSet<String> {
@@ -2500,6 +2632,44 @@ pub fn host_allowed_in_phase(name: &str, phase: NgxPhase) -> bool {
 /// Look up a production manifest entry by import name.
 pub fn manifest_entry(name: &str) -> Option<&'static HostManifestEntry> {
     MANIFEST.iter().find(|entry| entry.name == name)
+}
+
+/// Phase a timer callback executes under.
+///
+/// The callback VM runs detached from the creating request: there is no live
+/// request, so every request-, response-, ctx-, and control-coupled host fails
+/// closed. Allowed callback work is log, `ngx::sleep`/`ngx::sleep_ms`, outbound
+/// async I/O (cosocket), the shared dictionary, the semaphore family, and the
+/// timer family itself.
+pub const TIMER_CALLBACK_PHASE: NgxPhase = NgxPhase::Timer;
+
+/// Capabilities a host must not require to run inside a timer callback.
+///
+/// This is the deny list behind [`host_allowed_in_timer_callback`]: request
+/// reads/writes (`ngx::req::*`, `ngx::var::*`, `ngx::header::*`, response
+/// metadata), request `ngx.ctx`, response output, and control
+/// (`ngx::exit`, `ngx::redirect`).
+pub const TIMER_CALLBACK_DENIED_CAPABILITIES: &[HostCapability] = &[
+    HostCapability::RequestRead,
+    HostCapability::RequestWrite,
+    HostCapability::RequestCtx,
+    HostCapability::ResponseRead,
+    HostCapability::ResponseWrite,
+    HostCapability::Control,
+];
+
+/// True when a manifest entry may run inside a `ngx::timer` callback.
+///
+/// Unknown names are rejected: a host must be catalogued in [`MANIFEST`] to
+/// reach the callback VM registry.
+pub fn host_allowed_in_timer_callback(name: &str) -> bool {
+    let Some(entry) = manifest_entry(name) else {
+        return false;
+    };
+    entry
+        .capabilities
+        .iter()
+        .all(|capability| !TIMER_CALLBACK_DENIED_CAPABILITIES.contains(capability))
 }
 
 /// Closed positive `log_by_rss_file` allowlist.

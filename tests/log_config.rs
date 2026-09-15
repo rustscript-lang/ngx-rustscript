@@ -40,8 +40,8 @@ fn compile_log_err(source: &str) -> ConfigError {
 }
 
 #[test]
-fn production_host_count_stays_195() {
-    assert_eq!(ngx_host_manifest().len(), 195);
+fn production_host_count_stays_199() {
+    assert_eq!(ngx_host_manifest().len(), 199);
 }
 
 #[test]
@@ -289,8 +289,8 @@ fn log_phase_rejects_sleep_udp_tcp_output_control_and_mutation() {
 }
 
 #[test]
-fn closed_log_allowlist_covers_all_195_hosts_and_rejects_future_sync_log() {
-    assert_eq!(ngx_host_manifest().len(), 195);
+fn closed_log_allowlist_covers_all_199_hosts_and_rejects_future_sync_log() {
+    assert_eq!(ngx_host_manifest().len(), 199);
     let mut allowed = 0usize;
     let mut rejected = 0usize;
     for entry in ngx_host_manifest() {
@@ -316,10 +316,10 @@ fn closed_log_allowlist_covers_all_195_hosts_and_rejects_future_sync_log() {
     for name in LOG_ALLOWED_NAMES {
         assert!(
             ngx_rustscript::host::manifest_entry(name).is_some(),
-            "{name} must exist in the 195-host catalog"
+            "{name} must exist in the 199-host catalog"
         );
     }
-    assert_eq!(allowed + rejected, 195);
+    assert_eq!(allowed + rejected, 199);
     assert_eq!(allowed, LOG_ALLOWED_NAMES.len());
     assert!(allowed > 0 && rejected > 0);
 
@@ -406,7 +406,7 @@ fn no_async_host_validates_for_log_across_all_hosts() {
         seen_async > 0,
         "catalog must include async hosts to lock the Log invariant"
     );
-    assert_eq!(ngx_host_manifest().len(), 195);
+    assert_eq!(ngx_host_manifest().len(), 199);
 }
 
 #[test]

@@ -60,6 +60,13 @@ impl AllowedOps {
                 .union(Self::LOG)
                 .union(Self::REQUEST_CTX)
                 .union(Self::RESPONSE_READ),
+            // A timer callback is detached from every request: logging is the
+            // only request-shaped operation it may perform. `ngx::sleep`,
+            // outbound async I/O, the shared dictionary, and the semaphore
+            // family need no request scope, while every request-, response-,
+            // ctx-, and control-coupled host fails closed because there is no
+            // live request and `CONTROL`/request bits are absent.
+            NgxPhase::Timer => Self::LOG,
             _ => Self::EMPTY,
         }
     }

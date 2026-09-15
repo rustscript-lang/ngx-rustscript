@@ -1,13 +1,19 @@
 //! Fail-closed scheduler / callable-family gate.
 //!
-//! Light threads, timer callbacks, and `on_abort` callables, plus
-//! `run_worker_thread`, stay absent from the production surface. The
-//! worker-owned semaphore family (`ngx::semaphore::{new,wait,post,count}`) is
-//! the only landed scheduler-adjacent family: it needs no script callable and
-//! keeps the bare `ngx::semaphore` namespace marker unregistered.
-//! Configuration compile rejects every remaining candidate in Access, Content,
-//! and Log. Do not register the callable families without revisiting
-//! `docs/design/ngx-scheduler.md`.
+//! Light threads, `on_abort` callables, and `run_worker_thread` stay absent
+//! from the production surface. Two worker-owned families are landed:
+//!
+//! - `ngx::semaphore::{new,wait,post,count}` — callable-free, so its four
+//!   callables bind through the ordinary per-name path;
+//! - `ngx::timer::{at,every,pending_count,running_count}` — the registration
+//!   hosts consume their callback through `HostParamPassing::TakeOwned`, so the
+//!   family binds through the timer-host registry (`ngx_host_registry`), not
+//!   through `bind_ngx_hosts`'s name/symbol path.
+//!
+//! Both keep their bare namespace markers (`ngx::semaphore`, `ngx::timer`)
+//! unregistered. Configuration compile rejects every remaining candidate in
+//! Access, Content, and Log. Do not register the callable families without
+//! revisiting `docs/design/ngx-scheduler.md`.
 
 use ngx_rustscript_nginx_test_stubs as _;
 
@@ -29,19 +35,15 @@ use vm::{
 
 /// Exact candidate import list for the still-gated scheduler families.
 ///
-/// The four registered semaphore callables are deliberately absent: they
-/// landed with the worker-owned semaphore family. The bare `ngx::semaphore`
-/// namespace marker must **not** be registered, so it stays on this list.
+/// The landed semaphore and timer callables are deliberately absent; their four
+/// and two bare namespace markers stay on this list.
 const SCHEDULER_CANDIDATES: &[&str] = &[
     "ngx::thread::spawn",
     "ngx::thread::wait",
     "ngx::thread::kill",
-    "ngx::timer::at",
-    "ngx::timer::every",
-    "ngx::timer::pending_count",
-    "ngx::timer::running_count",
     "ngx::on_abort",
     "ngx::semaphore",
+    "ngx::timer",
     "ngx::run_worker_thread",
 ];
 
@@ -52,6 +54,20 @@ const REGISTERED_SEMAPHORE_HOSTS: &[&str] = &[
     "ngx::semaphore::post",
     "ngx::semaphore::count",
 ];
+
+/// The landed callable family. Exactly four callables, no marker.
+const REGISTERED_TIMER_HOSTS: &[&str] = &[
+    "ngx::timer::at",
+    "ngx::timer::every",
+    "ngx::timer::pending_count",
+    "ngx::timer::running_count",
+];
+
+/// Hosts that must stay bound through [`bind_ngx_hosts`]'s per-name path.
+///
+/// The timer family is deliberately not here: owned-dispatch hosts have no
+/// name-binding API, so they resolve from the timer-host registry instead.
+const TIMER_REGISTRY_ONLY_HOSTS: &[&str] = REGISTERED_TIMER_HOSTS;
 
 const CONFIG_PHASES: [NgxPhase; 3] = [NgxPhase::Access, NgxPhase::Content, NgxPhase::Log];
 
@@ -95,6 +111,9 @@ fn schema_contains_callable(schema: &HostTypeSchema) -> bool {
         HostTypeSchema::Array(inner)
         | HostTypeSchema::Map(inner)
         | HostTypeSchema::Optional(inner) => schema_contains_callable(inner),
+        HostTypeSchema::Named { fields, .. } => fields
+            .iter()
+            .any(|field| schema_contains_callable(&field.ty)),
         HostTypeSchema::Unknown
         | HostTypeSchema::Null
         | HostTypeSchema::Int
@@ -111,7 +130,7 @@ fn assert_send<T: Send>() {}
 fn assert_sync<T: Sync>() {}
 
 /// Adding any other `HostFamily` must fail this match until the design is
-/// revisited. `Semaphore` is the one reviewed, callable-free addition.
+/// revisited. `Semaphore` is the reviewed, callable-free addition.
 fn host_family_has_no_callable_scheduler_variant(family: HostFamily) {
     match family {
         HostFamily::Timer
@@ -131,7 +150,7 @@ fn host_family_has_no_callable_scheduler_variant(family: HostFamily) {
 }
 
 /// Adding any other `HostCapability` must fail this match until the design is
-/// revisited. `Semaphore` is the one reviewed, callable-free addition.
+/// revisited. `Semaphore` is the reviewed, callable-free addition.
 fn host_capability_has_no_callable_scheduler_variant(capability: HostCapability) {
     match capability {
         HostCapability::Timer
@@ -153,15 +172,32 @@ fn host_capability_has_no_callable_scheduler_variant(capability: HostCapability)
 }
 
 #[test]
-fn production_host_count_stays_exactly_195() {
-    assert_eq!(ngx_host_manifest().len(), 195);
-    assert_eq!(ngx_host_catalog().functions().len(), 195);
-    assert_eq!(production_runtime_host_names().len(), 195);
+fn production_host_count_reaches_199_with_the_timer_family() {
+    assert_eq!(ngx_host_manifest().len(), 199);
+    assert_eq!(ngx_host_catalog().functions().len(), 199);
+    assert_eq!(
+        production_runtime_host_names().len(),
+        195,
+        "the per-name bind list keeps the 191 baseline plus the semaphore family"
+    );
     assert_eq!(
         ngx_host_manifest().len(),
-        191 + REGISTERED_SEMAPHORE_HOSTS.len(),
-        "the only addition over the 191 callable-family baseline is the semaphore family"
+        191 + REGISTERED_SEMAPHORE_HOSTS.len() + REGISTERED_TIMER_HOSTS.len(),
+        "the only additions over the 191 callable-family baseline are the \
+         semaphore and timer families"
     );
+    let manifest: HashSet<&str> = ngx_host_manifest().iter().map(|entry| entry.name).collect();
+    let mut partitioned: HashSet<&str> = production_runtime_host_names().iter().copied().collect();
+    partitioned.extend(REGISTERED_TIMER_HOSTS.iter().copied());
+    assert_eq!(
+        partitioned.len(),
+        manifest.len(),
+        "the per-name bind list plus the timer-family registry list must \
+         partition the manifest"
+    );
+    for name in &manifest {
+        assert!(partitioned.contains(name), "{name} must be bound");
+    }
 }
 
 #[test]
@@ -185,6 +221,49 @@ fn semaphore_family_is_registered_without_the_namespace_marker() {
     for phase in [NgxPhase::Access, NgxPhase::Content] {
         compile_rss_source_for_phase(source, phase)
             .unwrap_or_else(|err| panic!("{phase:?} must accept the semaphore family: {err}"));
+    }
+}
+
+#[test]
+fn timer_family_is_registered_without_the_namespace_marker() {
+    let catalog = ngx_host_catalog();
+    let manifest: HashSet<&str> = ngx_host_manifest().iter().map(|entry| entry.name).collect();
+    for name in REGISTERED_TIMER_HOSTS {
+        assert!(
+            catalog.function(name).is_some(),
+            "{name} must be in the compiler catalog"
+        );
+        assert!(manifest.contains(name), "{name} must be in the manifest");
+    }
+    assert!(
+        catalog.function("ngx::timer").is_none(),
+        "the bare ngx::timer namespace marker must not be a callable"
+    );
+    let source = "use ngx;\nngx::timer::at(0.05, |premature| null);\n";
+    for phase in [NgxPhase::Access, NgxPhase::Content] {
+        compile_rss_source_for_phase(source, phase)
+            .unwrap_or_else(|err| panic!("{phase:?} must accept the timer family: {err}"));
+    }
+}
+
+#[test]
+fn timer_family_fails_configuration_compile_in_log() {
+    let phase = NgxPhase::Log;
+    for source in [
+        "use ngx;\nngx::timer::at(0.05, |premature| null);\n",
+        "use ngx;\nngx::timer::every(0.05, |premature| null);\n",
+        "use ngx;\nngx::timer::pending_count();\n",
+        "use ngx;\nngx::timer::running_count();\n",
+    ] {
+        let err =
+            compile_rss_source_for_phase(source, phase).expect_err("timer hosts must fail in Log");
+        match err {
+            ConfigError::PhaseForbidden { name, phase: got } => {
+                assert!(name.starts_with("ngx::timer::"), "{name}");
+                assert_eq!(got, phase);
+            }
+            other => panic!("Log must fail configuration compile, got {other:?}"),
+        }
     }
 }
 
@@ -253,6 +332,12 @@ fn scheduler_candidates_do_not_bind_on_a_production_vm() {
             "bind_ngx_hosts must not install {name}"
         );
     }
+    for name in TIMER_REGISTRY_ONLY_HOSTS {
+        assert!(
+            !vm.has_bound_function(name),
+            "{name} binds through the timer-host registry, not the name path"
+        );
+    }
     assert!(
         vm.has_bound_function("ngx::sleep"),
         "production bind must still install ngx::sleep"
@@ -295,20 +380,32 @@ fn host_family_and_capability_have_no_callable_scheduler_variant() {
 }
 
 #[test]
-fn production_catalog_has_no_callable_host_schema() {
+fn callable_schema_is_limited_to_timer_registration_hosts() {
     for schema in ngx_host_catalog().functions() {
+        let registration_host = REGISTERED_TIMER_HOSTS
+            .iter()
+            .take(2)
+            .any(|name| *name == schema.name);
         assert!(
             !schema_contains_callable(&schema.return_type),
-            "{} must not return a callable until the scheduler contract is implemented",
+            "{} must not return a callable",
             schema.name
         );
         for param in &schema.params {
-            assert!(
-                !schema_contains_callable(&param.ty),
-                "{} parameter {} must not be a callable until the scheduler contract is implemented",
-                schema.name,
-                param.name
-            );
+            if registration_host && param.name == "callback" {
+                assert!(
+                    schema_contains_callable(&param.ty),
+                    "{} callback must be a callable",
+                    schema.name
+                );
+            } else {
+                assert!(
+                    !schema_contains_callable(&param.ty),
+                    "{} parameter {} must not be a callable",
+                    schema.name,
+                    param.name
+                );
+            }
         }
     }
 }

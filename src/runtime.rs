@@ -85,9 +85,11 @@ impl WorkerRuntime {
             .thread_name("ngx-rustscript-async")
             .build()
             .map_err(|err| RuntimeError::RuntimeBuild(err.to_string()))?;
+        let notify = NotifyBridge::with_capacity(cap)?;
+        crate::timer::install_worker_timers(runtime.handle().clone(), notify.sender());
         Ok(Self {
             runtime: Some(runtime),
-            notify: NotifyBridge::with_capacity(cap)?,
+            notify,
             next_generation: 1,
             stopped: false,
         })
@@ -186,7 +188,9 @@ impl WorkerRuntime {
     /// and in-flight futures), then close eventfd with the existing fd gate.
     ///
     /// Live semaphores are closed and their waiters woken **before** the
-    /// runtime is dropped so a parked wait never resumes silently.
+    /// runtime is dropped so a parked wait never resumes silently. Pending
+    /// timer callbacks run once with `premature=true`, live callbacks are
+    /// cancelled, and every callback VM is released in the same step.
     pub fn shutdown(&mut self) {
         if self.stopped {
             return;
@@ -194,6 +198,7 @@ impl WorkerRuntime {
         self.stopped = true;
         crate::socket::pool::shutdown_current();
         crate::semaphore::shutdown_current();
+        crate::timer::shutdown_current();
         self.notify.reject_new();
         let _ = self.notify.reclaim_all();
         if let Some(runtime) = self.runtime.take() {
@@ -297,6 +302,9 @@ unsafe extern "C" fn eventfd_read_handler(ev: *mut ngx_event_t) {
             Some(worker) => worker.drain_ready_outcome(),
             None => (Vec::new(), None),
         });
+        // Timer identities dispatch on the timer registry first; request
+        // identities are unknown to it and route to the request path unchanged.
+        crate::timer::on_worker_event(&ready);
         crate::access::on_async_ready(ready);
         match err {
             Some(err) => Err(err),

@@ -35,15 +35,16 @@ const COUNT: &str = NGX_SEMAPHORE_COUNT_NAME;
 const HOSTS: [&str; 4] = [NEW, WAIT, POST, COUNT];
 
 /// Scheduler candidates that must stay absent from the production surface.
+///
+/// The four `ngx::timer` callables have landed (bound through the timer-host
+/// registry); their bare namespace marker stays gated here along with the
+/// remaining families.
 const GATED_CANDIDATES: &[&str] = &[
     "ngx::semaphore",
+    "ngx::timer",
     "ngx::thread::spawn",
     "ngx::thread::wait",
     "ngx::thread::kill",
-    "ngx::timer::at",
-    "ngx::timer::every",
-    "ngx::timer::pending_count",
-    "ngx::timer::running_count",
     "ngx::on_abort",
     "ngx::run_worker_thread",
 ];
@@ -160,8 +161,11 @@ impl Driver {
 #[test]
 fn semaphore_catalog_is_typed_and_phase_closed() {
     let catalog = ngx_host_catalog();
-    assert_eq!(ngx_host_manifest().len(), 195);
-    assert_eq!(catalog.functions().len(), 195);
+    // 191 callable baseline + 4 semaphore + 4 timer hosts; the per-name bind
+    // list stays 195 because the owned `ngx::timer::{at,every}` registrations
+    // bind through the timer-host registry.
+    assert_eq!(ngx_host_manifest().len(), 199);
+    assert_eq!(catalog.functions().len(), 199);
     assert_eq!(production_runtime_host_names().len(), 195);
     assert!(catalog.resource(NGX_SEMAPHORE_RESOURCE_KEY).is_some());
 

@@ -387,18 +387,33 @@ fn manifest_catalog_and_runtime_names_correspond() {
 
     assert_eq!(
         catalog_names.as_slice(),
-        runtime_names,
-        "compiler catalog names and order must match runtime bindings exactly"
-    );
-    assert_eq!(
         manifest_names.as_slice(),
-        runtime_names,
-        "manifest names and order must match runtime bindings exactly"
+        "compiler catalog names and order must match the manifest exactly"
     );
     assert_eq!(
         catalog.functions().len(),
-        runtime_names.len(),
+        manifest_names.len(),
         "catalog must not declare overloads for production ngx hosts"
+    );
+    // The owned `ngx::timer::{at,every}` registrations have no name-binding API
+    // (they transfer their callback through `HostParamPassing::TakeOwned`), so
+    // the four timer hosts resolve through the timer-host registry
+    // (`ngx_host_registry`) instead of the per-name bind list. Every other
+    // manifest entry keeps a 1:1 per-name runtime binding.
+    let (timer_names, per_name_expected): (Vec<&str>, Vec<&str>) = manifest_names
+        .iter()
+        .copied()
+        .partition(|name| name.starts_with("ngx::timer::"));
+    assert_eq!(timer_names.len(), 4, "the timer family has four hosts");
+    assert_eq!(
+        runtime_names,
+        per_name_expected.as_slice(),
+        "per-name runtime bindings must match the manifest minus the timer registry family"
+    );
+    assert_eq!(
+        runtime_names.len() + timer_names.len(),
+        manifest_names.len(),
+        "per-name bindings plus the timer family must cover the manifest"
     );
 }
 
@@ -446,13 +461,25 @@ fn each_manifest_entry_has_phase_sync_capability_and_openresty_name() {
         );
         match entry.family {
             HostFamily::Timer => {
-                assert_eq!(entry.sync, HostSyncKind::Async);
                 assert!(
                     entry.capabilities.contains(&HostCapability::Timer),
                     "{} is a timer host",
                     entry.name
                 );
-                assert_eq!(entry.openresty_name, "ngx.sleep");
+                if entry.sync == HostSyncKind::Async {
+                    // `ngx::sleep` / `ngx::sleep_ms`.
+                    assert_eq!(entry.openresty_name, "ngx.sleep");
+                } else {
+                    // `ngx::timer::{at,every,pending_count,running_count}`:
+                    // registration and counts are synchronous host calls; the
+                    // callback executes later on a timer-owned VM.
+                    assert!(
+                        entry.openresty_name.starts_with("ngx.timer."),
+                        "{} must name an ngx.timer API, got {}",
+                        entry.name,
+                        entry.openresty_name
+                    );
+                }
             }
             HostFamily::Codec => {
                 assert_eq!(entry.sync, HostSyncKind::Sync);

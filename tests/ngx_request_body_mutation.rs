@@ -190,8 +190,8 @@ fn install_in_memory_body(req: &mut ngx_http_request_t, chunks: &mut [Vec<u8>]) 
 #[test]
 fn production_host_count_is_195_with_body_mutation_hosts() {
     assert_eq!(production_runtime_host_names().len(), 195);
-    assert_eq!(ngx_host_catalog().functions().len(), 195);
-    assert_eq!(ngx_host_manifest().len(), 195);
+    assert_eq!(ngx_host_catalog().functions().len(), 199);
+    assert_eq!(ngx_host_manifest().len(), 199);
     let runtime: std::collections::BTreeSet<&str> =
         production_runtime_host_names().iter().copied().collect();
     for name in MUTATION_HOSTS {

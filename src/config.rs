@@ -325,7 +325,11 @@ pub fn validate_program_imports_for_phase(
 
 fn request_state_required_by_imports(program: &Program) -> bool {
     program.imports.iter().any(|import| {
-        is_standard_host_import(&import.name)
+        // The timer family resolves through the timer-host registry (owned
+        // dispatch) and must run on the request-owned VM path; the pooled path
+        // cannot carry the owned `ngx::timer::{at,every}` bindings.
+        crate::host::ngx_timer_host_names().contains(&import.name.as_str())
+            || is_standard_host_import(&import.name)
             || ngx_host_manifest().iter().any(|entry| {
                 entry.name == import.name.as_str()
                     && (entry.sync == HostSyncKind::Async

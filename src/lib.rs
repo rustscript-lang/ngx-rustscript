@@ -19,6 +19,7 @@ pub mod runtime;
 pub mod semaphore;
 pub mod shared_dict;
 pub(crate) mod socket;
+pub mod timer;
 pub(crate) mod vm_pool;
 
 #[cfg(test)]

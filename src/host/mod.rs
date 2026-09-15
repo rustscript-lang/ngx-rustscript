@@ -10,6 +10,7 @@ use vm::{Vm, VmError};
 pub mod catalog;
 pub(crate) mod context;
 pub(crate) mod standard;
+pub(crate) mod timer;
 
 pub use catalog::{
     HostCapability, HostFamily, HostManifestEntry, HostSyncKind, LOG_ALLOWED_NAMES,
@@ -49,10 +50,17 @@ pub use catalog::{
     NGX_SOCKET_UDP_SETPEERNAME_NAME, NGX_SOCKET_UDP_SETTIMEOUT_NAME, NGX_STATUS_GET_NAME,
     NGX_STATUS_SET_NAME, NGX_TIME_NAME, NGX_TODAY_NAME, NGX_UNESCAPE_URI_NAME,
     NGX_UPDATE_TIME_NAME, NGX_UTCTIME_NAME, NGX_VAR_GET_NAME, NGX_VAR_SET_NAME, NgxPhase,
-    host_allowed_in_phase, host_validates_for_log, log_allowlist_accepts, manifest_entry,
-    ngx_host_catalog, ngx_host_manifest,
+    TIMER_CALLBACK_DENIED_CAPABILITIES, TIMER_CALLBACK_PHASE, host_allowed_in_phase,
+    host_allowed_in_timer_callback, host_validates_for_log, log_allowlist_accepts, manifest_entry,
+    ngx_host_catalog, ngx_host_manifest, timer_callback_schema,
 };
 pub use catalog::{compile_host_catalog, is_standard_host_import};
+
+pub use catalog::{
+    NGX_TIMER_AT_NAME, NGX_TIMER_EVERY_NAME, NGX_TIMER_PENDING_COUNT_NAME,
+    NGX_TIMER_RUNNING_COUNT_NAME,
+};
+
 pub use context::{
     AllowedOps, RequestDisposition, ScopeError, VmEntryObservation, capture_vm_entries,
     current_allowed_ops, current_identity, current_phase, current_request_live, is_active,
@@ -341,521 +349,896 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
     ]
 }
 
+/// One production host wrapper shape.
+#[derive(Clone, Copy)]
+pub enum NgxHostWrapper {
+    /// `bind_static_function` shape: receives the VM and the call arguments.
+    Static(vm::StaticHostFunction),
+    /// `bind_static_args_function` shape: receives only the call arguments.
+    Args(vm::StaticHostArgsFunction),
+}
+
+/// Every production host binding, in bind order.
+///
+/// Single source of truth for [`bind_ngx_hosts`] and for the registry that
+/// binds the VMs importing the `ngx::timer` family ([`ngx_host_registry`]).
+pub fn ngx_host_bindings() -> &'static [(&'static str, NgxHostWrapper)] {
+    &[
+        (
+            NGX_SLEEP_NAME,
+            NgxHostWrapper::Static(layout::helpers::functions::sleep),
+        ),
+        (
+            NGX_SLEEP_MS_NAME,
+            NgxHostWrapper::Static(layout::helpers::functions::sleep_ms),
+        ),
+        (
+            NGX_SEMAPHORE_NEW_NAME,
+            NgxHostWrapper::Static(layout::helpers::semaphore::new),
+        ),
+        (
+            NGX_SEMAPHORE_WAIT_NAME,
+            NgxHostWrapper::Static(layout::helpers::semaphore::wait),
+        ),
+        (
+            NGX_SEMAPHORE_POST_NAME,
+            NgxHostWrapper::Static(layout::helpers::semaphore::post),
+        ),
+        (
+            NGX_SEMAPHORE_COUNT_NAME,
+            NgxHostWrapper::Static(layout::helpers::semaphore::count),
+        ),
+        (
+            NGX_ESCAPE_URI_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::escape_uri),
+        ),
+        (
+            NGX_UNESCAPE_URI_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::unescape_uri),
+        ),
+        (
+            NGX_ENCODE_ARGS_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::encode_args),
+        ),
+        (
+            NGX_DECODE_ARGS_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::decode_args),
+        ),
+        (
+            NGX_ENCODE_BASE64_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::encode_base64),
+        ),
+        (
+            NGX_DECODE_BASE64_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::decode_base64),
+        ),
+        (
+            NGX_DECODE_BASE64MIME_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::decode_base64mime),
+        ),
+        (
+            NGX_CRC32_SHORT_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::crc32_short),
+        ),
+        (
+            NGX_CRC32_LONG_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::crc32_long),
+        ),
+        (
+            NGX_HMAC_SHA1_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::hmac_sha1),
+        ),
+        (
+            NGX_MD5_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::md5),
+        ),
+        (
+            NGX_MD5_BIN_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::md5_bin),
+        ),
+        (
+            NGX_SHA1_BIN_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::sha1_bin),
+        ),
+        (
+            NGX_QUOTE_SQL_STR_NAME,
+            NgxHostWrapper::Args(layout::helpers::codec::quote_sql_str),
+        ),
+        (
+            NGX_TODAY_NAME,
+            NgxHostWrapper::Args(layout::helpers::time::today),
+        ),
+        (
+            NGX_TIME_NAME,
+            NgxHostWrapper::Args(layout::helpers::time::time),
+        ),
+        (
+            NGX_NOW_NAME,
+            NgxHostWrapper::Args(layout::helpers::time::now),
+        ),
+        (
+            NGX_UPDATE_TIME_NAME,
+            NgxHostWrapper::Args(layout::helpers::time::update_time),
+        ),
+        (
+            NGX_LOCALTIME_NAME,
+            NgxHostWrapper::Args(layout::helpers::time::localtime),
+        ),
+        (
+            NGX_UTCTIME_NAME,
+            NgxHostWrapper::Args(layout::helpers::time::utctime),
+        ),
+        (
+            NGX_COOKIE_TIME_NAME,
+            NgxHostWrapper::Args(layout::helpers::time::cookie_time),
+        ),
+        (
+            NGX_HTTP_TIME_NAME,
+            NgxHostWrapper::Args(layout::helpers::time::http_time),
+        ),
+        (
+            NGX_PARSE_HTTP_TIME_NAME,
+            NgxHostWrapper::Args(layout::helpers::time::parse_http_time),
+        ),
+        (
+            "ngx::get_phase",
+            NgxHostWrapper::Args(layout::helpers::meta::get_phase),
+        ),
+        (
+            "ngx::config::subsystem",
+            NgxHostWrapper::Args(layout::helpers::meta::config_subsystem),
+        ),
+        (
+            "ngx::config::debug",
+            NgxHostWrapper::Args(layout::helpers::meta::config_debug),
+        ),
+        (
+            "ngx::config::prefix",
+            NgxHostWrapper::Args(layout::helpers::meta::config_prefix),
+        ),
+        (
+            "ngx::config::nginx_version",
+            NgxHostWrapper::Args(layout::helpers::meta::config_nginx_version),
+        ),
+        (
+            "ngx::config::nginx_configure",
+            NgxHostWrapper::Args(layout::helpers::meta::config_nginx_configure),
+        ),
+        (
+            "ngx::config::ngx_rustscript_version",
+            NgxHostWrapper::Args(layout::helpers::meta::config_ngx_rustscript_version),
+        ),
+        (
+            "ngx::worker::exiting",
+            NgxHostWrapper::Args(layout::helpers::meta::worker_exiting),
+        ),
+        (
+            "ngx::worker::pid",
+            NgxHostWrapper::Args(layout::helpers::meta::worker_pid),
+        ),
+        (
+            "ngx::worker::pids",
+            NgxHostWrapper::Args(layout::helpers::meta::worker_pids),
+        ),
+        (
+            "ngx::worker::count",
+            NgxHostWrapper::Args(layout::helpers::meta::worker_count),
+        ),
+        (
+            "ngx::worker::id",
+            NgxHostWrapper::Args(layout::helpers::meta::worker_id),
+        ),
+        ("ngx::log", NgxHostWrapper::Args(layout::helpers::log::log)),
+        (
+            "ngx::core::ok",
+            NgxHostWrapper::Args(layout::helpers::meta::core_ok),
+        ),
+        (
+            "ngx::core::error",
+            NgxHostWrapper::Args(layout::helpers::meta::core_error),
+        ),
+        (
+            "ngx::core::again",
+            NgxHostWrapper::Args(layout::helpers::meta::core_again),
+        ),
+        (
+            "ngx::core::done",
+            NgxHostWrapper::Args(layout::helpers::meta::core_done),
+        ),
+        (
+            "ngx::core::declined",
+            NgxHostWrapper::Args(layout::helpers::meta::core_declined),
+        ),
+        (
+            "ngx::core::null_value",
+            NgxHostWrapper::Args(layout::helpers::meta::core_null_value),
+        ),
+        (
+            "ngx::http::get",
+            NgxHostWrapper::Args(layout::helpers::meta::http_get),
+        ),
+        (
+            "ngx::http::head",
+            NgxHostWrapper::Args(layout::helpers::meta::http_head),
+        ),
+        (
+            "ngx::http::put",
+            NgxHostWrapper::Args(layout::helpers::meta::http_put),
+        ),
+        (
+            "ngx::http::post",
+            NgxHostWrapper::Args(layout::helpers::meta::http_post),
+        ),
+        (
+            "ngx::http::delete",
+            NgxHostWrapper::Args(layout::helpers::meta::http_delete),
+        ),
+        (
+            "ngx::http::options",
+            NgxHostWrapper::Args(layout::helpers::meta::http_options),
+        ),
+        (
+            "ngx::http::mkcol",
+            NgxHostWrapper::Args(layout::helpers::meta::http_mkcol),
+        ),
+        (
+            "ngx::http::copy",
+            NgxHostWrapper::Args(layout::helpers::meta::http_copy),
+        ),
+        (
+            "ngx::http::move",
+            NgxHostWrapper::Args(layout::helpers::meta::http_move),
+        ),
+        (
+            "ngx::http::propfind",
+            NgxHostWrapper::Args(layout::helpers::meta::http_propfind),
+        ),
+        (
+            "ngx::http::proppatch",
+            NgxHostWrapper::Args(layout::helpers::meta::http_proppatch),
+        ),
+        (
+            "ngx::http::lock",
+            NgxHostWrapper::Args(layout::helpers::meta::http_lock),
+        ),
+        (
+            "ngx::http::unlock",
+            NgxHostWrapper::Args(layout::helpers::meta::http_unlock),
+        ),
+        (
+            "ngx::http::patch",
+            NgxHostWrapper::Args(layout::helpers::meta::http_patch),
+        ),
+        (
+            "ngx::http::trace",
+            NgxHostWrapper::Args(layout::helpers::meta::http_trace),
+        ),
+        (
+            "ngx::http::status_continue",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_continue),
+        ),
+        (
+            "ngx::http::status_switching_protocols",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_switching_protocols),
+        ),
+        (
+            "ngx::http::status_ok",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_ok),
+        ),
+        (
+            "ngx::http::status_created",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_created),
+        ),
+        (
+            "ngx::http::status_accepted",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_accepted),
+        ),
+        (
+            "ngx::http::status_no_content",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_no_content),
+        ),
+        (
+            "ngx::http::status_partial_content",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_partial_content),
+        ),
+        (
+            "ngx::http::status_special_response",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_special_response),
+        ),
+        (
+            "ngx::http::status_moved_permanently",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_moved_permanently),
+        ),
+        (
+            "ngx::http::status_moved_temporarily",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_moved_temporarily),
+        ),
+        (
+            "ngx::http::status_see_other",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_see_other),
+        ),
+        (
+            "ngx::http::status_not_modified",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_not_modified),
+        ),
+        (
+            "ngx::http::status_temporary_redirect",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_temporary_redirect),
+        ),
+        (
+            "ngx::http::status_permanent_redirect",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_permanent_redirect),
+        ),
+        (
+            "ngx::http::status_bad_request",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_bad_request),
+        ),
+        (
+            "ngx::http::status_unauthorized",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_unauthorized),
+        ),
+        (
+            "ngx::http::status_payment_required",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_payment_required),
+        ),
+        (
+            "ngx::http::status_forbidden",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_forbidden),
+        ),
+        (
+            "ngx::http::status_not_found",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_not_found),
+        ),
+        (
+            "ngx::http::status_not_allowed",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_not_allowed),
+        ),
+        (
+            "ngx::http::status_not_acceptable",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_not_acceptable),
+        ),
+        (
+            "ngx::http::status_request_timeout",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_request_timeout),
+        ),
+        (
+            "ngx::http::status_conflict",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_conflict),
+        ),
+        (
+            "ngx::http::status_gone",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_gone),
+        ),
+        (
+            "ngx::http::status_upgrade_required",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_upgrade_required),
+        ),
+        (
+            "ngx::http::status_too_many_requests",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_too_many_requests),
+        ),
+        (
+            "ngx::http::status_illegal",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_illegal),
+        ),
+        (
+            "ngx::http::status_close",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_close),
+        ),
+        (
+            "ngx::http::status_internal_server_error",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_internal_server_error),
+        ),
+        (
+            "ngx::http::status_not_implemented",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_not_implemented),
+        ),
+        (
+            "ngx::http::status_bad_gateway",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_bad_gateway),
+        ),
+        (
+            "ngx::http::status_service_unavailable",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_service_unavailable),
+        ),
+        (
+            "ngx::http::status_gateway_timeout",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_gateway_timeout),
+        ),
+        (
+            "ngx::http::status_version_not_supported",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_version_not_supported),
+        ),
+        (
+            "ngx::http::status_insufficient_storage",
+            NgxHostWrapper::Args(layout::helpers::meta::http_status_insufficient_storage),
+        ),
+        (
+            "ngx::log_level::stderr",
+            NgxHostWrapper::Args(layout::helpers::meta::log_level_stderr),
+        ),
+        (
+            "ngx::log_level::emerg",
+            NgxHostWrapper::Args(layout::helpers::meta::log_level_emerg),
+        ),
+        (
+            "ngx::log_level::alert",
+            NgxHostWrapper::Args(layout::helpers::meta::log_level_alert),
+        ),
+        (
+            "ngx::log_level::crit",
+            NgxHostWrapper::Args(layout::helpers::meta::log_level_crit),
+        ),
+        (
+            "ngx::log_level::error",
+            NgxHostWrapper::Args(layout::helpers::meta::log_level_error),
+        ),
+        (
+            "ngx::log_level::warn",
+            NgxHostWrapper::Args(layout::helpers::meta::log_level_warn),
+        ),
+        (
+            "ngx::log_level::notice",
+            NgxHostWrapper::Args(layout::helpers::meta::log_level_notice),
+        ),
+        (
+            "ngx::log_level::info",
+            NgxHostWrapper::Args(layout::helpers::meta::log_level_info),
+        ),
+        (
+            "ngx::log_level::debug",
+            NgxHostWrapper::Args(layout::helpers::meta::log_level_debug),
+        ),
+        (
+            NGX_REQ_GET_METHOD_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::get_method),
+        ),
+        (
+            NGX_REQ_HTTP_VERSION_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::http_version),
+        ),
+        (
+            NGX_REQ_RAW_HEADER_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::raw_header),
+        ),
+        (
+            NGX_REQ_GET_HEADERS_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::get_headers),
+        ),
+        (
+            NGX_REQ_GET_URI_ARGS_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::get_uri_args),
+        ),
+        (
+            NGX_REQ_GET_POST_ARGS_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::get_post_args),
+        ),
+        (
+            NGX_REQ_READ_BODY_NAME,
+            NgxHostWrapper::Static(layout::helpers::body::read_body),
+        ),
+        (
+            NGX_REQ_DISCARD_BODY_NAME,
+            NgxHostWrapper::Args(layout::helpers::body::discard_body),
+        ),
+        (
+            NGX_REQ_GET_BODY_DATA_NAME,
+            NgxHostWrapper::Args(layout::helpers::body::get_body_data),
+        ),
+        (
+            NGX_REQ_GET_BODY_FILE_NAME,
+            NgxHostWrapper::Args(layout::helpers::body::get_body_file),
+        ),
+        (
+            NGX_REQ_SET_BODY_DATA_NAME,
+            NgxHostWrapper::Args(layout::helpers::body::set_body_data),
+        ),
+        (
+            NGX_REQ_SET_BODY_FILE_NAME,
+            NgxHostWrapper::Args(layout::helpers::body::set_body_file),
+        ),
+        (
+            NGX_REQ_INIT_BODY_NAME,
+            NgxHostWrapper::Args(layout::helpers::body::init_body),
+        ),
+        (
+            NGX_REQ_APPEND_BODY_NAME,
+            NgxHostWrapper::Args(layout::helpers::body::append_body),
+        ),
+        (
+            NGX_REQ_FINISH_BODY_NAME,
+            NgxHostWrapper::Args(layout::helpers::body::finish_body),
+        ),
+        (
+            NGX_REQ_IS_INTERNAL_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::is_internal),
+        ),
+        (
+            NGX_REQ_START_TIME_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::start_time),
+        ),
+        (
+            NGX_IS_SUBREQUEST_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::is_subrequest),
+        ),
+        (
+            NGX_HEADERS_SENT_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::headers_sent),
+        ),
+        (
+            NGX_VAR_GET_NAME,
+            NgxHostWrapper::Args(layout::helpers::variables::get),
+        ),
+        (
+            NGX_REQ_SET_METHOD_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::set_method),
+        ),
+        (
+            NGX_REQ_SET_URI_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::set_uri),
+        ),
+        (
+            NGX_REQ_SET_URI_ARGS_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::set_uri_args),
+        ),
+        (
+            NGX_REQ_SET_HEADER_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::set_header),
+        ),
+        (
+            NGX_REQ_CLEAR_HEADER_NAME,
+            NgxHostWrapper::Args(layout::helpers::request::clear_header),
+        ),
+        (
+            NGX_VAR_SET_NAME,
+            NgxHostWrapper::Args(layout::helpers::variables::set),
+        ),
+        (
+            NGX_STATUS_GET_NAME,
+            NgxHostWrapper::Args(layout::helpers::response_meta::status_get),
+        ),
+        (
+            NGX_STATUS_SET_NAME,
+            NgxHostWrapper::Args(layout::helpers::response_meta::status_set),
+        ),
+        (
+            NGX_HEADER_GET_NAME,
+            NgxHostWrapper::Args(layout::helpers::response_meta::header_get),
+        ),
+        (
+            NGX_HEADER_SET_NAME,
+            NgxHostWrapper::Args(layout::helpers::response_meta::header_set),
+        ),
+        (
+            NGX_HEADER_SET_ALL_NAME,
+            NgxHostWrapper::Args(layout::helpers::response_meta::header_set_all),
+        ),
+        (
+            NGX_HEADER_CLEAR_NAME,
+            NgxHostWrapper::Args(layout::helpers::response_meta::header_clear),
+        ),
+        (
+            NGX_EXIT_NAME,
+            NgxHostWrapper::Args(layout::helpers::response_meta::exit),
+        ),
+        (
+            NGX_REDIRECT_NAME,
+            NgxHostWrapper::Args(layout::helpers::response_meta::redirect),
+        ),
+        (
+            NGX_CTX_GET_NAME,
+            NgxHostWrapper::Args(layout::helpers::request_ctx::get),
+        ),
+        (
+            NGX_CTX_SET_NAME,
+            NgxHostWrapper::Args(layout::helpers::request_ctx::set),
+        ),
+        (
+            NGX_CTX_DELETE_NAME,
+            NgxHostWrapper::Args(layout::helpers::request_ctx::delete),
+        ),
+        (
+            NGX_CTX_CLEAR_NAME,
+            NgxHostWrapper::Args(layout::helpers::request_ctx::clear),
+        ),
+        (
+            NGX_SHARED_DICT_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::dict),
+        ),
+        (
+            NGX_SHARED_GET_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::get),
+        ),
+        (
+            NGX_SHARED_GET_STALE_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::get_stale),
+        ),
+        (
+            NGX_SHARED_SET_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::set),
+        ),
+        (
+            NGX_SHARED_SAFE_SET_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::safe_set),
+        ),
+        (
+            NGX_SHARED_ADD_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::add),
+        ),
+        (
+            NGX_SHARED_SAFE_ADD_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::safe_add),
+        ),
+        (
+            NGX_SHARED_REPLACE_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::replace),
+        ),
+        (
+            NGX_SHARED_DELETE_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::delete),
+        ),
+        (
+            NGX_SHARED_INCR_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::incr),
+        ),
+        (
+            NGX_SHARED_TTL_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::ttl),
+        ),
+        (
+            NGX_SHARED_EXPIRE_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::expire),
+        ),
+        (
+            NGX_SHARED_CAPACITY_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::capacity),
+        ),
+        (
+            NGX_SHARED_FREE_SPACE_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::free_space),
+        ),
+        (
+            NGX_SHARED_LPUSH_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::lpush),
+        ),
+        (
+            NGX_SHARED_RPUSH_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::rpush),
+        ),
+        (
+            NGX_SHARED_LPOP_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::lpop),
+        ),
+        (
+            NGX_SHARED_RPOP_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::rpop),
+        ),
+        (
+            NGX_SHARED_LLEN_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::llen),
+        ),
+        (
+            NGX_SHARED_FLUSH_ALL_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::flush_all),
+        ),
+        (
+            NGX_SHARED_FLUSH_EXPIRED_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::flush_expired),
+        ),
+        (
+            NGX_SHARED_GET_KEYS_NAME,
+            NgxHostWrapper::Static(layout::helpers::shared_dict::get_keys),
+        ),
+        (
+            NGX_SOCKET_UDP_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::udp),
+        ),
+        (
+            NGX_SOCKET_UDP_BIND_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::bind),
+        ),
+        (
+            NGX_SOCKET_UDP_SETPEERNAME_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::setpeername),
+        ),
+        (
+            NGX_SOCKET_UDP_SEND_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::send),
+        ),
+        (
+            NGX_SOCKET_UDP_RECEIVE_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::receive),
+        ),
+        (
+            NGX_SOCKET_UDP_CLOSE_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::close),
+        ),
+        (
+            NGX_SOCKET_UDP_SETTIMEOUT_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::settimeout),
+        ),
+        (
+            NGX_SOCKET_TCP_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp),
+        ),
+        (
+            NGX_SOCKET_TCP_CONNECT_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_connect),
+        ),
+        (
+            NGX_SOCKET_CONNECT_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::connect),
+        ),
+        (
+            NGX_SOCKET_TCP_SEND_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_send),
+        ),
+        (
+            NGX_SOCKET_TCP_RECEIVE_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_receive),
+        ),
+        (
+            NGX_SOCKET_TCP_RECEIVEANY_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_receiveany),
+        ),
+        (
+            NGX_SOCKET_TCP_RECEIVEUNTIL_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_receiveuntil),
+        ),
+        (
+            NGX_SOCKET_TCP_CLOSE_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_close),
+        ),
+        (
+            NGX_SOCKET_TCP_SETTIMEOUT_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_settimeout),
+        ),
+        (
+            NGX_SOCKET_TCP_SETKEEPALIVE_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_setkeepalive),
+        ),
+        (
+            NGX_SOCKET_TCP_GETREUSEDTIMES_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_getreusedtimes),
+        ),
+        (
+            NGX_SOCKET_TCP_SSLHANDSHAKE_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_sslhandshake),
+        ),
+        (
+            NGX_SOCKET_TCP_SETTRUSTEDSTORE_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_settrustedstore),
+        ),
+        (
+            NGX_SOCKET_TCP_SETCLIENTCERT_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_setclientcert),
+        ),
+        (
+            NGX_SOCKET_TCP_TRUSTEDSTORE_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_trustedstore),
+        ),
+        (
+            NGX_SOCKET_TCP_CLIENTCERT_NAME,
+            NgxHostWrapper::Static(layout::helpers::socket::tcp_clientcert),
+        ),
+        (
+            NGX_SEND_HEADERS_NAME,
+            NgxHostWrapper::Args(layout::helpers::output::send_headers),
+        ),
+        (
+            NGX_PRINT_NAME,
+            NgxHostWrapper::Args(layout::helpers::output::print),
+        ),
+        (
+            NGX_SAY_NAME,
+            NgxHostWrapper::Args(layout::helpers::output::say),
+        ),
+        (
+            NGX_FLUSH_NAME,
+            NgxHostWrapper::Static(layout::helpers::output::flush),
+        ),
+        (
+            NGX_EOF_NAME,
+            NgxHostWrapper::Args(layout::helpers::output::eof),
+        ),
+    ]
+}
+
 /// Bind every production host using the macro-generated wrapper.
 pub fn bind_ngx_hosts(vm: &mut Vm) {
-    vm.bind_static_function(NGX_SLEEP_NAME, layout::helpers::functions::sleep);
-    vm.bind_static_function(NGX_SLEEP_MS_NAME, layout::helpers::functions::sleep_ms);
-    vm.bind_static_function(NGX_SEMAPHORE_NEW_NAME, layout::helpers::semaphore::new);
-    vm.bind_static_function(NGX_SEMAPHORE_WAIT_NAME, layout::helpers::semaphore::wait);
-    vm.bind_static_function(NGX_SEMAPHORE_POST_NAME, layout::helpers::semaphore::post);
-    vm.bind_static_function(NGX_SEMAPHORE_COUNT_NAME, layout::helpers::semaphore::count);
-    vm.bind_static_args_function(NGX_ESCAPE_URI_NAME, layout::helpers::codec::escape_uri);
-    vm.bind_static_args_function(NGX_UNESCAPE_URI_NAME, layout::helpers::codec::unescape_uri);
-    vm.bind_static_args_function(NGX_ENCODE_ARGS_NAME, layout::helpers::codec::encode_args);
-    vm.bind_static_args_function(NGX_DECODE_ARGS_NAME, layout::helpers::codec::decode_args);
-    vm.bind_static_args_function(
-        NGX_ENCODE_BASE64_NAME,
-        layout::helpers::codec::encode_base64,
-    );
-    vm.bind_static_args_function(
-        NGX_DECODE_BASE64_NAME,
-        layout::helpers::codec::decode_base64,
-    );
-    vm.bind_static_args_function(
-        NGX_DECODE_BASE64MIME_NAME,
-        layout::helpers::codec::decode_base64mime,
-    );
-    vm.bind_static_args_function(NGX_CRC32_SHORT_NAME, layout::helpers::codec::crc32_short);
-    vm.bind_static_args_function(NGX_CRC32_LONG_NAME, layout::helpers::codec::crc32_long);
-    vm.bind_static_args_function(NGX_HMAC_SHA1_NAME, layout::helpers::codec::hmac_sha1);
-    vm.bind_static_args_function(NGX_MD5_NAME, layout::helpers::codec::md5);
-    vm.bind_static_args_function(NGX_MD5_BIN_NAME, layout::helpers::codec::md5_bin);
-    vm.bind_static_args_function(NGX_SHA1_BIN_NAME, layout::helpers::codec::sha1_bin);
-    vm.bind_static_args_function(
-        NGX_QUOTE_SQL_STR_NAME,
-        layout::helpers::codec::quote_sql_str,
-    );
-    vm.bind_static_args_function(NGX_TODAY_NAME, layout::helpers::time::today);
-    vm.bind_static_args_function(NGX_TIME_NAME, layout::helpers::time::time);
-    vm.bind_static_args_function(NGX_NOW_NAME, layout::helpers::time::now);
-    vm.bind_static_args_function(NGX_UPDATE_TIME_NAME, layout::helpers::time::update_time);
-    vm.bind_static_args_function(NGX_LOCALTIME_NAME, layout::helpers::time::localtime);
-    vm.bind_static_args_function(NGX_UTCTIME_NAME, layout::helpers::time::utctime);
-    vm.bind_static_args_function(NGX_COOKIE_TIME_NAME, layout::helpers::time::cookie_time);
-    vm.bind_static_args_function(NGX_HTTP_TIME_NAME, layout::helpers::time::http_time);
-    vm.bind_static_args_function(
-        NGX_PARSE_HTTP_TIME_NAME,
-        layout::helpers::time::parse_http_time,
-    );
-    vm.bind_static_args_function("ngx::get_phase", layout::helpers::meta::get_phase);
-    vm.bind_static_args_function(
-        "ngx::config::subsystem",
-        layout::helpers::meta::config_subsystem,
-    );
-    vm.bind_static_args_function("ngx::config::debug", layout::helpers::meta::config_debug);
-    vm.bind_static_args_function("ngx::config::prefix", layout::helpers::meta::config_prefix);
-    vm.bind_static_args_function(
-        "ngx::config::nginx_version",
-        layout::helpers::meta::config_nginx_version,
-    );
-    vm.bind_static_args_function(
-        "ngx::config::nginx_configure",
-        layout::helpers::meta::config_nginx_configure,
-    );
-    vm.bind_static_args_function(
-        "ngx::config::ngx_rustscript_version",
-        layout::helpers::meta::config_ngx_rustscript_version,
-    );
-    vm.bind_static_args_function(
-        "ngx::worker::exiting",
-        layout::helpers::meta::worker_exiting,
-    );
-    vm.bind_static_args_function("ngx::worker::pid", layout::helpers::meta::worker_pid);
-    vm.bind_static_args_function("ngx::worker::pids", layout::helpers::meta::worker_pids);
-    vm.bind_static_args_function("ngx::worker::count", layout::helpers::meta::worker_count);
-    vm.bind_static_args_function("ngx::worker::id", layout::helpers::meta::worker_id);
-    vm.bind_static_args_function("ngx::log", layout::helpers::log::log);
-    vm.bind_static_args_function("ngx::core::ok", layout::helpers::meta::core_ok);
-    vm.bind_static_args_function("ngx::core::error", layout::helpers::meta::core_error);
-    vm.bind_static_args_function("ngx::core::again", layout::helpers::meta::core_again);
-    vm.bind_static_args_function("ngx::core::done", layout::helpers::meta::core_done);
-    vm.bind_static_args_function("ngx::core::declined", layout::helpers::meta::core_declined);
-    vm.bind_static_args_function(
-        "ngx::core::null_value",
-        layout::helpers::meta::core_null_value,
-    );
-    vm.bind_static_args_function("ngx::http::get", layout::helpers::meta::http_get);
-    vm.bind_static_args_function("ngx::http::head", layout::helpers::meta::http_head);
-    vm.bind_static_args_function("ngx::http::put", layout::helpers::meta::http_put);
-    vm.bind_static_args_function("ngx::http::post", layout::helpers::meta::http_post);
-    vm.bind_static_args_function("ngx::http::delete", layout::helpers::meta::http_delete);
-    vm.bind_static_args_function("ngx::http::options", layout::helpers::meta::http_options);
-    vm.bind_static_args_function("ngx::http::mkcol", layout::helpers::meta::http_mkcol);
-    vm.bind_static_args_function("ngx::http::copy", layout::helpers::meta::http_copy);
-    vm.bind_static_args_function("ngx::http::move", layout::helpers::meta::http_move);
-    vm.bind_static_args_function("ngx::http::propfind", layout::helpers::meta::http_propfind);
-    vm.bind_static_args_function(
-        "ngx::http::proppatch",
-        layout::helpers::meta::http_proppatch,
-    );
-    vm.bind_static_args_function("ngx::http::lock", layout::helpers::meta::http_lock);
-    vm.bind_static_args_function("ngx::http::unlock", layout::helpers::meta::http_unlock);
-    vm.bind_static_args_function("ngx::http::patch", layout::helpers::meta::http_patch);
-    vm.bind_static_args_function("ngx::http::trace", layout::helpers::meta::http_trace);
-    vm.bind_static_args_function(
-        "ngx::http::status_continue",
-        layout::helpers::meta::http_status_continue,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_switching_protocols",
-        layout::helpers::meta::http_status_switching_protocols,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_ok",
-        layout::helpers::meta::http_status_ok,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_created",
-        layout::helpers::meta::http_status_created,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_accepted",
-        layout::helpers::meta::http_status_accepted,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_no_content",
-        layout::helpers::meta::http_status_no_content,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_partial_content",
-        layout::helpers::meta::http_status_partial_content,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_special_response",
-        layout::helpers::meta::http_status_special_response,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_moved_permanently",
-        layout::helpers::meta::http_status_moved_permanently,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_moved_temporarily",
-        layout::helpers::meta::http_status_moved_temporarily,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_see_other",
-        layout::helpers::meta::http_status_see_other,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_not_modified",
-        layout::helpers::meta::http_status_not_modified,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_temporary_redirect",
-        layout::helpers::meta::http_status_temporary_redirect,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_permanent_redirect",
-        layout::helpers::meta::http_status_permanent_redirect,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_bad_request",
-        layout::helpers::meta::http_status_bad_request,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_unauthorized",
-        layout::helpers::meta::http_status_unauthorized,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_payment_required",
-        layout::helpers::meta::http_status_payment_required,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_forbidden",
-        layout::helpers::meta::http_status_forbidden,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_not_found",
-        layout::helpers::meta::http_status_not_found,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_not_allowed",
-        layout::helpers::meta::http_status_not_allowed,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_not_acceptable",
-        layout::helpers::meta::http_status_not_acceptable,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_request_timeout",
-        layout::helpers::meta::http_status_request_timeout,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_conflict",
-        layout::helpers::meta::http_status_conflict,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_gone",
-        layout::helpers::meta::http_status_gone,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_upgrade_required",
-        layout::helpers::meta::http_status_upgrade_required,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_too_many_requests",
-        layout::helpers::meta::http_status_too_many_requests,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_illegal",
-        layout::helpers::meta::http_status_illegal,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_close",
-        layout::helpers::meta::http_status_close,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_internal_server_error",
-        layout::helpers::meta::http_status_internal_server_error,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_not_implemented",
-        layout::helpers::meta::http_status_not_implemented,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_bad_gateway",
-        layout::helpers::meta::http_status_bad_gateway,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_service_unavailable",
-        layout::helpers::meta::http_status_service_unavailable,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_gateway_timeout",
-        layout::helpers::meta::http_status_gateway_timeout,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_version_not_supported",
-        layout::helpers::meta::http_status_version_not_supported,
-    );
-    vm.bind_static_args_function(
-        "ngx::http::status_insufficient_storage",
-        layout::helpers::meta::http_status_insufficient_storage,
-    );
-    vm.bind_static_args_function(
-        "ngx::log_level::stderr",
-        layout::helpers::meta::log_level_stderr,
-    );
-    vm.bind_static_args_function(
-        "ngx::log_level::emerg",
-        layout::helpers::meta::log_level_emerg,
-    );
-    vm.bind_static_args_function(
-        "ngx::log_level::alert",
-        layout::helpers::meta::log_level_alert,
-    );
-    vm.bind_static_args_function(
-        "ngx::log_level::crit",
-        layout::helpers::meta::log_level_crit,
-    );
-    vm.bind_static_args_function(
-        "ngx::log_level::error",
-        layout::helpers::meta::log_level_error,
-    );
-    vm.bind_static_args_function(
-        "ngx::log_level::warn",
-        layout::helpers::meta::log_level_warn,
-    );
-    vm.bind_static_args_function(
-        "ngx::log_level::notice",
-        layout::helpers::meta::log_level_notice,
-    );
-    vm.bind_static_args_function(
-        "ngx::log_level::info",
-        layout::helpers::meta::log_level_info,
-    );
-    vm.bind_static_args_function(
-        "ngx::log_level::debug",
-        layout::helpers::meta::log_level_debug,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_GET_METHOD_NAME,
-        layout::helpers::request::get_method,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_HTTP_VERSION_NAME,
-        layout::helpers::request::http_version,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_RAW_HEADER_NAME,
-        layout::helpers::request::raw_header,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_GET_HEADERS_NAME,
-        layout::helpers::request::get_headers,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_GET_URI_ARGS_NAME,
-        layout::helpers::request::get_uri_args,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_GET_POST_ARGS_NAME,
-        layout::helpers::request::get_post_args,
-    );
-    vm.bind_static_function(NGX_REQ_READ_BODY_NAME, layout::helpers::body::read_body);
-    vm.bind_static_args_function(
-        NGX_REQ_DISCARD_BODY_NAME,
-        layout::helpers::body::discard_body,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_GET_BODY_DATA_NAME,
-        layout::helpers::body::get_body_data,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_GET_BODY_FILE_NAME,
-        layout::helpers::body::get_body_file,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_SET_BODY_DATA_NAME,
-        layout::helpers::body::set_body_data,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_SET_BODY_FILE_NAME,
-        layout::helpers::body::set_body_file,
-    );
-    vm.bind_static_args_function(NGX_REQ_INIT_BODY_NAME, layout::helpers::body::init_body);
-    vm.bind_static_args_function(NGX_REQ_APPEND_BODY_NAME, layout::helpers::body::append_body);
-    vm.bind_static_args_function(NGX_REQ_FINISH_BODY_NAME, layout::helpers::body::finish_body);
-    vm.bind_static_args_function(
-        NGX_REQ_IS_INTERNAL_NAME,
-        layout::helpers::request::is_internal,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_START_TIME_NAME,
-        layout::helpers::request::start_time,
-    );
-    vm.bind_static_args_function(
-        NGX_IS_SUBREQUEST_NAME,
-        layout::helpers::request::is_subrequest,
-    );
-    vm.bind_static_args_function(
-        NGX_HEADERS_SENT_NAME,
-        layout::helpers::request::headers_sent,
-    );
-    vm.bind_static_args_function(NGX_VAR_GET_NAME, layout::helpers::variables::get);
-    vm.bind_static_args_function(
-        NGX_REQ_SET_METHOD_NAME,
-        layout::helpers::request::set_method,
-    );
-    vm.bind_static_args_function(NGX_REQ_SET_URI_NAME, layout::helpers::request::set_uri);
-    vm.bind_static_args_function(
-        NGX_REQ_SET_URI_ARGS_NAME,
-        layout::helpers::request::set_uri_args,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_SET_HEADER_NAME,
-        layout::helpers::request::set_header,
-    );
-    vm.bind_static_args_function(
-        NGX_REQ_CLEAR_HEADER_NAME,
-        layout::helpers::request::clear_header,
-    );
-    vm.bind_static_args_function(NGX_VAR_SET_NAME, layout::helpers::variables::set);
-    vm.bind_static_args_function(
-        NGX_STATUS_GET_NAME,
-        layout::helpers::response_meta::status_get,
-    );
-    vm.bind_static_args_function(
-        NGX_STATUS_SET_NAME,
-        layout::helpers::response_meta::status_set,
-    );
-    vm.bind_static_args_function(
-        NGX_HEADER_GET_NAME,
-        layout::helpers::response_meta::header_get,
-    );
-    vm.bind_static_args_function(
-        NGX_HEADER_SET_NAME,
-        layout::helpers::response_meta::header_set,
-    );
-    vm.bind_static_args_function(
-        NGX_HEADER_SET_ALL_NAME,
-        layout::helpers::response_meta::header_set_all,
-    );
-    vm.bind_static_args_function(
-        NGX_HEADER_CLEAR_NAME,
-        layout::helpers::response_meta::header_clear,
-    );
-    vm.bind_static_args_function(NGX_EXIT_NAME, layout::helpers::response_meta::exit);
-    vm.bind_static_args_function(NGX_REDIRECT_NAME, layout::helpers::response_meta::redirect);
-    vm.bind_static_args_function(NGX_CTX_GET_NAME, layout::helpers::request_ctx::get);
-    vm.bind_static_args_function(NGX_CTX_SET_NAME, layout::helpers::request_ctx::set);
-    vm.bind_static_args_function(NGX_CTX_DELETE_NAME, layout::helpers::request_ctx::delete);
-    vm.bind_static_args_function(NGX_CTX_CLEAR_NAME, layout::helpers::request_ctx::clear);
-    vm.bind_static_function(NGX_SHARED_DICT_NAME, layout::helpers::shared_dict::dict);
-    vm.bind_static_function(NGX_SHARED_GET_NAME, layout::helpers::shared_dict::get);
-    vm.bind_static_function(
-        NGX_SHARED_GET_STALE_NAME,
-        layout::helpers::shared_dict::get_stale,
-    );
-    vm.bind_static_function(NGX_SHARED_SET_NAME, layout::helpers::shared_dict::set);
-    vm.bind_static_function(
-        NGX_SHARED_SAFE_SET_NAME,
-        layout::helpers::shared_dict::safe_set,
-    );
-    vm.bind_static_function(NGX_SHARED_ADD_NAME, layout::helpers::shared_dict::add);
-    vm.bind_static_function(
-        NGX_SHARED_SAFE_ADD_NAME,
-        layout::helpers::shared_dict::safe_add,
-    );
-    vm.bind_static_function(
-        NGX_SHARED_REPLACE_NAME,
-        layout::helpers::shared_dict::replace,
-    );
-    vm.bind_static_function(NGX_SHARED_DELETE_NAME, layout::helpers::shared_dict::delete);
-    vm.bind_static_function(NGX_SHARED_INCR_NAME, layout::helpers::shared_dict::incr);
-    vm.bind_static_function(NGX_SHARED_TTL_NAME, layout::helpers::shared_dict::ttl);
-    vm.bind_static_function(NGX_SHARED_EXPIRE_NAME, layout::helpers::shared_dict::expire);
-    vm.bind_static_function(
-        NGX_SHARED_CAPACITY_NAME,
-        layout::helpers::shared_dict::capacity,
-    );
-    vm.bind_static_function(
-        NGX_SHARED_FREE_SPACE_NAME,
-        layout::helpers::shared_dict::free_space,
-    );
-    vm.bind_static_function(NGX_SHARED_LPUSH_NAME, layout::helpers::shared_dict::lpush);
-    vm.bind_static_function(NGX_SHARED_RPUSH_NAME, layout::helpers::shared_dict::rpush);
-    vm.bind_static_function(NGX_SHARED_LPOP_NAME, layout::helpers::shared_dict::lpop);
-    vm.bind_static_function(NGX_SHARED_RPOP_NAME, layout::helpers::shared_dict::rpop);
-    vm.bind_static_function(NGX_SHARED_LLEN_NAME, layout::helpers::shared_dict::llen);
-    vm.bind_static_function(
-        NGX_SHARED_FLUSH_ALL_NAME,
-        layout::helpers::shared_dict::flush_all,
-    );
-    vm.bind_static_function(
-        NGX_SHARED_FLUSH_EXPIRED_NAME,
-        layout::helpers::shared_dict::flush_expired,
-    );
-    vm.bind_static_function(
-        NGX_SHARED_GET_KEYS_NAME,
-        layout::helpers::shared_dict::get_keys,
-    );
-    vm.bind_static_function(NGX_SOCKET_UDP_NAME, layout::helpers::socket::udp);
-    vm.bind_static_function(NGX_SOCKET_UDP_BIND_NAME, layout::helpers::socket::bind);
-    vm.bind_static_function(
-        NGX_SOCKET_UDP_SETPEERNAME_NAME,
-        layout::helpers::socket::setpeername,
-    );
-    vm.bind_static_function(NGX_SOCKET_UDP_SEND_NAME, layout::helpers::socket::send);
-    vm.bind_static_function(
-        NGX_SOCKET_UDP_RECEIVE_NAME,
-        layout::helpers::socket::receive,
-    );
-    vm.bind_static_function(NGX_SOCKET_UDP_CLOSE_NAME, layout::helpers::socket::close);
-    vm.bind_static_function(
-        NGX_SOCKET_UDP_SETTIMEOUT_NAME,
-        layout::helpers::socket::settimeout,
-    );
-    vm.bind_static_function(NGX_SOCKET_TCP_NAME, layout::helpers::socket::tcp);
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_CONNECT_NAME,
-        layout::helpers::socket::tcp_connect,
-    );
-    vm.bind_static_function(NGX_SOCKET_CONNECT_NAME, layout::helpers::socket::connect);
-    vm.bind_static_function(NGX_SOCKET_TCP_SEND_NAME, layout::helpers::socket::tcp_send);
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_RECEIVE_NAME,
-        layout::helpers::socket::tcp_receive,
-    );
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_RECEIVEANY_NAME,
-        layout::helpers::socket::tcp_receiveany,
-    );
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_RECEIVEUNTIL_NAME,
-        layout::helpers::socket::tcp_receiveuntil,
-    );
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_CLOSE_NAME,
-        layout::helpers::socket::tcp_close,
-    );
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_SETTIMEOUT_NAME,
-        layout::helpers::socket::tcp_settimeout,
-    );
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_SETKEEPALIVE_NAME,
-        layout::helpers::socket::tcp_setkeepalive,
-    );
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_GETREUSEDTIMES_NAME,
-        layout::helpers::socket::tcp_getreusedtimes,
-    );
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_SSLHANDSHAKE_NAME,
-        layout::helpers::socket::tcp_sslhandshake,
-    );
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_SETTRUSTEDSTORE_NAME,
-        layout::helpers::socket::tcp_settrustedstore,
-    );
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_SETCLIENTCERT_NAME,
-        layout::helpers::socket::tcp_setclientcert,
-    );
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_TRUSTEDSTORE_NAME,
-        layout::helpers::socket::tcp_trustedstore,
-    );
-    vm.bind_static_function(
-        NGX_SOCKET_TCP_CLIENTCERT_NAME,
-        layout::helpers::socket::tcp_clientcert,
-    );
-    vm.bind_static_args_function(NGX_SEND_HEADERS_NAME, layout::helpers::output::send_headers);
-    vm.bind_static_args_function(NGX_PRINT_NAME, layout::helpers::output::print);
-    vm.bind_static_args_function(NGX_SAY_NAME, layout::helpers::output::say);
-    vm.bind_static_function(NGX_FLUSH_NAME, layout::helpers::output::flush);
-    vm.bind_static_args_function(NGX_EOF_NAME, layout::helpers::output::eof);
+    for (name, wrapper) in ngx_host_bindings() {
+        match *wrapper {
+            NgxHostWrapper::Static(function) => vm.bind_static_function(*name, function),
+            NgxHostWrapper::Args(function) => vm.bind_static_args_function(*name, function),
+        }
+    }
+}
+
+/// Names of the `ngx::timer` family, bound through the timer-host registry.
+///
+/// `ngx::timer::{at,every}` consume their callback through
+/// `HostParamPassing::TakeOwned`, so they cannot be installed by
+/// [`bind_ngx_hosts`]'s name/symbol path: the owned dispatch needs the
+/// registry binding path. Every name below is catalogued in [`ngx_host_catalog`]
+/// and resolves through [`ngx_host_registry`].
+pub fn ngx_timer_host_names() -> &'static [&'static str] {
+    &[
+        NGX_TIMER_AT_NAME,
+        NGX_TIMER_EVERY_NAME,
+        NGX_TIMER_PENDING_COUNT_NAME,
+        NGX_TIMER_RUNNING_COUNT_NAME,
+    ]
+}
+
+/// Registry that resolves every production ngx host plus the `ngx::timer`
+/// family.
+///
+/// A VM whose program imports a timer host is bound from this registry
+/// (`bind_vm_cached`) instead of the per-name [`bind_ngx_hosts`] path, because
+/// the owned `ngx::timer::{at,every}` entries have no name-binding API. The
+/// same registry is handed to `register_owned_timer` through
+/// `OwnedHostContext`, so the callback VMs spawn from it with the identical
+/// host surface.
+///
+/// The registry is built once per process and cloned per bind; a clone shares
+/// the immutable entry table, capability profile, and standard-surface
+/// composition, and reuses its host-binding plan cache.
+pub fn ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
+    static REGISTRY: std::sync::OnceLock<Result<vm::HostFunctionRegistry, String>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(build_ngx_host_registry).clone()
+}
+
+fn build_ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
+    let catalog = catalog::compile_host_catalog();
+    // The catalog fingerprint is a whole-catalog hash. Compute it once and
+    // reuse it for every exact import schema instead of paying it per host.
+    let fingerprint = catalog.fingerprint();
+    let mut registry = vm::HostFunctionRegistry::new();
+    registry
+        .install_named_struct_schemas(vm::catalog_named_struct_schemas(&catalog))
+        .map_err(|error| format!("install named struct schemas: {error}"))?;
+    registry.set_standard_composition(vm::standard_composition());
+    for (name, wrapper) in ngx_host_bindings() {
+        let functions = catalog.functions_named(name);
+        if functions.is_empty() {
+            return Err(format!("{name} is missing from the ngx compile catalog"));
+        }
+        for function in functions {
+            let schema = import_schema_with_fingerprint(function, &fingerprint);
+            let result = match wrapper {
+                NgxHostWrapper::Static(host) => registry.register_catalog_static(schema, *host),
+                NgxHostWrapper::Args(host) => registry.register_catalog_static_args(schema, *host),
+            };
+            result.map_err(|error| format!("register {name}: {error}"))?;
+        }
+    }
+    crate::host::timer::register_timer_hosts(&mut registry, &catalog)?;
+    Ok(registry)
+}
+
+/// Builds the exact import schema the compiler embeds for `function`.
+///
+/// Identical to [`vm::HostImportSchema::from_function`] except that the
+/// caller-supplied whole-catalog fingerprint is reused.
+fn import_schema_with_fingerprint(
+    function: &vm::HostFunctionSchema,
+    fingerprint: &vm::HostApiFingerprint,
+) -> vm::HostImportSchema {
+    vm::HostImportSchema {
+        name: function.name.clone(),
+        params: function
+            .params
+            .iter()
+            .map(|param| vm::HostImportParam {
+                name: param.name.clone(),
+                schema: param.ty.clone(),
+                passing: param.passing,
+            })
+            .collect(),
+        return_type: function.return_type.clone(),
+        fingerprint: *fingerprint,
+    }
 }
 
 #[cfg(test)]

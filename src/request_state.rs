@@ -304,6 +304,21 @@ impl<T> Default for IdentityRegistry<T> {
     }
 }
 
+/// Binds the production host surface for one program.
+///
+/// A program importing `ngx::timer` hosts resolves them from the timer-host
+/// registry, because the owned `ngx::timer::{at,every}` entries have no
+/// name-binding API; every other program keeps the per-name bind path. The
+/// location's standard-host policy applies in both paths.
+pub(crate) fn bind_program_hosts(vm: &mut Vm, policy: &StandardHostPolicy) -> Result<(), String> {
+    if crate::timer::program_uses_ngx_timer_hosts(vm.program()) {
+        crate::timer::install_timer_vm(vm, policy)
+    } else {
+        bind_ngx_hosts(vm);
+        install_standard_runtime(vm, policy)
+    }
+}
+
 /// Wait-slot + waker factory used by [`AccessExec`].
 pub trait AsyncWait {
     fn reserve(&self) -> Result<CompletionPermit, SubmitError>;
@@ -375,8 +390,7 @@ impl AccessExec {
         policy: StandardHostPolicy,
     ) -> Result<Self, String> {
         let mut vm = Vm::new_shared(program);
-        bind_ngx_hosts(&mut vm);
-        install_standard_runtime(&mut vm, &policy)?;
+        bind_program_hosts(&mut vm, &policy)?;
         vm.set_async_bridge(Box::new(NgxAsyncBridge::new(runtime)))
             .map_err(|err| err.to_string())?;
         Ok(Self {

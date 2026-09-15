@@ -333,8 +333,8 @@ fn production_host_count_includes_tcp_pool_and_tls_hosts() {
         195,
         "production host inventory must stay in sync"
     );
-    assert_eq!(ngx_host_catalog().functions().len(), 195);
-    assert_eq!(ngx_rustscript::host::ngx_host_manifest().len(), 195);
+    assert_eq!(ngx_host_catalog().functions().len(), 199);
+    assert_eq!(ngx_rustscript::host::ngx_host_manifest().len(), 199);
     for name in [
         NGX_SOCKET_TCP_NAME,
         NGX_SOCKET_TCP_CONNECT_NAME,
