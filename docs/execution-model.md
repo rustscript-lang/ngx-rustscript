@@ -4,8 +4,10 @@
 
 How ngx-rustscript runs a compiled script inside an NGINX worker. This
 page is the lifecycle reference; host signatures live in the
-[API reference](api/index.md). The callback contract for non-production
-thread/timer APIs is [docs/design/ngx-scheduler.md](design/ngx-scheduler.md).
+[API reference](api/index.md). The
+[scheduler design](design/ngx-scheduler.md) covers the blocked
+thread/`on_abort`/`run_worker_thread` callable families plus the
+landed worker-owned semaphore and timer lifecycle/callback contracts.
 
 ## Worker process
 

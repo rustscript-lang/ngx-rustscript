@@ -4,9 +4,10 @@
 
 `ngx.semaphore` is the first landed scheduler-family host set. It is a
 **worker-owned counting semaphore** referenced through a **VM-local
-resource handle**; it does not need a script callable, so it does not
-unlock `ngx.thread`, `ngx.timer`, `ngx.on_abort`, or
-`ngx.run_worker_thread`.
+resource handle**; it needs no script callable and does not provide the
+still-blocked `ngx.thread`, `ngx.on_abort`, or `ngx.run_worker_thread`
+callable mechanisms. The `ngx.timer` family landed independently through
+its own worker-owned timer runtime ([Sleep and timers](timer.md)).
 
 Permit counters and the FIFO waiter queue live in a worker registry
 (`thread_local`, one registry per nginx worker). The current executing VM
