@@ -321,7 +321,7 @@ validated by `tests/ngx_timer.rs` and `tests/timer_nginx.rs`:
 | Callback panic | pd-vm guards callback `start` / `poll` / `resume` with `catch_unwind` and converts the panic into a callback error routed to the same log sink; the worker never unwinds. ngx additionally bounds one round to 64 immediate resumptions and fails a non-progressing round closed. |
 | Registration failure | Invalid seconds, a missing/foreign/non-callable callback, a pending-limit or registry-full rejection returns a `HostError` to the script and restores the callback argument; nothing is retained. |
 | Client abort | Timers hold no `r`; a 499 or any other request end leaves every registration untouched. A parked semaphore wait still drops with its request (drop guard leaves the FIFO queue). |
-| Worker `exit_process` | `WorkerRuntime::shutdown` calls `timer::shutdown_current()` before dropping Tokio: stop acceptance, run pending callbacks once with `premature=true` (a pending `every` round is **not** rescheduled), cancel live callbacks (releasing their parked async step exactly once), release every callback VM. Live semaphores close and wake their waiters afterwards; the eventfd closes once. |
+| Worker `exit_process` | `WorkerRuntime::shutdown` runs, in order: socket pool shutdown, `semaphore::shutdown_current()` (closes live semaphores and wakes their waiters), `timer::shutdown_current()` (run pending callbacks once with `premature=true`, a pending `every` round is **not** rescheduled; cancel live callbacks, releasing their parked async step exactly once; release every callback VM), then stops acceptance and reclaims queued wakes, then drops the Tokio runtime; the eventfd closes once. |
 | Config reload | Nothing is cancelled or migrated: the timer registry is worker-`thread_local`, old workers keep their registrations (their callback VMs hold their own `Arc<Program>`), and new workers start with zero timers. Identities and generations are worker-local, so no registration is reused across workers or programs. |
 | Limits | `TimerConfig` ships `max_pending` 1024 / `max_running` 256; both travel in every `TimerRegistration` and the backend enforces them atomically with insertion (pending) and round start (running, a parked callback still counted). The worker fake-request registry itself is capped at 1024 (`MAX_LIVE_TIMER_REQUESTS`, the `IdentityRegistry` capacity), and fake request ids fail closed on exhaustion instead of wrapping. |
 
@@ -783,10 +783,11 @@ invocation.
   runtime (`install_worker_timers`); `exit_process` invalidates
   senders, cancels futures, closes fd once (`src/runtime.rs`). Scheduler
   state hooks **that** shutdown, not a new one. Both landed families
-  do: `WorkerRuntime::shutdown` runs `timer::shutdown_current()`
-  (pending callbacks once with `premature=true`, live callbacks
-  cancelled, no reschedule) and then closes live semaphores and wakes
-  their waiters, before the Tokio runtime is dropped.
+  do: `WorkerRuntime::shutdown` runs `semaphore::shutdown_current()`
+  (closes live semaphores and wakes their waiters) before
+  `timer::shutdown_current()` (pending callbacks once with
+  `premature=true`, live callbacks cancelled, no reschedule); both run
+  before the Tokio runtime is dropped.
 
 ## Capability attenuation
 
