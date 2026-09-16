@@ -5,13 +5,13 @@
 Feasibility gate for the OpenResty-oriented scheduler families:
 
 - `ngx::thread::{spawn,wait,kill}`
-- `ngx::timer::{at,every}` and the timer counters `ngx::timer::{pending_count,running_count}`
+- `ngx::timer::{at,every}` and the timer counters `ngx::timer::{pending_count,running_count}` — **landed**, see below
 - `ngx::on_abort`
 - semaphore (`ngx::semaphore::{new,wait,post,count}`) — **landed**, see below
 - `ngx::run_worker_thread`
 
-This document is the lifecycle contract. The callable scheduler families
-stay absent: `ngx::thread::{spawn,wait,kill}`, `ngx::on_abort`, and
+This document is the lifecycle contract. The remaining callable scheduler
+families stay absent: `ngx::thread::{spawn,wait,kill}`, `ngx::on_abort`, and
 `ngx::run_worker_thread` are still gated. Two worker-owned families are
 landed: the semaphore family (`ngx::semaphore::{new,wait,post,count}`), which
 needs no script callable, and the timer family
@@ -36,8 +36,9 @@ embedder API.
 
 ## Decision
 
-**Overall public API is insufficient for callable families. Keep
-fail-closed.**
+**Overall public API is insufficient for the remaining callable
+families. Keep those fail-closed; the semaphore and timer families are
+landed.**
 
 | Family | Decision | Why |
 | --- | --- | --- |
@@ -54,10 +55,19 @@ ids are never reused, and the current executing VM holds a typed handle entry
 in its **own** table. Sync-only programs use a pooled VM; programs that use
 async `wait` use request-owned `AccessExec`. Waits capture owned state plus an
 owned timeout, and worker `exit_process` closes live semaphores before the
-Tokio runtime is dropped. Every other row above is still fail-closed.
+Tokio runtime is dropped.
+
+The timer landing passed them too: registrations live in a
+`thread_local` worker registry (never reused, tagged fake request ids,
+per-round generations), the callback VM is created by the owned
+dispatch with an empty resource table and no request scope, the only
+Tokio work is the deadline sleep, and worker `exit_process` runs or
+cancels every callback before the Tokio runtime is dropped. Every row
+above that is not marked landed is still fail-closed.
 
 Contract tests: `tests/ngx_scheduler_contract.rs` (fail-closed gate),
-`tests/ngx_semaphore.rs` (landed family).
+`tests/ngx_semaphore.rs` (landed semaphore family),
+`tests/ngx_timer.rs` and `tests/timer_nginx.rs` (landed timer family).
 
 ## Current execution architecture
 
@@ -126,7 +136,7 @@ type). **C** = crate-private / `pub(super)` / `pub(crate)`.
 | `SharedCallable = Arc<CallableValue>` | P | `src/bytecode.rs` | Clone shares the Arc. |
 | `CallableValue { prototype_id, kind, env }` | P | `src/bytecode.rs` | No Program identity field. Env is `Option<Arc<CallableEnvironment>>` with `pub(crate) cells: Mutex<Vec<SharedCaptureCell>>`. |
 | `ExportedCallable { name, local_slot }` | P | `src/bytecode.rs` | Metadata only; not a handle. |
-| `HostTypeSchema::Callable { params, result }` | P | `src/host_api.rs` | Catalog type. ngx catalog currently has **zero** Callable params/returns (enforced by contract tests). |
+| `HostTypeSchema::Callable { params, result }` | P | `src/host_api.rs` | Catalog type. The ngx catalog declares exactly two Callable params (the `TakeOwned` `callback` of `ngx::timer::{at,every}`) and no Callable returns (enforced by contract tests). |
 | `HostTypeSchema::Resource(ResourceTypeKey)` | P | `src/host_api.rs` | Used by UDP/TCP/TLS/shared-dict and by the semaphore handle. Runtime passing is integer handle ids. |
 | `ResourceHandle(u64)` | P | `src/vm/resource/handle.rs` | `from_raw` / `raw`. Arena + slot + generation. Table-local. |
 | `ResourceTable` | P | `src/vm/resource/table.rs` | Per VM execution scope. Default max 1024. |
@@ -137,7 +147,7 @@ or another VM.
 
 ### Same-VM callable invocation (public, insufficient)
 
-| Item | Vis | Path | Contract that blocks ngx.thread / timers |
+| Item | Vis | Path | Contract that keeps `ngx.thread` / `on_abort` blocked |
 | --- | --- | --- | --- |
 | `Vm::resolve_exported_callable(name)` | P | `src/vm/mod.rs` | Reads a local slot after root init. Fails if not `Value::Callable`. |
 | `Vm::owns_callable` | C `pub(super)` | `src/vm/mod.rs` | Pointer identity against `instance.owned_callables` (`Weak` / `Arc::ptr_eq`). Not an unforgeable Program-tagged handle. |
@@ -146,16 +156,17 @@ or another VM.
 | `Vm::start_callable` | P | `src/vm/mod.rs` | Requires empty `execution_frames` (`"host invocation requires a halted VM"`). May return Waiting/Yielded from `run_internal`. Same-VM only. |
 | `Vm::invoke_callable` | P | `src/vm/mod.rs` | Wrapper: Halted result or error. Waiting/Yielded are errors. |
 | `Vm::take_callable_result` | P | `src/vm/mod.rs` | Completion queue of **this** VM. |
-| `ScriptCallback<Args, Ret>` | P | `src/vm/store.rs` | `call` / `start` need `&mut Store<T>` (the same VM). Registry `Arc<AtomicBool>` invalidates on Store drop. |
+| `ScriptCallback<Args, Ret>` | P | `src/vm/store.rs` | `call` / `start` need `&mut Store<T>` (the same VM). Registry `Arc<AtomicBool>` invalidates on Store drop. Not the timer mechanism. |
 | `Store<T>` | P | `src/vm/store.rs` | Owns one `Vm`. Not a child VM factory. |
 | `Invocation<'vm>` | P | `src/vm/invocation.rs` | **Borrows `&'vm mut Vm`**. "single active invocation on a VM". |
 | `Vm::start_invocation` | P | `src/vm/invocation.rs` | **"The VM must be halted"**; second invocation rejected; **"bridge host operation is not quiescent"** rejected. Cancel is per this invocation, not a child light-thread. |
 
 These APIs are first-class **same-VM, halted-root, single-invocation**
-callbacks. They are not first-class **ngx.thread / ngx.timer**
-callbacks.
+callbacks. They are not first-class **ngx.thread / `on_abort`**
+callbacks, and the landed timer family does **not** use them: its
+callback VM is created by the owned-dispatch seam below.
 
-### Async host / wake path (public; reused by the landed semaphore family)
+### Async host / wake path (public; reused by the landed semaphore and timer families)
 
 | Item | Vis | Path | Notes |
 | --- | --- | --- | --- |
@@ -169,7 +180,24 @@ callbacks.
 | `VmStatus::{Halted, Yielded, Waiting(HostOpId)}` | P | `src/vm/mod.rs` | One waiting op per VM run. |
 | host streams (`HostStreamDriver`, `submit_callable_stream`) | C | `src/vm/async_host/stream.rs` | Not embedder API. Still same-VM callback continuation. |
 
-### Lifecycle that scheduler families would have to compose with
+### Owned-dispatch seam (public; the landed timer path)
+
+The one public child-VM seam in the pin. It is only reachable from an
+owned host function bound through a `HostFunctionRegistry`, and it is
+what `ngx::timer::{at,every}` use.
+
+| Item | Vis | Path | Notes |
+| --- | --- | --- | --- |
+| `OwnedHostCall::spawn_owned_callable_vm(registry, callable, configure)` | P | `src/vm/host.rs` | Fresh child VM that owns the callable and its captured callable graph: new execution instance, stack, resource table, waiting slot, and module-state store. Reuses the same `Arc<Program>` and standard-surface composition; binds hosts from `registry`; copies no frames, locals, resources, waiting op, callback queue, or request-local host state. Rejects foreign callables and resource-bearing captures, including nested ones. |
+| `register_owned_timer(call, registry, TIMER_CALLBACK_ARG, delay, interval)` | P | `src/builtins/runtime/timer.rs` | Standard-host adapter seam: validates the owned callback's type and program provenance, spawns the isolated VM, hands a `TimerRegistration` to the installed backend, and restores the callback argument on every failure path (error *and* panic). |
+| `TimerBackend` / `TimerConfig` / `TimerRegistration` / `OwnedTimerCallback` | P | same | The backend owns admission and accounting; the callback VM is driven on the embedding's VM thread (`start_reporting` / `poll_reporting` / `cancel`), one round at a time. |
+| `installed_timer_counts` / `TIMER_CALLBACK_ARG` | P | same | Adapter-facing count surface and callback argument index. |
+
+`Value` still has no resource variant, and this seam does not make
+`Value::Callable` portable: only an owned host dispatch can create the
+child VM, and only for a callable the calling VM owns.
+
+### Lifecycle that the remaining scheduler families would have to compose with
 
 | Item | Vis | Path |
 | --- | --- | --- |
@@ -181,13 +209,17 @@ callbacks.
 
 There is **no** public:
 
-- child VM constructor that shares a Program but isolates resource tables and request scope
+- general child-VM / detached scheduler constructor: the owned-dispatch
+  seam above only mints a child VM *inside* an owned host function, for
+  a callable the calling VM owns, under the host registry's control
 - unforgeable callable / function handle distinct from `Value::Callable`
 - cancellable frame/task handle that outlives the parent invocation
 - owned `Send` value boundary that strips callables and request resources
-- timer/thread supervisor, worker-thread pool ABI, or detached Program runner
+- thread supervisor, worker-thread pool ABI, or caller-driven detached
+  Program runner (the landed timer family needs none of these: its
+  worker-owned timer runtime is the only scheduler that exists)
 
-## Six roadmap questions
+## Roadmap questions
 
 ### 1. `ngx::thread::{spawn,wait,kill}` — multi-frame needs and VM expressibility
 
@@ -218,57 +250,105 @@ What the pin actually provides:
 request VM would either block the parent or require inventing a second
 scheduler beside `HostAsyncBridge`. That is rejected.
 
-### 2. `ngx::timer::{at,every}` — detached Program / VM / capability / resource ownership
+### 2. `ngx::timer::{at,every}` — landed detached timer registration
 
 OpenResty `ngx.timer.at` / `every` run after the delay on a timer
 context: no request cosocket, no `ngx.req.*` that needs the original
-`r`, surviving the request that created them (for `at` after the
-request ends, subject to worker lifetime).
+`r`, surviving the request that created them.
 
-What ngx-rustscript would need:
+**Status: landed.** The pinned pd-vm ships the standard timer host module
+plus the generic owned-value dispatch; ngx supplies the seconds-based
+adapter, the worker-owned fake-request registry, the `Timer`-phase
+policy, and the counts. The full contract is
+[7. Timer](#7-timer-landed-worker-owned-fake-request-timers).
 
-- A **detached** `Arc<Program>` runner that is not the request-owned
-  `AccessExec`.
-- A callable handle that remains valid after the creating request VM
-  is reset, pooled, or dropped — or an explicit reject if the Program
-  identity changed (reload).
-- Capability attenuation: timer `AllowedOps` today is `EMPTY` for
-  non-rewrite/access/content/log (`AllowedOps::for_phase`,
-  `src/host/context.rs`). A timer VM must not inherit request
-  `REQUEST_WRITE` / `CONTROL` / request `raw`.
-- Resource ownership: timer must not receive request UDP/TCP handles
-  or `ngx.ctx` maps that were request-owned.
+Landed mechanism:
 
-What the pin actually provides:
+- **Owned `TakeOwned` dispatch.** `ngx::timer::{at,every}` take their
+  callback argument and hand it to `register_owned_timer`, which
+  validates the argument's type and program provenance, spawns the
+  callback VM, and restores the argument on every failure path
+  (returned error *and* panic), so the guest sees it exactly once.
+- **Fresh isolated callback VM.** `OwnedHostCall::spawn_owned_callable_vm`
+  builds a brand-new execution instance, stack, resource table, waiting
+  slot, and module-state store; it reuses only the immutable
+  configuration (same `Arc<Program>`, same standard-surface composition)
+  and binds the host functions from the registry. It never copies the
+  creating VM's frames, stack, locals, resources, waiting operation,
+  callback queue, or request-local host state.
+- **Worker-owned backend.** The registration travels as
+  `TimerRegistration { delay, interval, max_pending, max_running,
+  callback }` to the embedding's `TimerBackend` (ngx: `NgxTimerBackend`);
+  `OwnedTimerCallback` retains the callable and its private VM across
+  `every` rounds (mutable capture cells persist) and serializes rounds.
+  The generic module keeps no state and no counters: the backend is the
+  sole admission authority.
+- **Identity and wake.** Each registration owns one ordinary
+  `RequestIdentity` in the worker `IdentityRegistry` (tagged fake
+  request id, per-round generation rotation) and wakes through the
+  existing worker eventfd. Only the deadline sleep runs on Tokio, and it
+  holds just a `CompletionSender` and that identity.
+- **Scope and resources.** Rounds run under `NgxPhase::Timer` with
+  `AllowedOps::LOG`; the callback VM has no request `r`, no request
+  `ctx`, and no request resource table, so request handles cannot
+  resolve in it. The creating request is detached: request cleanup owns
+  no timer state.
 
-- `ScriptCallback` dies with `Store` / VM (`CallbackRegistryOwner`
-  drop stores `false`).
-- `owns_callable` is per-VM pointer identity; dropping the request VM
-  drops `owned_callables`.
-- `HostFutureOutput::VmCompletion` requires `&mut Vm` of the
-  **submitting** VM — unusable after that VM is gone.
-- No public child VM.
-
-**Expressible now:** no.
+Historical rationale (rejected; kept for review, **not** the landed
+mechanism). The pre-landing design assumed the callback had to run on
+the request-owned VM and therefore proposed a detached `Arc<Program>`
+runner plus a Program-generation-safe callable handle. That concern was
+real for the *then-public* same-VM APIs: `ScriptCallback` is invalidated
+when its `Store` drops (`CallbackRegistryOwner` stores `false`),
+`Vm::owns_callable` is per-VM pointer identity, and
+`HostFutureOutput::VmCompletion` needs `&mut Vm` of the submitting VM.
+Cloning the request VM, parking a `Value::Callable` in a Tokio sleep, or
+invoking a callback on a reset/pooled request VM after the request ended
+stays **rejected**; the landed path never does any of it. The old
+"timer `AllowedOps` is `EMPTY`" statement is also historical:
+`AllowedOps::for_phase(NgxPhase::Timer)` is `LOG` today, and
+`AllowedOps::EMPTY` only applies to catalog phases outside
+rewrite/access/content/log.
 
 ### 3. Panic / error / shutdown / reload / limits
 
-Required mapping (contract, not implemented):
+Landed timer behavior (`src/timer.rs`, `src/host/timer.rs`);
+validated by `tests/ngx_timer.rs` and `tests/timer_nginx.rs`:
+
+| Event | Landed timer behavior |
+| --- | --- |
+| Callback `VmError` | Reported once through the worker cycle log via the backend error sink; the callback VM is recovered for reuse. `at` retires after the failed round; `every` stays eligible. The creating request is not affected (it no longer exists). |
+| Callback panic | pd-vm guards callback `start` / `poll` / `resume` with `catch_unwind` and converts the panic into a callback error routed to the same log sink; the worker never unwinds. ngx additionally bounds one round to 64 immediate resumptions and fails a non-progressing round closed. |
+| Registration failure | Invalid seconds, a missing/foreign/non-callable callback, a pending-limit or registry-full rejection returns a `HostError` to the script and restores the callback argument; nothing is retained. |
+| Client abort | Timers hold no `r`; a 499 or any other request end leaves every registration untouched. A parked semaphore wait still drops with its request (drop guard leaves the FIFO queue). |
+| Worker `exit_process` | `WorkerRuntime::shutdown` calls `timer::shutdown_current()` before dropping Tokio: stop acceptance, run pending callbacks once with `premature=true` (a pending `every` round is **not** rescheduled), cancel live callbacks (releasing their parked async step exactly once), release every callback VM. Live semaphores close and wake their waiters afterwards; the eventfd closes once. |
+| Config reload | Nothing is cancelled or migrated: the timer registry is worker-`thread_local`, old workers keep their registrations (their callback VMs hold their own `Arc<Program>`), and new workers start with zero timers. Identities and generations are worker-local, so no registration is reused across workers or programs. |
+| Limits | `TimerConfig` ships `max_pending` 1024 / `max_running` 256; both travel in every `TimerRegistration` and the backend enforces them atomically with insertion (pending) and round start (running, a parked callback still counted). The worker fake-request registry itself is capped at 1024 (`MAX_LIVE_TIMER_REQUESTS`, the `IdentityRegistry` capacity), and fake request ids fail closed on exhaustion instead of wrapping. |
+
+Still blocked for the remaining callable families
+(`ngx::thread::*`, `ngx::on_abort`, `ngx::run_worker_thread`): no
+public cancellable child-task handle, no generation-safe detached
+identity, no exactly-once child completion protocol that composes with
+the request eventfd bridge. Their required mapping (contract, not
+implemented) is:
 
 | Event | Required behavior |
 | --- | --- |
-| Child / timer script `VmError` | Log; parent `wait` sees a structured error value; request is not 500 unless the parent itself errors. |
-| Panic in host future | Existing `catch_unwind` guards in the content handler, the log handler, and the eventfd read handler (`src/content.rs`, `src/log.rs`, `src/runtime.rs`); child/timer must not unwind the worker. |
-| Client abort | Request-owned children die with the request (see `on_abort`). Detached timers do **not** hold `r`. A parked semaphore wait drops with the request and its drop guard leaves the FIFO queue. |
-| Worker `exit_process` | Cancel all detached tasks and request children; close live semaphores and wake their waiters; drop Tokio runtime; close eventfd once. |
-| Config reload | New `Arc<Program>` identity. Old callable handles must fail closed. In-flight detached work bound to the old Program is cancelled; it must not run against the new Program. |
-| Limits | Per-worker cap on live threads + timers + semaphores + in-flight waits. Live semaphores are already capped at 1024 (`MAX_LIVE_SEMAPHORES`); live threads and timers still need their own caps. The wait cap is 1024 (`DEFAULT_MAX_IN_FLIGHT`). A scheduler must not bypass these. |
+| Child / thread script `VmError` | Log; parent `wait` sees a structured error value; request is not 500 unless the parent itself errors. |
+| Panic in host future | Existing `catch_unwind` guards in the content handler, the log handler, and the eventfd read handler (`src/content.rs`, `src/log.rs`, `src/runtime.rs`); a child must not unwind the worker. |
+| Request abort | Request-owned children die with the request (see `on_abort`). |
+| Worker `exit_process` | Cancel request children; drop Tokio runtime; close eventfd once. |
+| Config reload | New `Arc<Program>` identity. Old callable handles must fail closed. In-flight work bound to the old Program is cancelled, never rebound. |
+| Limits | Live threads still have no worker cap; that is part of the gate. Live semaphores are capped at 1024 (`MAX_LIVE_SEMAPHORES`); in-flight waits at 1024 (`DEFAULT_MAX_IN_FLIGHT`). |
 
-Public API gap: no task handle, no Program-generation on callables,
-no supervisor distinct from the request `AccessExec` identity
-registry (`src/request_state.rs`).
+Public API gap (remaining families): no task handle, no
+Program-generation on callables, no supervisor distinct from the
+request `AccessExec` identity registry (`src/request_state.rs`).
 
-**Expressible now:** no for callable families.
+**Expressible now: no for the remaining callable families.** The
+semaphore and timer families are landed; see
+[5](#5-semaphore-landed-worker-owned-counting-semaphore) and
+[7](#7-timer-landed-worker-owned-fake-request-timers).
 
 ### 4. `ngx::on_abort` — single callable, timing, cleanup safety
 
@@ -364,8 +444,8 @@ Validation, phases, the negative-depth `count` mapping, budgets, and the
 full event table are in [docs/api/semaphore.md](../api/semaphore.md) and
 [Out of scope](../ngx-api-compatibility.md#out-of-scope).
 
-Decision: **landed as the only scheduler-family exception.** Everything
-else in this document stays fail-closed.
+Decision: **landed as the first worker-owned family.** The remaining
+callable families stay fail-closed.
 
 ### 6. `ngx::run_worker_thread` — module/function ABI, owned args/results, configured pool
 
@@ -481,8 +561,8 @@ Validation: `tests/ngx_scheduler_contract.rs` (catalog/manifest/phase/owned
 argument), `tests/ngx_timer.rs` (unit lifecycle), `tests/timer_nginx.rs`
 (real NGINX 1.30.4 lifecycle). `docs/api/timer.md` carries the per-host table.
 
-Decision: **landed as the second worker-owned family.** Everything else in
-this document stays fail-closed.
+Decision: **landed as the second worker-owned family.** The remaining
+callable families stay fail-closed.
 
 ## Required invariants (fail-closed until all hold)
 
@@ -493,17 +573,26 @@ this document stays fail-closed.
    eventfd. No `r`, no `Vm`, no pool, no `ngx_post_event`.
 3. **Unforgeable callables.** A handle must not be a raw
    `prototype_id` or a cloned `Value::Callable` that another VM can
-   be tricked into running. Identity includes Program generation.
+   be tricked into running. The landed timer family satisfies this
+   through the owned-dispatch provenance check (a foreign callable or
+   a resource-bearing capture graph is rejected at registration); a
+   handle carrying Program generation is still required by any future
+   family that must resolve a callable outside the creating VM.
 4. **Child/detached isolation.** Child resource tables do not contain
    parent request handles. Parent request handles cannot be passed as
    `i64` into detached work.
 5. **Single Waiting per VM is not a thread scheduler.** Concurrent
    light threads need independent wait slots or independent VMs.
-6. **Capability attenuation.** Timer / abort / worker-thread scopes
-   start from `AllowedOps::EMPTY` plus an explicit allowlist. They
-   never inherit the creating request's `AllowedOps::for_phase`.
-7. **Reload.** Old Program callables fail closed. In-flight detached
-   work is cancelled, not rebound.
+6. **Capability attenuation.** A detached scope starts from an
+   explicit, narrower allowlist and never inherits the creating
+   request's `AllowedOps::for_phase`. The landed timer scope is
+   `NgxPhase::Timer` + `AllowedOps::LOG`; abort and worker-thread
+   scopes would have to be at least as narrow.
+7. **Reload.** No in-flight work is rebound to a new `Arc<Program>`.
+   Landed timers are not cancelled at all: old workers keep their
+   registrations against their own immutable program, and new workers
+   start empty. A future family that resolves callables by name must
+   fail closed on a stale-Program handle.
 8. **Exactly-once.** Spawned work completes, errors, or cancels once.
    `on_abort` runs at most once. Timer `every` cancellations do not
    deliver a trailing tick after cancel acknowledgement.
@@ -512,14 +601,16 @@ this document stays fail-closed.
 10. **Log phase.** Scheduler imports stay rejected in Log. Log still
     cannot wait.
 
-The landed semaphore family already satisfies these where they apply:
+The landed families already satisfy these where they apply. Semaphore:
 request VMs stay on the worker main thread (1), wait futures are
 identity-only and free of request pointers (2), nothing request-scoped
 crosses the handle boundary (4), a wait uses the one `Waiting` slot of
 its own VM (5), cleanup and completion are exactly-once (8), and the
-family is rejected in Log (10). Callables are not involved, so the
-unforgeable-callable and attenuation clauses (3, 6) are not yet
-exercised by a landed host.
+family is rejected in Log (10). Timer: owned callbacks are provenance
+validated and resource-free by construction (3), rounds run under the
+narrowed `LOG` scope (6), timer state is never rebound on reload (7),
+a failed round is reported once and isolated (9), and the family is
+rejected in Log (10).
 
 ## Lifetime / state diagrams (text)
 
@@ -541,7 +632,10 @@ worker event  harvest identity → gen match → poll_op           │
 request end  drop VM (not pooled if host-bound)                │
 ```
 
-### Illegal timer-with-callback on current API
+### Rejected pre-landing design: storing a request-VM callback across the delay (historical)
+
+This is the design the current code must never use; it is kept as the
+rejected alternative.
 
 ```
 request VM  ScriptCallback.clone() ── stored in Tokio sleep ── X
@@ -555,24 +649,51 @@ timer fires  callback.call(&mut Store) ── registry invalidated
             or HostFutureOutput::VmCompletion(&mut dead_vm)
 ```
 
-### Required detached timer (future, after upstream API)
+### Landed detached timer path (owned dispatch → timer-owned VM → eventfd → per-round identity rotation)
 
 ```
-config Program P0 ── handle H(program_gen=P0, fn=f)
-request  ngx::timer::at(delay, H, owned_args)
-            │
-            ├─ request VM continues / ends   (does not own timer VM)
-            │
-worker timer table  identity T(gen,id)  (not a request identity)
-            │  future waits delay (Send, no r)
-            │  fire → lease detached Vm::new_shared(P0) if gen live
-            │       → attenuated AllowedOps
-            │       → invoke H on THAT vm only
-            │       → drop detached VM
-reload  P0 retired → T cancelled, H fails closed
+config Program P0 (immutable, shared by Arc) ────────────────┐
+                                                             │
+request VM (AccessExec)  ngx::timer::at(seconds, callback)   │
+    │ TakeOwned transfer of the callback                     │
+    │ register_owned_timer:                                  │
+    │   type + program-provenance validation,                │
+    │   rollback of the callback argument on any failure     │
+    │   → fresh isolated callback VM (new instance, stack,   │
+    │     resource table, waiting slot, module state)        │
+    │     sharing only Arc<Program> P0 + the host registry   │
+    │   → NgxTimerBackend::register: admission under one     │
+    │     critical section (pending/running caps + 1024      │
+    │     fake-request registry capacity)                    │
+    │   → spawn deadline task                                │
+    ├─ request continues / ends  (owns no timer state)       │
+    ▼                                                        │
+worker timer registry (thread_local; ≤1024 fake requests)    │
+    TimerEntry { ordinary RequestIdentity(gen, fake|TAG),    │
+                 callback VM, interval?, max_running, ... }  │
+    Tokio deadline task: sleep(delay)                        │
+      → sender.wake_identity(identity)                       │
+      (holds the sender + identity; no VM/r/pool/pointer)    │
+    ▼                                                        │
+worker eventfd → timer::on_worker_event(ready) first, then   │
+    request identities; a wake matching no live registration │
+    (request id, stale/duplicate retired gen) is ignored     │
+    ▼                                                        │
+worker main thread, NgxPhase::Timer + AllowedOps::LOG:       │
+    Pending → start round (premature=false) with a slot      │
+    Live/Waiting → poll the callback VM's own bridge once;   │
+      the parked future wakes through the same eventfd       │
+      with the round's current identity                      │
+    terminal → `at` retires; `every` retires the identity,   │
+      mints a fresh generation for the same fake id, then    │
+      re-arms                                                │
+shutdown  pending → run once premature=true (no reschedule)  │
+          live → cancel once (releases the parked async step)│
+          → release every callback VM (P0 stays alive via its│
+            own Arc<Program> until the VM is dropped)       │
 ```
 
-### Required light thread (future)
+### Light thread (not implemented; blocked)
 
 ```
 parent VM (request)  spawn(H, args) → TaskHandle TH
@@ -603,34 +724,36 @@ Semaphore waits ride this same table, so their timeout, cancellation,
 and drop paths reuse this contract rather than adding a second one
 (`tests/ngx_semaphore.rs`, `src/semaphore.rs`).
 
-### Callable families (required; not implementable now)
+### Landed timer lifecycle (implementation) versus remaining families
 
-| Event | `thread.spawn` child | `timer.at` | `timer.every` | `on_abort` |
-| --- | --- | --- | --- | --- |
-| Parent Halted | cancel child | timer independent | independent | unregister without run |
-| Parent 499 | cancel child; abort cb once if registered | independent | independent | run once, then 499 |
-| `thread.kill` | cancel once; wait sees killed | n/a | n/a | n/a |
-| Timer cancel | n/a | no fire | no further ticks; in-flight tick either runs to completion **or** is cancelled, never both | n/a |
-| Reload | cancel | cancel | cancel | unregister |
-| Double wake | ignore by generation | ignore | ignore | ignore |
-| Panic | fail child once | fail timer once | fail that tick; series continues unless policy says stop | fail abort cb; still finalize 499 |
+| Event | `timer.at` / `timer.every` (landed) | `thread.*` / `on_abort` (blocked) |
+| --- | --- | --- |
+| Parent Halts / 499 | timer independent: no `r`, nothing to cancel | cancel child / run abort callback once; exactly-once semantics still unspecified |
+| Registration rejected | callback argument restored to the guest once; nothing retained | n/a |
+| Deadline wake | only the registration's **current** identity is a deadline; a stale or duplicate wake matches no live entry and is ignored | ignore by generation (required) |
+| `every` round terminal | next deadline scheduled only after terminal completion, under a fresh monotonically advancing generation for the same fake request id; rounds never overlap; capture cells persist | n/a |
+| Worker shutdown | pending → run once with `premature=true`, never rescheduled; live → cancelled once (releases the parked async step); every callback VM released | cancel children / unregister |
+| Reload | registrations stay with the old worker and its old `Arc<Program>`; new workers start empty; no migration, no rebinding | old-Program handles must fail closed (not implemented) |
+| Panic | `catch_unwind` in the callback driver; reported once through the backend; `at` retires, `every` stays eligible; worker not unwound | fail the child once (not implemented) |
 
 Exactly-once rule: a given task identity delivers at most one terminal
-status `{completed, failed, cancelled, killed}`. Abort callback
-delivers at most one invocation.
+status `{completed, failed, cancelled, killed}`; the landed timer family
+retires each round identity exactly once, so a retired generation can
+never deliver a second round. Abort callback delivers at most one
+invocation.
 
 ## Budgets
 
 | Budget | Current | Scheduler implication |
 | --- | --- | --- |
-| In-flight HostFuture waits | 1024 / worker | Threads waiting, timer fires that invoke async hosts, and semaphore waits **share** this cap unless a new named cap is designed. Do not silent-bypass. Semaphore waits use the existing `AccessExec` reservation, so the cap is shared in practice (`tests/ngx_semaphore.rs`). |
-| Idle VM pool | 4 VMs without request-state imports (`MAX_IDLE_VMS`) | Detached timer VMs are not pool VMs. Do not steal pool slots. |
-| Resource table | pd-vm default 1024 | Child VM gets its own table. Do not insert parent sockets into it. |
-| `ngx.ctx` | keys/depth/bytes caps | Callables rejected. Detached work gets no request ctx. |
-| Script call depth | `DEFAULT_MAX_SCRIPT_CALL_DEPTH` 1024 | Child VM has its own depth; spawn is not a recursive same-stack call. |
+| In-flight HostFuture waits | 1024 / worker (`DEFAULT_MAX_IN_FLIGHT`) | Request-owned async waits (sleep, cosocket, a semaphore `wait` inside a request) reserve this permit exactly once through the `AccessExec` driver (`tests/ngx_semaphore.rs`). A timer callback that parks on async work uses the same `HostFuture` + identity-waker + worker-eventfd wake path, but its concurrency is bounded by the timer `max_running` cap rather than by that permit pool: do not claim that every timer work item is counted against `DEFAULT_MAX_IN_FLIGHT`. |
+| Idle VM pool | 4 VMs without request-state imports (`MAX_IDLE_VMS`) | Only sync-only request VMs are pooled. A callback VM is created by the owned dispatch and is never taken from (or returned to) the pool. |
+| Resource table | pd-vm default 1024 | A callback VM gets its own **empty** table. A request handle cannot resolve in it (wrong table, fails closed); never insert a parent socket into it. |
+| `ngx.ctx` | keys/depth/bytes caps | Callables rejected. Detached timer rounds have no request ctx (no ctx pointer in the round's scope). |
+| Script call depth | `DEFAULT_MAX_SCRIPT_CALL_DEPTH` 1024 | A callback VM has its own depth; a timer round is not a recursive same-stack call. |
 | Codec / body / header caps | see compatibility matrix | Unchanged. |
+| Live timers | 1024 pending / 256 running per worker | Shipped `TimerConfig::default()` carried in every `TimerRegistration`; the backend enforces both atomically with insertion (pending) and round start (running, a parked callback still counted). The fake-request registry itself is a 1024-capacity `IdentityRegistry` (`MAX_LIVE_TIMER_REQUESTS`). |
 | Proposed live `thread` count | not set | Need a hard cap before enabling spawn (suggested 64/request, 256/worker — **proposal only**, not implemented). |
-| Proposed live timers | not set | Need a hard cap (suggested 256/worker). |
 | Live semaphores | 1024 / worker (`MAX_LIVE_SEMAPHORES`) | Worker-local `Arc<SemaphoreState>` in the worker registry; the VM table holds one handle entry per `new`. No shm; permits are process-local by design. |
 | Permits per semaphore | 1000000 (`MAX_SEMAPHORE_COUNT`) | `new`/`post` above the ceiling is a `HostError`; no silent saturation. |
 
@@ -643,16 +766,27 @@ delivers at most one invocation.
 - `Vm::new_shared(Arc<Program>)` shares bytecode. Callable **runtime
   instances** are per VM (`owned_callables`).
 - Request identities are `(generation, request_id)` (`src/notify.rs`).
-  Stale wakes are ignored.
-- A future callable handle must carry `program_generation` (or
-  `Arc::ptr_eq` on the Program plus a retired-set). Reload retires
-  the old Arc.
-- Worker `init_process` starts Tokio + eventfd; `exit_process`
-  invalidates senders, cancels futures, closes fd once
-  (`src/runtime.rs`). Detached scheduler state would have to hook
-  **that** shutdown, not a new one. The landed semaphore family already
-  does: `WorkerRuntime::shutdown` closes live semaphores and wakes their
-  waiters before the Tokio runtime is dropped.
+  Stale wakes are ignored. The landed timer family reuses exactly that
+  type: every registration owns a worker-unique, never-reused
+  `RequestIdentity` whose request id is tagged out of the real
+  request-id half (`FAKE_REQUEST_ID_TAG`), and every `every` re-arm
+  rotates the generation.
+- A future callable handle for the **still-blocked** families must
+  carry `program_generation` (or `Arc::ptr_eq` on the Program plus a
+  retired-set). Reload retires the old Arc. The landed timer family
+  does not need one: the callback VM is created by the owned dispatch
+  against the creating VM's `Arc<Program>` and holds that Arc for its
+  whole lifetime, so an old-worker timer keeps running against the old
+  immutable program and is never rebound to a reload's new Program. A
+  new worker starts with an empty `thread_local` timer registry.
+- Worker `init_process` starts Tokio + eventfd and installs the timer
+  runtime (`install_worker_timers`); `exit_process` invalidates
+  senders, cancels futures, closes fd once (`src/runtime.rs`). Scheduler
+  state hooks **that** shutdown, not a new one. Both landed families
+  do: `WorkerRuntime::shutdown` runs `timer::shutdown_current()`
+  (pending callbacks once with `premature=true`, live callbacks
+  cancelled, no reschedule) and then closes live semaphores and wakes
+  their waiters, before the Tokio runtime is dropped.
 
 ## Capability attenuation
 
@@ -671,19 +805,23 @@ closed while log, `ngx::sleep`/`sleep_ms`, cosocket I/O, the shared dictionary,
 the semaphore family, and the timer family work. The scope never inherits the
 creating request's `AllowedOps::for_phase`.
 
-Required attenuation table (future):
+Attenuation for the remaining families (proposed; the timer row is
+shipped behavior):
 
 | Runner | Request FFI | Cosocket | ctx | Response write | Control | Shared dict | Log | Sleep |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | access/content parent | yes | yes | yes | phase rules | yes | yes | yes | yes |
 | `ngx.thread` child | same request, **same** phase ops | yes, but handles must be child-table copies or explicitly moved | shared map needs a defined alias policy | yes | yes | yes | yes | yes |
-| `ngx.timer.at/every` | **no** `r` | no request sockets; optional new timer-owned sockets later | no request ctx | no | no | yes (worker-level) | yes | yes |
+| `ngx.timer.at/every` (landed) | **no** `r` | timer-owned outbound async work, never request sockets | no request ctx | no | no | yes (worker-level) | yes | yes |
 | `ngx.on_abort` | dying `r` only if still live; prefer no sockets | no | read-only or none | no | no | yes | yes | no |
 | `run_worker_thread` | no | no | no | no | no | no (or explicit copy-in) | cycle log only | no nginx sleep |
 
 Until a runner can install a scope that is **narrower** than the
-creator and cannot be widened by the script, callable families stay
-blocked.
+creator and cannot be widened by the script, the remaining callable
+families stay blocked. The landed timer runner is the shipped example
+of such a scope: `NgxPhase::Timer` + `AllowedOps::LOG`, narrowed from
+the creating phase (a request-only host fails closed inside a round),
+and the script cannot widen it.
 
 The landed semaphore family is not a runner: it invokes no script, so
 it needs no narrowed scope. Its hosts run under the access/content
@@ -706,15 +844,40 @@ Escape means a detached or pooled context using:
 
 Prevention:
 
-1. Detached args are a **deep-owned Send subset**: null/int/float/bool/
-   string/bytes/array/map of those. Reject callable and reject
-   resource ids (do not treat `i64` as a handle).
-2. Child request threads (ngx.thread) that **are** allowed sockets
+1. The shipped timer registration transfers **only** the owned
+   callback plus a checked `Duration`/interval — there is no
+   detached-args ABI to validate and no other value crosses. A future
+   general detached boundary (thread / `run_worker_thread`) would have
+   to be a **deep-owned Send subset**: null/int/float/bool/string/
+   bytes/array/map of those, with callables and resource ids rejected
+   (never treat `i64` as a handle). That is a proposal, not an
+   implemented path.
+2. Shipped timer callbacks cannot reach request resources:
+   - **provenance**: the callback must belong to the creating VM's
+     program; a foreign callable is rejected at registration
+     (`callable does not belong to the source vm`);
+   - **resource-bearing captures fail closed**, including nested ones:
+     a capture whose declared schema contains a resource (through
+     arrays, maps, or named types) is rejected before any callback VM
+     exists, and the captured callable graph is depth-bounded and
+     program-local;
+   - **fresh VM**: the callback VM starts with a brand-new execution
+     instance, stack, empty resource table, waiting slot, and
+     module-state store, and copies no frames, locals, resources,
+     waiting op, callback queue, or request-local host state, so no
+     request `r`, ctx, or socket table has anywhere to live;
+   - **no request FFI**: rounds run with no request pointer, no ctx
+     pointer, and no request-owned pool; `NgxPhase::Timer` denies
+     request/response/ctx/control hosts;
+   - **fake identity only**: the deadline task holds a
+     `CompletionSender` and the round's ordinary `RequestIdentity`
+     (tagged fake request id), never a pointer.
+3. Child request threads (ngx.thread) that **are** allowed sockets
    receive handles minted in the **child** table, or a move API that
    invalidates the parent handle (exactly-once move).
-3. Wakers stay identity-only.
-4. `ngx::ctx` already rejects callables; keep that.
-5. Semaphore hosts resolve the `i64` only through the current executing VM's
+4. Wakers stay identity-only.
+5. `ngx::ctx` already rejects callables; keep that.
+6. Semaphore hosts resolve the `i64` only through the current executing VM's
    typed table. `new` inserts the entry there, and `post`/`count`/`wait` use
    that same table. A sync-only program may use a pooled VM; a program using
    async `wait` uses request-owned `AccessExec`. The wait future captures
@@ -728,29 +891,39 @@ family stays safe because every handle is then resolved through
 A token copied from a foreign or reset VM therefore fails closed
 (`resource_handle_wrong_table`) instead of reaching an entry; cosocket handles
 resolve the same way.
-Callable families cannot ship on the raw integer ABI alone: they would
-need an unforgeable identity, because a callable is not a table entry
-with an arena and a generation to validate.
+The remaining callable families cannot ship on the raw integer ABI
+alone: they would need an unforgeable identity, because a callable is
+not a table entry with an arena and a generation to validate. The
+landed timer family avoids the problem entirely: a callable is never
+placed in a table — it is transferred once through the owned dispatch
+and validated by provenance.
 
 ## Panic / error mapping
 
-| Source | Parent request | Detached timer | Worker pool thread |
+| Source | Parent request | Landed timer round | Thread pool thread (blocked) |
 | --- | --- | --- | --- |
-| Script `VmError` | existing 500 / log-phase log-only | log; drop timer VM | return error value to caller |
-| HostError | existing | log; drop | return error |
+| Script `VmError` | existing 500 / log-phase log-only | reported once through the backend error sink → cycle log; callback VM recovered; `at` retires / `every` stays eligible | return error value to caller |
+| HostError | existing | same as `VmError` | return error |
 | `Waiting` in log | `LOG_CANNOT_WAIT` | n/a | n/a |
-| Panic in script/host on worker main | content and log handlers guard with `catch_unwind`; resume runs inside the guarded eventfd read handler | `catch_unwind`; log; drop | `catch_unwind`; error result |
-| Panic in Tokio future | future error → resume error path | future error → no request | future error → caller wait |
-| Control `ngx::exit` in child | defined later; default: child stop, parent continues unless wait observes it | forbidden by attenuation | forbidden |
+| Panic in script/host on worker main | content and log handlers guard with `catch_unwind`; resume runs inside the guarded eventfd read handler | pd-vm `catch_unwind` in `start` / `poll` / `resume` converts it to a reported callback error; the worker never unwinds | `catch_unwind`; error result |
+| Error from a parked future | future error → resume error path | future error → reported through the same backend sink | future error → caller wait |
+| Control `ngx::exit` in a callback | n/a | forbidden by attenuation (`AllowedOps::LOG`) | forbidden |
 
 Do not call `ngx_http_finalize_request` from a timer, pool thread, or
 host future.
 
-## Proposed minimal upstream `pd-vm` public API
+## Proposed minimal upstream `pd-vm` public API (remaining blocked families only)
 
-These signatures do **not** exist on the pin. They are the smallest
-surface that would make callable families designable without using
-crate-private interpreter state.
+Scope: `ngx::thread::{spawn,wait,kill}`, `ngx::on_abort`, and
+`ngx::run_worker_thread`. The timer family is **not** blocked on this
+surface: it landed through the generic owned `TakeOwned` dispatch plus
+the standard timer host module (sections
+[2](#2-ngxtimeratevery-landed-detached-timer-registration) and
+[7](#7-timer-landed-worker-owned-fake-request-timers)) and does not
+need a proposed `ChildVm` / `TaskHandle`. These signatures do **not**
+exist on the pin; they are the smallest surface that would make the
+remaining callable families designable without using crate-private
+interpreter state.
 
 ```rust
 /// Unforgeable callable/function handle. Not `Value::Callable`.
@@ -829,15 +1002,19 @@ Constraints the embedder will still impose:
 - `Value::Callable` remains in-VM only.
 
 Until this (or an equivalent reviewed public API) ships in a pin bump,
-ngx-rustscript will not add `src/scheduler.rs` or register a callable
-scheduler host. That is independent of the landed, callable-free
-semaphore family.
+ngx-rustscript will not add `src/scheduler.rs` or register these
+remaining callable hosts. The landed families are independent of this
+surface: the semaphore family involves no callable, and the timer
+family ships the only two catalogued `Callable` schemas (the
+`TakeOwned` `callback` parameters of `ngx::timer::{at,every}`).
 
 ## Phased follow-up order
 
 1. **This gate (done by the contract tests).** Fail-closed. No scheduler
-   module; the callable families stay absent from the 199-name manifest.
-   Design published.
+   module; the remaining callable families (`ngx::thread::*`,
+   `ngx::on_abort`, `ngx::run_worker_thread`) stay absent from the
+   199-name manifest. The semaphore and timer families are landed and
+   catalogued. Design published.
 2. **Upstream `pd-vm`.** Land the minimal public API above. Pin bump
    in ngx-rustscript with an audit against this file.
 3. **Semaphore (landed, independent).** Worker-owned resource +
@@ -848,17 +1025,21 @@ semaphore family.
 5. **`ngx.timer.at` then `every` (landed).** The pin's standard timer host
    module supplies the owned dispatch and the isolated callback VM; ngx adds
    the fake-request registry, the Timer-phase policy, and the counts. No
-   generalized `ChildVm`/`TaskHandle` prerequisite is needed for this path.
+   generalized `ChildVm`/`TaskHandle` prerequisite was needed for this path.
 6. **`ngx.thread.{spawn,wait,kill}`.** Independent wait slot or child
    VM **bound to the request identity**. Kill/cancel on 499 and
    shutdown.
 7. **`ngx.run_worker_thread` last.** Configured pool + `DetachedValue`
    ABI. No request resources.
 
-A later phase must not skip 2. Semaphore (3) landed before 2 because it
-needs no callables; it is implemented as `src/semaphore.rs` plus
-`src/host/semaphore.rs`, **not** as a `scheduler` module, and must not be
-smuggled in as the callable scheduler engine.
+A later phase must not skip 2 **for the remaining families**. Semaphore
+(3) and timer (5) landed without it because they need no generalized
+child-VM API — the timer family uses the owned-dispatch seam and the
+standard timer host module instead. Both are implemented as
+`src/semaphore.rs` + `src/host/semaphore.rs` and `src/timer.rs` +
+`src/host/timer.rs`, **not** as a `scheduler` module, and must not be
+smuggled in as the callable scheduler engine for the remaining
+families.
 
 ## Observable fail-closed boundary (this crate)
 
@@ -870,7 +1051,7 @@ smuggled in as the callable scheduler engine.
 | `bind_ngx_hosts` | installs the 4 semaphore hosts; no callable scheduler functions |
 | `src/scheduler.rs`, `src/host/scheduler.rs` | absent |
 | `src/lib.rs`, `src/host/mod.rs` | no `mod scheduler` |
-| `HostFamily` / `HostCapability` | no `Scheduler` variant; one reviewed `Semaphore` variant each |
+| `HostFamily` / `HostCapability` | no `Scheduler` variant; the reviewed `Timer` and `Semaphore` variants are the only scheduler-family variants |
 | catalog `HostTypeSchema::Callable` | exactly two: the `callback` parameters of `ngx::timer::{at,every}` (declared `TakeOwned`) |
 | compile `ngx::thread::spawn`, `ngx::thread::wait`, `ngx::thread::kill`, `ngx::on_abort`, `ngx::run_worker_thread` in Access/Content/Log | `ConfigError::UnsupportedImport` (or the same fail-closed class) at **configuration** compile in every phase, not at request runtime |
 | compile `ngx::timer::{at,every,pending_count,running_count}` | Access and Content accepted; Log `ConfigError::PhaseForbidden` at configuration compile; the bare `ngx::timer` marker is never catalogued, never bound, and rejected at configuration compile |
@@ -878,7 +1059,7 @@ smuggled in as the callable scheduler engine.
 | semaphore in Access/Content | accepted; `wait` may return `Waiting` |
 | semaphore in Log | `ConfigError::PhaseForbidden` at configuration compile (phase set and closed Log allowlist both reject) |
 | semaphore in Rewrite / Timer / Init etc. | rejected at configuration compile; catalog phases are exactly `[Access, Content]` |
-| Log allowlist | synthetic log-allowlist probe `ngx::future::scheduler` (never a production import) is rejected; scheduler candidates and the semaphore family stay rejected |
+| Log allowlist | synthetic log-allowlist probe `ngx::future::scheduler` (never a production import) is rejected; scheduler candidates stay rejected, and neither landed family is Log-eligible (`ngx::timer::*` and `ngx::semaphore::*` both fail configuration compile with `PhaseForbidden`) |
 
 Revisit this file before adding any of the still-gated names
 (`ngx::thread::*`, `ngx::on_abort`, `ngx::run_worker_thread`) to the manifest;
