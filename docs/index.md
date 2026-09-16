@@ -22,7 +22,7 @@ metadata on each directive. The prose is ngx-rustscript's own.
 | [Security and policy](security.md) | Denied-by-default grants, one HTTP allow pair, SQLite root, fail-closed log |
 | [Examples](examples/index.md) | Rate limiter, HMAC API-key auth, async pipeline |
 | [Compatibility](ngx-api-compatibility.md) | OpenResty v0.10.29 mapping, typed results, out of scope |
-| [Scheduler design](design/ngx-scheduler.md) | Callback execution contract for non-production thread/timer APIs, and the landed semaphore family |
+| [Scheduler design](design/ngx-scheduler.md) | Callback execution contract: blocked thread/`on_abort`/`run_worker_thread` families, plus the landed semaphore and timer families and their lifecycle |
 
 ## Runnable phases
 
