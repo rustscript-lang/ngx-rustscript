@@ -43,9 +43,9 @@ fail-closed.**
 | --- | --- | --- |
 | `ngx::thread::{spawn,wait,kill}` | **blocked** | Needs concurrent child frames / independent invocation while the parent VM is live and possibly `Waiting`. Public `Vm::start_callable` / `invoke_callable` / `start_invocation` require a halted VM and a single active invocation. |
 | `ngx::timer::{at,every,pending_count,running_count}` | **landed** (199) | The pinned pd-vm exposes `register_owned_timer` / `installed_timer_counts` / `TIMER_CALLBACK_ARG` and a generic owned dispatch that spawns an isolated callback VM. ngx supplies checked seconds, its own exact names/schemas, a worker-owned fake-request registry, and the Timer-phase capability policy. |
-| panic / error / shutdown / reload / limits for those families | **blocked** | No public cancellable child-task handle, no generation-safe detached identity, no exactly-once child completion protocol that composes with the request eventfd bridge. |
+| panic / error / shutdown / reload / limits for those families | **landed / covered** for the timer family; **blocked** for the remaining callable families | The landed timer lifecycle ([Timer](#7-timer-landed-worker-owned-fake-request-timers)) covers callback errors (`every` stays eligible after a logged failure), panic isolation, worker `exit_process` (pending callbacks run once with `premature=true`, live callbacks are cancelled, further `every` rounds stop), reload (new workers start with zero timers), and the `TimerConfig` / fake-request caps; validated by `tests/ngx_timer.rs` and `tests/timer_nginx.rs` together with `tests/ngx_scheduler_contract.rs`. `ngx::thread::*`, `ngx::on_abort`, and `ngx::run_worker_thread` still have no public cancellable child-task handle, no generation-safe detached identity, and no exactly-once child completion protocol that composes with the request eventfd bridge. |
 | `ngx::on_abort` | **blocked** | Needs a single callable, request-abort timing, and cleanup that cannot re-enter the dying request VM with live FFI pointers. |
-| semaphore | **landed** (199) | Worker-owned counter + FIFO waiter queue in a `thread_local` registry, reached through a VM-local `resource<ngx.semaphore>` handle. Waits reuse the generic `HostFuture` + `AccessExec` reservation path and invoke no script callable. That does **not** unlock thread/timer/`on_abort`/`run_worker_thread`. |
+| semaphore | **landed** (199) | Worker-owned counter + FIFO waiter queue in a `thread_local` registry, reached through a VM-local `resource<ngx.semaphore>` handle. Waits reuse the generic `HostFuture` + `AccessExec` reservation path and invoke no script callable. That does **not** unlock thread/`on_abort`/`run_worker_thread`. |
 | `ngx::run_worker_thread` | **blocked** | Needs a configured pool, module/function ABI, and an owned `Send` value boundary. `Value::Callable` / request resources must not cross the pool. |
 
 The semaphore landing passed the request-resource escape and reload
@@ -872,11 +872,14 @@ smuggled in as the callable scheduler engine.
 | `src/lib.rs`, `src/host/mod.rs` | no `mod scheduler` |
 | `HostFamily` / `HostCapability` | no `Scheduler` variant; one reviewed `Semaphore` variant each |
 | catalog `HostTypeSchema::Callable` | exactly two: the `callback` parameters of `ngx::timer::{at,every}` (declared `TakeOwned`) |
-| compile `ngx::thread::spawn`, `ngx::timer::at`, `ngx::timer::pending_count` etc. in Access/Content/Log | `ConfigError::UnsupportedImport` (or the same fail-closed class) at **configuration** compile, not at request runtime |
+| compile `ngx::thread::spawn`, `ngx::thread::wait`, `ngx::thread::kill`, `ngx::on_abort`, `ngx::run_worker_thread` in Access/Content/Log | `ConfigError::UnsupportedImport` (or the same fail-closed class) at **configuration** compile in every phase, not at request runtime |
+| compile `ngx::timer::{at,every,pending_count,running_count}` | Access and Content accepted; Log `ConfigError::PhaseForbidden` at configuration compile; the bare `ngx::timer` marker is never catalogued, never bound, and rejected at configuration compile |
 | bare `ngx::semaphore` marker | never catalogued, never bound, rejected at configuration compile |
 | semaphore in Access/Content | accepted; `wait` may return `Waiting` |
 | semaphore in Log | `ConfigError::PhaseForbidden` at configuration compile (phase set and closed Log allowlist both reject) |
 | semaphore in Rewrite / Timer / Init etc. | rejected at configuration compile; catalog phases are exactly `[Access, Content]` |
 | Log allowlist | synthetic log-allowlist probe `ngx::future::scheduler` (never a production import) is rejected; scheduler candidates and the semaphore family stay rejected |
 
-Revisit this file before adding any of those names to the manifest.
+Revisit this file before adding any of the still-gated names
+(`ngx::thread::*`, `ngx::on_abort`, `ngx::run_worker_thread`) to the manifest;
+the semaphore and timer families are already landed and catalogued.

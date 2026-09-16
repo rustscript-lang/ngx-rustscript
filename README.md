@@ -20,7 +20,7 @@ never waits, and logs errors without mutating the already-sent response.
 
 - [Documentation index](docs/index.md)
 - [Directives](docs/directives.md) — syntax, context, inheritance, defaults, errors
-- [API reference](docs/api/index.md) — 195 ngx hosts by family
+- [API reference](docs/api/index.md) — 199 ngx hosts by family
 - [Execution model](docs/execution-model.md)
 - [Security and policy](docs/security.md)
 - [Examples](docs/examples/index.md)
@@ -32,7 +32,7 @@ never waits, and logs errors without mutating the already-sent response.
 | --- | --- |
 | [ngx-rust](https://github.com/nginx/ngx-rust) | `cda9d8372ccd2e139ef2b03e5806e019e7796187` (`ngx` / `nginx-sys` 0.5.0, `nginx-src` 1.30.0+1.30.4) |
 | NGINX | 1.30.4 (`nginx_version` 1030004). Tarball SHA-256 `4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b` |
-| RustScript / `pd-vm` | [`https://github.com/rustscript-lang/rustscript`](https://github.com/rustscript-lang/rustscript) at `4b749862ff1632ef1266d75709da3676de37356c` (Cargo git dependency `package = "pd-vm"` on that immutable rev; no sibling path) |
+| RustScript / `pd-vm` | [`https://github.com/rustscript-lang/rustscript`](https://github.com/rustscript-lang/rustscript) at `f5f71ebc2f38e276c35f2aebaf63f4e2780efe99` (Cargo git dependency `package = "pd-vm"` on that immutable rev; no sibling path) |
 | Rust toolchain | 1.85.0 or later (ngx-rust MSRV). Verified with rustc 1.94.1 |
 
 Required build tools on Linux:

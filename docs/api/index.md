@@ -7,13 +7,16 @@ This matrix is the authoritative current ngx host surface for
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
 (`ngx_host_catalog()`), and the runtime bind list
 (`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-Those three lists contain the same **199** names in the same order.
+The manifest and the compiler catalog contain the same **199** names in the
+same order; the per-name runtime bind list has **195** ordered non-timer
+entries.
 
 The owned `ngx::timer::{at,every}` registrations have no name-binding API, so
-the timer family resolves through the timer-host registry
-(`ngx_host_registry`) instead of the per-name bind list; the per-name list
-therefore keeps the 195 callable entries and the manifest/catalog add the four
-timer hosts (191 + 4 semaphore + 4 timer = 199). See [timer](timer.md).
+the four timer names resolve through the timer-host registry
+(`ngx_host_registry`) instead of the per-name bind list; the manifest/catalog
+add them on top of the 191 callable baseline and the four semaphore entries
+(191 + 4 semaphore = 195 per-name, + 4 timer = 199 total). See
+[timer](timer.md).
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 not run Lua, does not depend on an OpenResty binary, and documents only
@@ -203,14 +206,19 @@ host adds a further difference.
    messages containing NUL are host errors. The line is prefixed
    `ngx-rustscript: `. OpenResty varargs are a single string.
 9. **Phase and config import enforcement.** `compile_rss_source` compiles
-   access scripts against `compile_host_catalog()` (the 199 ngx hosts plus
-   pd-vm's HTTP import catalog) and then
+   access scripts against `compile_host_catalog()` — exactly the 199-name
+   `ngx_host_catalog()`, with no pd-vm standard family merged in — and then
    `validate_program_imports_for_phase(..., Access)`;
    `compile_rss_source_for_phase` performs the corresponding Content or
-   Log validation for `content_by_rss_file` and `log_by_rss_file`. Unknown
-   names, phase-forbidden names, arity, and type mismatches fail distinctly
-   at `nginx -t` / reload. Catalog phase metadata is the allowlist for all
-   three executable directives and for documented future phases.
+   Log validation for `content_by_rss_file` and `log_by_rss_file`. pd-vm
+   standard HTTP imports stay dynamic: they compile as ordinary host
+   imports against the documented `map` interface, are validated by name
+   (`is_standard_host_import`), and bind through the staged standard
+   composition at runtime; pd-vm I/O and SQLite are compiler builtins
+   dispatched through that composition. Unknown names, phase-forbidden
+   names, arity, and type mismatches fail distinctly at `nginx -t` /
+   reload. Catalog phase metadata is the allowlist for all three
+   executable directives and for documented future phases.
 10. **`ngx.worker.pids` semantics.** The array always includes live
     `ngx_pid` when `pid > 0`. Other `ngx_processes` slots are included
     only when `pid > 0` and `channel[0] > 0` (excludes master, helpers,

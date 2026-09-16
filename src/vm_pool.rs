@@ -1,6 +1,6 @@
 //! Worker-thread-local synchronous VM pool.
 //!
-//! pd-vm at `4b749862ff1632ef1266d75709da3676de37356c` stores `Arc<Program>`
+//! pd-vm at `f5f71ebc2f38e276c35f2aebaf63f4e2780efe99` stores `Arc<Program>`
 //! internally and exposes:
 //!
 //! - [`Vm::new_shared`] — shared-program constructor (this pin has no

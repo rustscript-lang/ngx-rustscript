@@ -56,15 +56,37 @@ and never change the already-sent response. `Waiting` logs
 ## Compile-time import allowlists
 
 `compile_rss_source` compiles access scripts against `compile_host_catalog()`
-(the 199 ngx hosts plus pd-vm's HTTP import catalog) and then
-`validate_program_imports_for_phase(..., Access)`.
+— exactly the 199-name `ngx_host_catalog()`, with no pd-vm family merged in —
+and then `validate_program_imports_for_phase(..., Access)`.
 `compile_rss_source_for_phase` performs the corresponding Content or
 Log validation. Unknown names, phase-forbidden names, arity, and type
 mismatches fail distinctly at `nginx -t` / reload.
 
-`ngx::thread::{spawn,wait,kill}`, `ngx::timer::{at,every,pending_count,running_count}`,
-`ngx::on_abort`, and `ngx::run_worker_thread` are not production hosts;
-configuration compile rejects those imports. The production
+pd-vm's standard HTTP imports are not part of that catalog. The pinned pd-vm
+HTTP catalog declares its request/response positions as named records
+(`HttpRequest` / `HttpResponse` / SSE records) and registers its adapters
+byte-for-byte from that same catalog, so a merged compile-time schema could
+never both match the documented loose `map` scripts and stay registered.
+`http::client::*` therefore compiles dynamically as an ordinary host import
+against the documented `map` interface: configuration validates the name
+(`is_standard_host_import`), and the pinned pd-vm adapter validates the
+concrete request contents at runtime and returns the pinned named-record
+contract payload shapes unchanged (duplicate header entries, `HttpHeaderValue`
+text/bytes variants). The dynamic standard import binds through the staged
+standard composition (I/O and SQLite are compiler builtins dispatched through
+that same composition); see [pd-vm standard async hosts](api/standard-async.md).
+The standard host domains are rejected in `log_by_rss_file`.
+
+`ngx::timer::{at,every,pending_count,running_count}` is landed: registration
+is accepted in Access and Content and rejected in Log at configuration compile
+(`PhaseForbidden`); the bare `ngx::timer` marker is not a callable. Timer
+callbacks run under a log-only `AllowedOps` allowlist with no live request:
+log, sleep, outbound async I/O, the shared dictionary, the semaphore family,
+and the timer family itself work; request/response/`ngx.ctx` access fails
+closed; and a callback VM does not inherit the creating location's
+standard-host grants. `ngx::thread::{spawn,wait,kill}`, `ngx::on_abort`, and
+`ngx::run_worker_thread` are not production hosts; configuration compile
+rejects those imports. The production
 `ngx::semaphore::{new,wait,post,count}` family uses a worker-owned registry:
 sync-only calls can run on a pooled VM, while async `wait` uses the
 request-owned host-future bridge. Its VM-local handle is closed on reset or
