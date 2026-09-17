@@ -70,8 +70,8 @@ struct RequestArgsResult {
     truncated: bool
 }
 
-struct SharedGetResult<T> {
-    value: T?,
+struct SharedGetResult {
+    value: unknown?,
     flags: int,
     stale: bool,
     error: string?

@@ -532,7 +532,11 @@ impl NginxHarness {
 }
 
 /// Timeout for the readiness loop (`start`).
-pub const READY_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// Master can listen before worker `init_process` finishes installing the host
+/// registry (~a few seconds in debug). Readiness therefore waits for an HTTP
+/// response, not only a TCP accept.
+pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
 /// Timeout granted to `SIGQUIT` before `terminate` escalates to `SIGKILL`.
 pub const GRACEFUL_QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout used by `Drop` and `terminate` for the kill escalation.
@@ -978,20 +982,49 @@ impl NginxHarness {
 }
 
 impl RunningNginx {
-    /// Poll `try_wait` and the loopback port until NGINX answers.
+    /// Poll `try_wait` until the worker answers HTTP, not only TCP.
+    ///
+    /// NGINX's master listen socket can accept connections before
+    /// `init_process` finishes. Latency tests must not start until a worker
+    /// has entered its event loop.
     fn wait_for_readiness(&mut self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
+        let mut port_ready = false;
+        let mut last = String::from("port not yet listening");
         loop {
             if self.try_reap().is_some() {
-                return Err("exited before the port accepted connections".to_string());
+                return Err("exited before the worker answered HTTP".to_string());
             }
-            if TcpStream::connect_timeout(&loopback_socket(self.port), START_POLL_INTERVAL).is_ok()
+            if !port_ready
+                && TcpStream::connect_timeout(&loopback_socket(self.port), START_POLL_INTERVAL)
+                    .is_ok()
             {
-                return Ok(());
+                port_ready = true;
+            }
+            if port_ready {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(format!(
+                        "timed out after {timeout:?} waiting for a worker HTTP response: {last}"
+                    ));
+                }
+                let probe = HttpRequest::get("/")
+                    .version(HttpVersion::Http10)
+                    .header("Content-Length", "not-a-number")
+                    .connect_timeout(Duration::from_millis(200))
+                    .read_timeout(remaining.min(Duration::from_secs(2)))
+                    .write_timeout(Duration::from_secs(1));
+                match self.request(&probe) {
+                    Ok(_) => match super::nginx::worker_ready_progress(&self.error_log_path()) {
+                        Ok(()) => return Ok(()),
+                        Err(err) => last = err,
+                    },
+                    Err(err) => last = err,
+                }
             }
             if Instant::now() >= deadline {
                 return Err(format!(
-                    "timed out after {timeout:?} waiting for the port to accept connections"
+                    "timed out after {timeout:?} waiting for a worker HTTP response: {last}"
                 ));
             }
             std::thread::sleep(START_POLL_INTERVAL);

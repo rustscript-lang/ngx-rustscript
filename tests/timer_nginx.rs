@@ -49,34 +49,10 @@ fn get(path: &str) -> HttpRequest {
     HttpRequest::get(path)
 }
 
-/// Shared-dict result structs. The host catalog exposes the fixed
-/// multi-return shared-dict calls as `unknown`, so a script that consumes one
-/// declares the matching struct and annotates the binding.
-const RSS_SHARED_RESULT_STRUCTS: &str = r#"
-struct SharedGetResult<T> {
-    value: T?,
-    flags: int,
-    stale: bool,
-    error: string?
-}
-
-struct SharedStoreResult {
-    ok: bool,
-    error: string?,
-    forcible: bool
-}
-
-struct SharedIncrResult {
-    value: number?,
-    error: string?,
-    forcible: bool
-}
-"#;
-
+/// Shared-dict result types now come from the host catalog.
 fn write_script(harness: &NginxHarness, path: &str, contents: &str) {
-    let source = format!("{RSS_SHARED_RESULT_STRUCTS}{contents}");
     harness
-        .write_file(path, source)
+        .write_file(path, contents)
         .unwrap_or_else(|err| panic!("write {path}: {err}"));
 }
 
@@ -233,7 +209,7 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("timers");
-let r: SharedGetResult<string> = ngx::shared::get(d, "at_fired");
+let r: SharedGetResult = ngx::shared::get(d, "at_fired");
 ngx::say(r.value);
 "#,
     );
@@ -420,7 +396,7 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("timers");
-let r: SharedGetResult<int> = ngx::shared::get(d, "rounds");
+let r: SharedGetResult = ngx::shared::get(d, "rounds");
 if r.value == 3 { ngx::say("ROUNDS_3"); } else { ngx::say("ROUNDS_OTHER"); }
 "#,
     );
@@ -720,9 +696,9 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("timers");
-let registered: SharedGetResult<string> = ngx::shared::get(d, "registered_counts");
-let round_start: SharedGetResult<string> = ngx::shared::get(d, "round_start_counts");
-let waiting: SharedGetResult<string> = ngx::shared::get(d, "waiting_counts");
+let registered: SharedGetResult = ngx::shared::get(d, "registered_counts");
+let round_start: SharedGetResult = ngx::shared::get(d, "round_start_counts");
+let waiting: SharedGetResult = ngx::shared::get(d, "waiting_counts");
 ngx::say(registered.value);
 ngx::say(round_start.value);
 ngx::say(waiting.value);
@@ -845,7 +821,7 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("timers");
-let r: SharedGetResult<string> = ngx::shared::get(d, "timer_fired");
+let r: SharedGetResult = ngx::shared::get(d, "timer_fired");
 ngx::say(r.value);
 "#,
     );

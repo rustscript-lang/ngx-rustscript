@@ -15,10 +15,10 @@ adapter, guest resource effects, and private state.
 4. Install through `HostModuleDescriptor::install_from_catalog`. Do not
    add parallel `HostApiBuilder::function` / `register_exact_*` loops.
 
-Timer `at`/`every` use `HostAdapterDescriptor::Owned` so callback
-transfer stays on the owned adapter path. `bind_ngx_hosts` remains a
-name-binding compatibility path for tests that do not need owned timer
-dispatch; it does not install those adapters.
+Timer `at`/`every` use `HostAdapterDescriptor::Owned`. Request, pool, and
+timer VMs install through `ngx_host_registry()` (restricted transactional
+exact catalog). `bind_ngx_hosts` is a thin wrapper around that registry
+and is not a second name/arity binding authority.
 
 ## Typed resources
 
@@ -34,8 +34,15 @@ Handle types implement `HostResourceType` plus `HostResource`:
 | `ClientCert` | `ngx.socket.tls.clientcert` |
 
 Guest resource effects follow descriptor passing modes
-(borrow / borrow-mut / take / create). Raw NGINX C ABI integers that
-are not VM resources stay out of `Resource<T>`.
+(borrow / borrow-mut / take / create). Request-local `ngx::ctx` is not a
+VM resource: payloads stay request-owned maps.
+
+Sync methods that do not need `&mut Vm` take `ResourceRef` (shared-dict
+ops, `ngx::semaphore::{post,count}`). Constructors still return a raw
+guest token because `push_resource` requires `&mut Vm`. Async methods and
+`close` keep a raw guest token: `ResourceRef` cannot cross suspension,
+and close cannot combine `&mut Vm` with a borrowed resource. Those
+slots still advertise `Resource` + passing mode on the catalog contract.
 
 ## Named structs
 
@@ -47,28 +54,26 @@ Fixed envelopes are catalog `HostTypeSchema::Named` and Rust
 | `DecodedArgsResult` | `ngx::decode_args` |
 | `RequestHeadersResult` | `ngx::req::get_headers` |
 | `RequestArgsResult` | `ngx::req::get_uri_args`, `ngx::req::get_post_args` |
+| `SharedGetResult` | `ngx::shared::{get,get_stale,lpop,rpop}` |
+| `SharedStoreResult` | `ngx::shared::{set,add,replace}` |
+| `SharedSafeStoreResult` | `ngx::shared::{safe_set,safe_add,expire}` |
+| `SharedIncrResult` | `ngx::shared::incr` |
+| `SharedNumberResult` | `ngx::shared::{ttl,lpush,rpush,llen}` |
 
-This named-envelope conversion is a catalog fingerprint change versus
-the previous `Unknown` returns. Guest scripts that already named those
-structs keep compiling; inner `args`/`headers` maps stay dynamic.
-
-Shared-dictionary multi-returns stay `Unknown` so guest code can bind
-`SharedGetResult<T>` and the other generic result structs. That family
-is an intentional dynamic exception, not a `Map(Unknown)` catalog type.
+Guest scripts use the host named types. Inner `value` fields on shared
+results stay `Unknown` because stored dictionary values are heterogeneous.
 
 ## Intentional dynamic slots
 
-These positions stay `HostTypeSchema::Unknown` because OpenResty accepts
-`null` or several runtime shapes at the same argument:
+Positions that stay `HostTypeSchema::Unknown` or `Map(Unknown)` are
+listed exactly in `tests/host_catalog.rs`
+(`intentional_dynamic_slots_match_the_allowlist`). Typical reasons:
 
-- optional trailing arguments (`max_args`, `max_headers`, `raw`,
-  `no_padding`, `escape_type`, `timeout`, `exptime`, `flags`, `jump`,
-  `auto_clean`, `init`, `init_ttl`, `count`, `max`, `host`, `data`,
-  `value` where OpenResty is untyped)
-- open dictionaries (`ngx::encode_args` `args`, header-set maps,
-  request ctx payloads)
-- shared-dictionary result carriers (generic `value` / `ok` / `error`
-  envelopes)
+- optional trailing OpenResty arguments (`null` or several runtime shapes)
+- open dictionaries (`ngx::encode_args` `args`, header-set maps, ctx payloads)
+- heterogeneous stored shared-dict values and `ngx::header::get` (string,
+  string array, or null)
 
-Do not add new `Unknown` or `Map(Unknown)` returns for a fixed outer
-shape. Add a named struct and a catalog test instead.
+Do not add a new `Unknown` or `Map(Unknown)` return for a fixed outer
+shape. Add a named struct, bump `NGX_HOST_CATALOG_SCHEMA_VERSION`, and
+update the fingerprint goldens.

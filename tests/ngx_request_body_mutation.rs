@@ -188,8 +188,8 @@ fn install_in_memory_body(req: &mut ngx_http_request_t, chunks: &mut [Vec<u8>]) 
 }
 
 #[test]
-fn production_host_count_is_195_with_body_mutation_hosts() {
-    assert_eq!(production_runtime_host_names().len(), 195);
+fn production_host_count_is_199_with_body_mutation_hosts() {
+    assert_eq!(production_runtime_host_names().len(), 199);
     assert_eq!(ngx_host_catalog().functions().len(), 199);
     assert_eq!(ngx_host_manifest().len(), 199);
     let runtime: std::collections::BTreeSet<&str> =
@@ -708,18 +708,8 @@ fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
 }
 
 fn wait_for_port(port: u16, timeout: Duration, prefix: &Path) {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!(
-        "port {port} did not open; spawn.err:\n{}\nerror.log:\n{}",
-        fs::read_to_string(prefix.join("logs/nginx.spawn.err")).unwrap_or_default(),
-        fs::read_to_string(prefix.join("logs/error.log")).unwrap_or_default()
-    );
+    let _ = prefix;
+    support::nginx::wait_for_worker_http(port, timeout);
 }
 
 fn http_exchange(port: u16, request: &str) -> (u16, String) {

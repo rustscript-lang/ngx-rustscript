@@ -122,7 +122,7 @@ fn timer_hosts_are_catalogued_and_manifested_in_access_and_content() {
     }
     assert_eq!(ngx_host_manifest().len(), 199);
     assert_eq!(catalog.functions().len(), 199);
-    assert_eq!(production_runtime_host_names().len(), 195);
+    assert_eq!(production_runtime_host_names().len(), 199);
     assert!(catalog.function("ngx::timer").is_none());
     assert!(manifest_entry("ngx::timer").is_none());
 }

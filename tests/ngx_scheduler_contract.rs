@@ -3,17 +3,14 @@
 //! Light threads, `on_abort` callables, and `run_worker_thread` stay absent
 //! from the production surface. Two worker-owned families are landed:
 //!
-//! - `ngx::semaphore::{new,wait,post,count}` — callable-free, so its four
-//!   callables bind through the ordinary per-name path;
-//! - `ngx::timer::{at,every,pending_count,running_count}` — the registration
-//!   hosts consume their callback through `HostParamPassing::TakeOwned`, so the
-//!   family binds through the timer-host registry (`ngx_host_registry`), not
-//!   through `bind_ngx_hosts`'s name/symbol path.
+//! - `ngx::semaphore::{new,wait,post,count}` — callable-free;
+//! - `ngx::timer::{at,every,pending_count,running_count}` — registration hosts
+//!   consume their callback through `HostParamPassing::TakeOwned`.
 //!
-//! Both keep their bare namespace markers (`ngx::semaphore`, `ngx::timer`)
-//! unregistered. Configuration compile rejects every remaining candidate in
-//! Access, Content, and Log. Do not register the callable families without
-//! revisiting `docs/design/ngx-scheduler.md`.
+//! Both families bind through [`ngx_host_registry`]. Bare namespace markers
+//! (`ngx::semaphore`, `ngx::timer`) stay unregistered. Configuration compile
+//! rejects every remaining candidate in Access, Content, and Log. Do not
+//! register the callable families without revisiting `docs/design/ngx-scheduler.md`.
 
 use ngx_rustscript_nginx_test_stubs as _;
 
@@ -21,11 +18,12 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use ngx_rustscript::config::{
-    ConfigError, compile_rss_source_for_phase, validate_program_imports_for_phase,
+    ConfigError, compile_rss_source, compile_rss_source_for_phase,
+    validate_program_imports_for_phase,
 };
 use ngx_rustscript::host::{
-    HostCapability, HostFamily, NgxHostWrapper, NgxPhase, bind_ngx_hosts, ngx_host_bindings,
-    ngx_host_catalog, ngx_host_manifest, ngx_host_registry, production_runtime_host_names,
+    HostCapability, HostFamily, NgxPhase, bind_ngx_hosts, ngx_host_catalog, ngx_host_manifest,
+    ngx_host_registry, production_runtime_host_names,
 };
 use ngx_rustscript::notify::{CompletionSender, NgxWake, RequestIdentity};
 use vm::{
@@ -62,12 +60,6 @@ const REGISTERED_TIMER_HOSTS: &[&str] = &[
     "ngx::timer::pending_count",
     "ngx::timer::running_count",
 ];
-
-/// Hosts that must stay bound through [`bind_ngx_hosts`]'s per-name path.
-///
-/// The timer family is deliberately not here: owned-dispatch hosts have no
-/// name-binding API, so they resolve from the timer-host registry instead.
-const TIMER_REGISTRY_ONLY_HOSTS: &[&str] = REGISTERED_TIMER_HOSTS;
 
 const CONFIG_PHASES: [NgxPhase; 3] = [NgxPhase::Access, NgxPhase::Content, NgxPhase::Log];
 
@@ -177,8 +169,8 @@ fn production_host_count_reaches_199_with_the_timer_family() {
     assert_eq!(ngx_host_catalog().functions().len(), 199);
     assert_eq!(
         production_runtime_host_names().len(),
-        195,
-        "the per-name bind list keeps the 191 baseline plus the semaphore family"
+        199,
+        "the production name list is the full catalog including timers"
     );
     assert_eq!(
         ngx_host_manifest().len(),
@@ -187,26 +179,19 @@ fn production_host_count_reaches_199_with_the_timer_family() {
          semaphore and timer families"
     );
     let manifest: HashSet<&str> = ngx_host_manifest().iter().map(|entry| entry.name).collect();
-    let mut partitioned: HashSet<&str> = production_runtime_host_names().iter().copied().collect();
-    partitioned.extend(REGISTERED_TIMER_HOSTS.iter().copied());
+    let runtime: HashSet<&str> = production_runtime_host_names().iter().copied().collect();
     assert_eq!(
-        partitioned.len(),
-        manifest.len(),
-        "the per-name bind list plus the timer-family registry list must \
-         partition the manifest"
+        runtime, manifest,
+        "production runtime names must equal the manifest"
     );
-    for name in &manifest {
-        assert!(partitioned.contains(name), "{name} must be bound");
-    }
 }
 
-/// Positional (ordered) parity of the four production name sources.
+/// Positional (ordered) parity of the production name sources.
 ///
-/// `ngx_host_manifest` and `ngx_host_catalog` are compared entry-for-entry, the
-/// per-name binding table (`ngx_host_bindings`) must equal the manifest minus
-/// the registry-bound timer family in the same order, and
-/// `production_runtime_host_names` must repeat that binding order exactly. A
-/// swapped or transcribed entry in any of the four lists fails the comparison.
+/// `ngx_host_manifest`, `ngx_host_catalog`, and
+/// `production_runtime_host_names` are compared entry-for-entry. The
+/// restricted descriptor registry contains every catalogued name, including
+/// the timer family. A swapped or transcribed entry fails the comparison.
 #[test]
 fn manifest_catalog_bindings_and_runtime_names_are_ordered_and_partitioned() {
     let manifest: Vec<&str> = ngx_host_manifest().iter().map(|entry| entry.name).collect();
@@ -220,79 +205,38 @@ fn manifest_catalog_bindings_and_runtime_names_are_ordered_and_partitioned() {
         catalog, manifest,
         "the compiler catalog must follow the manifest order exactly"
     );
-
-    let bindings: Vec<&str> = ngx_host_bindings().iter().map(|(name, _)| *name).collect();
-    let registry_bound: Vec<&str> = manifest
-        .iter()
-        .copied()
-        .filter(|name| name.starts_with("ngx::timer::"))
-        .collect();
-    assert_eq!(
-        registry_bound, REGISTERED_TIMER_HOSTS,
-        "the registry-bound family is exactly the four timer hosts in manifest order"
-    );
-    let per_name_expected: Vec<&str> = manifest
-        .iter()
-        .copied()
-        .filter(|name| !name.starts_with("ngx::timer::"))
-        .collect();
-    assert_eq!(
-        bindings, per_name_expected,
-        "the per-name binding table must be the manifest minus the timer family, in order"
-    );
     assert_eq!(
         production_runtime_host_names(),
-        bindings.as_slice(),
-        "the documented runtime name list must repeat the binding order"
+        manifest.as_slice(),
+        "the documented runtime name list must repeat the catalog order"
     );
 
-    // No two names may share one wrapper: a transcribed entry would bind the
-    // same host function twice under different names.
-    let mut wrapper_addresses = HashSet::new();
-    for (name, wrapper) in ngx_host_bindings() {
-        let address = match wrapper {
-            NgxHostWrapper::Static(function) => *function as usize,
-            NgxHostWrapper::Args(function) => *function as usize,
-        };
-        assert!(
-            wrapper_addresses.insert(address),
-            "{name} reuses a host wrapper address already bound by another name"
-        );
-    }
-
-    // The registry genuinely carries the registry-bound family, and the
-    // per-name lists genuinely do not.
-    let registry = ngx_host_registry().expect("timer host registry");
-    for name in &registry_bound {
+    let registry = ngx_host_registry().expect("production host registry");
+    for name in &manifest {
         assert!(
             registry.contains_name(name),
             "{name} must resolve through ngx_host_registry"
         );
     }
-    for name in &bindings {
+    for name in REGISTERED_TIMER_HOSTS {
         assert!(
-            !name.starts_with("ngx::timer::"),
-            "{name} must stay out of the per-name bind list"
+            registry.contains_name(name),
+            "{name} must resolve through the same production registry"
         );
     }
 
-    // The comparisons above are positional: a swap in any list must fail.
     let mut swapped_catalog = catalog.clone();
     swapped_catalog.swap(0, 1);
     assert_ne!(
         swapped_catalog, manifest,
         "a swapped catalog entry must fail the ordered parity check"
     );
-    let mut swapped_bindings = bindings.clone();
-    swapped_bindings.swap(0, 1);
+    let mut swapped_runtime = production_runtime_host_names().to_vec();
+    swapped_runtime.swap(0, 1);
     assert_ne!(
-        swapped_bindings, per_name_expected,
-        "a swapped binding entry must fail the ordered parity check"
-    );
-    assert_ne!(
-        swapped_bindings.as_slice(),
-        production_runtime_host_names(),
-        "a swapped binding entry must fail against the runtime name list"
+        swapped_runtime.as_slice(),
+        manifest.as_slice(),
+        "a swapped runtime name must fail against the manifest"
     );
 }
 
@@ -428,16 +372,19 @@ fn scheduler_candidates_do_not_bind_on_a_production_vm() {
             "bind_ngx_hosts must not install {name}"
         );
     }
-    for name in TIMER_REGISTRY_ONLY_HOSTS {
+
+    let md5_program = compile_rss_source("use ngx;\nngx::md5(\"x\");\n").expect("md5 program");
+    let mut md5_vm = Vm::new_shared(md5_program);
+    bind_ngx_hosts(&mut md5_vm);
+    md5_vm
+        .run()
+        .expect("production bind must execute imported ngx::md5");
+    for name in SCHEDULER_CANDIDATES {
         assert!(
-            !vm.has_bound_function(name),
-            "{name} binds through the timer-host registry, not the name path"
+            !md5_vm.has_bound_function(name),
+            "production bind must not install {name}"
         );
     }
-    assert!(
-        vm.has_bound_function("ngx::sleep"),
-        "production bind must still install ngx::sleep"
-    );
 }
 
 #[test]

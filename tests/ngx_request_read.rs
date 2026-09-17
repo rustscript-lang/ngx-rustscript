@@ -11,7 +11,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use nginx_sys::{
     NGX_HTTP_VERSION_10, NGX_HTTP_VERSION_11, NGX_HTTP_VERSION_20, NGX_HTTP_VERSION_30, ngx_buf_t,
@@ -363,16 +363,28 @@ fn request_read_schemas_match_callable_namespaces() {
     assert_eq!(headers.params.len(), 2);
     assert_eq!(headers.params[0].ty, HostTypeSchema::Unknown);
     assert_eq!(headers.params[1].ty, HostTypeSchema::Unknown);
-    assert_eq!(headers.return_type, HostTypeSchema::Unknown);
+    match &headers.return_type {
+        HostTypeSchema::Named { name, fields } => {
+            assert_eq!(name, "RequestHeadersResult");
+            assert_eq!(fields.len(), 2);
+        }
+        other => panic!("ngx::req::get_headers must return RequestHeadersResult, got {other:?}"),
+    }
 
     let args = schema_named(GET_URI_ARGS);
     assert_eq!(args.params.len(), 1);
     assert_eq!(args.params[0].ty, HostTypeSchema::Unknown);
-    assert_eq!(args.return_type, HostTypeSchema::Unknown);
+    match &args.return_type {
+        HostTypeSchema::Named { name, .. } => assert_eq!(name, "RequestArgsResult"),
+        other => panic!("ngx::req::get_uri_args must return RequestArgsResult, got {other:?}"),
+    }
 
     let post = schema_named(GET_POST_ARGS);
     assert_eq!(post.params.len(), 1);
-    assert_eq!(post.return_type, HostTypeSchema::Unknown);
+    match &post.return_type {
+        HostTypeSchema::Named { name, .. } => assert_eq!(name, "RequestArgsResult"),
+        other => panic!("ngx::req::get_post_args must return RequestArgsResult, got {other:?}"),
+    }
 
     assert_eq!(schema_named(IS_INTERNAL).return_type, HostTypeSchema::Bool);
     assert_eq!(schema_named(START_TIME).return_type, HostTypeSchema::Float);
@@ -1148,16 +1160,7 @@ fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
 }
 
 fn wait_for_port(port: u16, timeout: Duration) {
-    let start = Instant::now();
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
-        if start.elapsed() >= timeout {
-            panic!("nginx did not listen on 127.0.0.1:{port} within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    support::nginx::wait_for_worker_http(port, timeout);
 }
 
 fn http_exchange(port: u16, request: &str) -> (u16, String) {
@@ -1259,14 +1262,6 @@ fn nginx_request_read_semantics_methods_headers_args_vars_and_internal() {
         &script,
         r#"
 use ngx;
-struct RequestHeadersResult {
-    headers: map,
-    truncated: bool
-}
-struct RequestArgsResult {
-    args: map,
-    truncated: bool
-}
 ngx::log(ngx::log_level::notice(), "REQ_METHOD=" + ngx::req::get_method());
 ngx::log(ngx::log_level::notice(), "REQ_VERSION=" + ngx::encode_args({ v: ngx::req::http_version() }));
 if ngx::req::is_internal() {

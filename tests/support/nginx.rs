@@ -4,6 +4,8 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -66,6 +68,98 @@ pub fn terminate_process_group(child: &mut Child, timeout: Duration) {
                 return;
             }
         }
+    }
+}
+
+/// Wait until a worker answers HTTP.
+///
+/// Master listen sockets accept TCP before `init_process` finishes installing
+/// the host registry. Latency and short-timeout HTTP helpers must not start
+/// until a worker has entered its event loop.
+pub fn wait_for_worker_http(port: u16, timeout: Duration) {
+    wait_for_workers_ready(port, timeout, None);
+}
+
+/// Wait until every forked worker has logged `worker runtime ready`.
+///
+/// One worker can answer HTTP while siblings are still in `init_process`.
+/// Multi-worker tests must not start until `error.log` shows a ready line for
+/// each `start worker process`.
+pub fn wait_for_workers_ready(port: u16, timeout: Duration, error_log: Option<&Path>) {
+    let timeout = timeout.max(Duration::from_secs(15));
+    let start = Instant::now();
+    let mut last: Option<String> = None;
+    let mut http_ok = false;
+    loop {
+        if !http_ok {
+            match probe_worker_http(port) {
+                Ok(()) => http_ok = true,
+                Err(err) => last = Some(err),
+            }
+        }
+        if http_ok {
+            match error_log {
+                None => return,
+                Some(path) => match worker_ready_progress(path) {
+                    Ok(()) => return,
+                    Err(err) => last = Some(err),
+                },
+            }
+        }
+        if start.elapsed() >= timeout {
+            panic!(
+                "nginx worker did not become ready on 127.0.0.1:{port} within {timeout:?}: {}",
+                last.as_deref().unwrap_or("port not yet listening")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `Ok` when `error.log` shows every forked worker is ready.
+///
+/// `master_process off` never logs `start worker process`; HTTP readiness is
+/// then enough.
+pub fn worker_ready_progress(error_log: &Path) -> Result<(), String> {
+    let text = fs::read_to_string(error_log).unwrap_or_default();
+    let started = text.matches("start worker process ").count();
+    let ready = text.matches("ngx-rustscript: worker runtime ready").count();
+    if started == 0 || ready >= started {
+        Ok(())
+    } else {
+        Err(format!(
+            "workers started={started} ready={ready} log={}",
+            error_log.display()
+        ))
+    }
+}
+
+fn probe_worker_http(port: u16) -> Result<(), String> {
+    // Invalid Content-Length is rejected in header parsing (HTTP 400) before
+    // rewrite/access/content, so readiness does not run RSS or consume
+    // shared-dict / rate-limit quota.
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .map_err(|err| format!("connect 127.0.0.1:{port}: {err}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|err| format!("read timeout: {err}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .map_err(|err| format!("write timeout: {err}"))?;
+    write!(
+        stream,
+        "GET / HTTP/1.0\r\nContent-Length: not-a-number\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|err| format!("write: {err}"))?;
+    let _ = stream.flush();
+    let mut body = Vec::new();
+    stream
+        .read_to_end(&mut body)
+        .map_err(|err| format!("read: {err}"))?;
+    if body.starts_with(b"HTTP/") {
+        Ok(())
+    } else {
+        Err(format!("non-HTTP: {}", String::from_utf8_lossy(&body)))
     }
 }
 

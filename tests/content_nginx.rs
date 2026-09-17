@@ -78,40 +78,57 @@ fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
 }
 
 fn wait_for_port(port: u16, timeout: Duration) {
-    let start = Instant::now();
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
-        if start.elapsed() >= timeout {
-            panic!("nginx did not listen on 127.0.0.1:{port} within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    support::nginx::wait_for_worker_http(port, timeout);
 }
 
 fn http_get(port: u16, path: &str) -> (u16, String) {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    try_http_get(port, path, Duration::from_secs(5)).unwrap_or_else(|err| panic!("{err}"))
+}
+
+fn try_http_get(port: u16, path: &str, timeout: Duration) -> Result<(u16, String), String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .map_err(|err| format!("connect 127.0.0.1:{port}: {err}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+        .set_read_timeout(Some(timeout))
+        .map_err(|err| format!("read timeout: {err}"))?;
     stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+        .set_write_timeout(Some(timeout))
+        .map_err(|err| format!("write timeout: {err}"))?;
     write!(
         stream,
         "GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
     )
-    .unwrap();
+    .map_err(|err| format!("write: {err}"))?;
     let _ = stream.flush();
     let mut body = String::new();
-    stream.read_to_string(&mut body).unwrap();
+    stream
+        .read_to_string(&mut body)
+        .map_err(|err| format!("read: {err}"))?;
     let status = body
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    (status, body)
+    Ok((status, body))
+}
+
+fn wait_for_http_ok(port: u16, path: &str, timeout: Duration) {
+    let start = Instant::now();
+    loop {
+        match try_http_get(port, path, Duration::from_secs(2)) {
+            Ok((200, _)) => return,
+            other => {
+                let last = match other {
+                    Ok((status, body)) => format!("HTTP {status}: {body}"),
+                    Err(err) => err,
+                };
+                if start.elapsed() >= timeout {
+                    panic!("nginx worker did not serve {path} within {timeout:?}: {last}");
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn http_body(response: &str) -> &str {
@@ -685,6 +702,10 @@ fn content_sleep_does_not_block_a_concurrent_static_request() {
     );
     let _child = spawn_nginx(&nginx, &prefix);
     wait_for_port(port, Duration::from_secs(5));
+    // Master can listen before `init_process` finishes installing the host
+    // registry. Probe static content so the concurrency measurement starts
+    // after the worker is in its event loop, without warming the sleep script.
+    wait_for_http_ok(port, "/plain/", Duration::from_secs(15));
 
     let slow = std::thread::spawn(move || {
         let start = Instant::now();

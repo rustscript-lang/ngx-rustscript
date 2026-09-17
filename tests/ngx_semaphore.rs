@@ -1,6 +1,6 @@
 //! `ngx::semaphore` family: worker-owned state, VM-local handles, FIFO waits.
 //!
-//! Covers catalog/manifest/runtime registration at the exact `195` baseline,
+//! Covers catalog/manifest/runtime registration at the exact `199` baseline,
 //! resource-key typing, phase and Log fail-closed policy, handle validation,
 //! OpenResty-style `count` semantics, timeout, request cleanup, worker
 //! shutdown, and the shared `DEFAULT_MAX_IN_FLIGHT` reservation path.
@@ -20,7 +20,7 @@ use ngx_rustscript::host::{
     HostCapability, HostFamily, HostSyncKind, NGX_SEMAPHORE_COUNT_NAME, NGX_SEMAPHORE_NEW_NAME,
     NGX_SEMAPHORE_POST_NAME, NGX_SEMAPHORE_RESOURCE_KEY, NGX_SEMAPHORE_WAIT_NAME, NgxPhase,
     bind_ngx_hosts, host_allowed_in_phase, manifest_entry, ngx_host_catalog, ngx_host_manifest,
-    production_runtime_host_names,
+    ngx_host_registry, production_runtime_host_names,
 };
 use ngx_rustscript::notify::DEFAULT_MAX_IN_FLIGHT;
 use ngx_rustscript::request_state::{AccessStatus, IdentityRegistry, ReadyEffect};
@@ -161,12 +161,11 @@ impl Driver {
 #[test]
 fn semaphore_catalog_is_typed_and_phase_closed() {
     let catalog = ngx_host_catalog();
-    // 191 callable baseline + 4 semaphore + 4 timer hosts; the per-name bind
-    // list stays 195 because the owned `ngx::timer::{at,every}` registrations
-    // bind through the timer-host registry.
+    // 191 callable baseline + 4 semaphore + 4 timer hosts, all bound through
+    // the production descriptor registry.
     assert_eq!(ngx_host_manifest().len(), 199);
     assert_eq!(catalog.functions().len(), 199);
-    assert_eq!(production_runtime_host_names().len(), 195);
+    assert_eq!(production_runtime_host_names().len(), 199);
     assert!(catalog.resource(NGX_SEMAPHORE_RESOURCE_KEY).is_some());
 
     for name in HOSTS {
@@ -259,15 +258,16 @@ fn semaphore_catalog_is_typed_and_phase_closed() {
 
 #[test]
 fn binding_installs_the_family_and_keeps_gated_candidates_absent() {
+    let registry = ngx_host_registry().expect("production registry");
+    for name in HOSTS {
+        assert!(
+            registry.contains_name(name),
+            "production registry must install {name}"
+        );
+    }
     let program = compile("let x = 1;\n");
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
     bind_ngx_hosts(&mut vm);
-    for name in HOSTS {
-        assert!(
-            vm.has_bound_function(name),
-            "production bind must install {name}"
-        );
-    }
     for name in GATED_CANDIDATES {
         assert!(
             !vm.has_bound_function(name),
