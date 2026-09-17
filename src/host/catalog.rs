@@ -2,7 +2,8 @@
 //!
 //! The pinned `pd-host-function` macro does not emit catalog, phase, or
 //! capability data. This module is the import allowlist and config-time
-//! validator. Runtime dispatch stays in [`crate::host::bind_ngx_hosts`].
+//! validator. Runtime dispatch is installed from [`crate::host::ngx_host_modules`]
+//! through the restricted exact descriptor registry.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -161,6 +162,19 @@ pub const NGX_SHARED_LLEN_NAME: &str = "ngx::shared::llen";
 pub const NGX_SHARED_FLUSH_ALL_NAME: &str = "ngx::shared::flush_all";
 pub const NGX_SHARED_FLUSH_EXPIRED_NAME: &str = "ngx::shared::flush_expired";
 pub const NGX_SHARED_GET_KEYS_NAME: &str = "ngx::shared::get_keys";
+
+/// Catalog schema version for fingerprint goldens. Bump together with
+/// [`NGX_HOST_CATALOG_FINGERPRINT`] when named structs, resource keys, or
+/// function shapes change.
+pub const NGX_HOST_CATALOG_SCHEMA_VERSION: u32 = 2;
+
+/// Fingerprint of schema version 1: named request/codec envelopes with
+/// `Unknown` shared-dict result carriers.
+pub const NGX_HOST_CATALOG_FINGERPRINT_V1: u64 = 0x5e37_8285_8fa0_b584;
+
+/// Fingerprint of the current schema version. The host_catalog drift gate
+/// compares `ngx_host_catalog().fingerprint()` against this constant.
+pub const NGX_HOST_CATALOG_FINGERPRINT: u64 = 0x10c4_07b2_b827_eaff;
 
 pub const NGX_SEND_HEADERS_NAME: &str = "ngx::send_headers";
 pub const NGX_PRINT_NAME: &str = "ngx::print";
@@ -1804,6 +1818,72 @@ fn request_args_result_schema() -> HostTypeSchema {
     )
 }
 
+fn optional_string() -> HostTypeSchema {
+    HostTypeSchema::Optional(Box::new(HostTypeSchema::String))
+}
+
+fn optional_unknown() -> HostTypeSchema {
+    HostTypeSchema::Optional(Box::new(HostTypeSchema::Unknown))
+}
+
+fn optional_number() -> HostTypeSchema {
+    HostTypeSchema::Optional(Box::new(HostTypeSchema::Number))
+}
+
+fn shared_get_result_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "SharedGetResult",
+        vec![
+            HostStructField::new("value", optional_unknown()),
+            HostStructField::new("flags", HostTypeSchema::Int),
+            HostStructField::new("stale", HostTypeSchema::Bool),
+            HostStructField::new("error", optional_string()),
+        ],
+    )
+}
+
+fn shared_store_result_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "SharedStoreResult",
+        vec![
+            HostStructField::new("ok", HostTypeSchema::Bool),
+            HostStructField::new("error", optional_string()),
+            HostStructField::new("forcible", HostTypeSchema::Bool),
+        ],
+    )
+}
+
+fn shared_safe_store_result_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "SharedSafeStoreResult",
+        vec![
+            HostStructField::new("ok", HostTypeSchema::Bool),
+            HostStructField::new("error", optional_string()),
+        ],
+    )
+}
+
+fn shared_incr_result_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "SharedIncrResult",
+        vec![
+            HostStructField::new("value", optional_number()),
+            HostStructField::new("error", optional_string()),
+            HostStructField::new("forcible", HostTypeSchema::Bool),
+        ],
+    )
+}
+
+fn shared_number_result_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "SharedNumberResult",
+        vec![
+            HostStructField::new("value", optional_number()),
+            HostStructField::new("error", optional_string()),
+        ],
+    )
+}
+
 fn dict_handle_param() -> HostParamSchema {
     HostParamSchema::with_passing(
         "dict",
@@ -1819,7 +1899,7 @@ fn dict_get_schema(name: &'static str) -> HostFunctionSchema {
             dict_handle_param(),
             HostParamSchema::value("key", HostTypeSchema::String),
         ],
-        HostTypeSchema::Unknown,
+        shared_get_result_schema(),
     )
 }
 
@@ -1833,7 +1913,21 @@ fn dict_store_schema(name: &'static str) -> HostFunctionSchema {
             HostParamSchema::value("exptime", HostTypeSchema::Unknown),
             HostParamSchema::value("flags", HostTypeSchema::Unknown),
         ],
-        HostTypeSchema::Unknown,
+        shared_store_result_schema(),
+    )
+}
+
+fn dict_safe_store_schema(name: &'static str) -> HostFunctionSchema {
+    HostFunctionSchema::with_return(
+        name,
+        vec![
+            dict_handle_param(),
+            HostParamSchema::value("key", HostTypeSchema::String),
+            HostParamSchema::value("value", HostTypeSchema::Unknown),
+            HostParamSchema::value("exptime", HostTypeSchema::Unknown),
+            HostParamSchema::value("flags", HostTypeSchema::Unknown),
+        ],
+        shared_safe_store_result_schema(),
     )
 }
 
@@ -2127,9 +2221,9 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         NGX_SHARED_GET_NAME => dict_get_schema(NGX_SHARED_GET_NAME),
         NGX_SHARED_GET_STALE_NAME => dict_get_schema(NGX_SHARED_GET_STALE_NAME),
         NGX_SHARED_SET_NAME => dict_store_schema(NGX_SHARED_SET_NAME),
-        NGX_SHARED_SAFE_SET_NAME => dict_store_schema(NGX_SHARED_SAFE_SET_NAME),
+        NGX_SHARED_SAFE_SET_NAME => dict_safe_store_schema(NGX_SHARED_SAFE_SET_NAME),
         NGX_SHARED_ADD_NAME => dict_store_schema(NGX_SHARED_ADD_NAME),
-        NGX_SHARED_SAFE_ADD_NAME => dict_store_schema(NGX_SHARED_SAFE_ADD_NAME),
+        NGX_SHARED_SAFE_ADD_NAME => dict_safe_store_schema(NGX_SHARED_SAFE_ADD_NAME),
         NGX_SHARED_REPLACE_NAME => dict_store_schema(NGX_SHARED_REPLACE_NAME),
         NGX_SHARED_DELETE_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_DELETE_NAME,
@@ -2148,7 +2242,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("init", HostTypeSchema::Unknown),
                 HostParamSchema::value("init_ttl", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Unknown,
+            shared_incr_result_schema(),
         ),
         NGX_SHARED_TTL_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_TTL_NAME,
@@ -2156,7 +2250,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 dict_handle_param(),
                 HostParamSchema::value("key", HostTypeSchema::String),
             ],
-            HostTypeSchema::Unknown,
+            shared_number_result_schema(),
         ),
         NGX_SHARED_EXPIRE_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_EXPIRE_NAME,
@@ -2165,7 +2259,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("key", HostTypeSchema::String),
                 HostParamSchema::value("exptime", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Unknown,
+            shared_safe_store_result_schema(),
         ),
         NGX_SHARED_CAPACITY_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_CAPACITY_NAME,
@@ -2184,7 +2278,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("key", HostTypeSchema::String),
                 HostParamSchema::value("value", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Unknown,
+            shared_number_result_schema(),
         ),
         NGX_SHARED_RPUSH_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_RPUSH_NAME,
@@ -2193,11 +2287,18 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("key", HostTypeSchema::String),
                 HostParamSchema::value("value", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Unknown,
+            shared_number_result_schema(),
         ),
         NGX_SHARED_LPOP_NAME => dict_get_schema(NGX_SHARED_LPOP_NAME),
         NGX_SHARED_RPOP_NAME => dict_get_schema(NGX_SHARED_RPOP_NAME),
-        NGX_SHARED_LLEN_NAME => dict_get_schema(NGX_SHARED_LLEN_NAME),
+        NGX_SHARED_LLEN_NAME => HostFunctionSchema::with_return(
+            NGX_SHARED_LLEN_NAME,
+            vec![
+                dict_handle_param(),
+                HostParamSchema::value("key", HostTypeSchema::String),
+            ],
+            shared_number_result_schema(),
+        ),
         NGX_SHARED_FLUSH_ALL_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_FLUSH_ALL_NAME,
             vec![dict_handle_param()],

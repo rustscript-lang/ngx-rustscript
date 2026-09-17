@@ -9,7 +9,10 @@ use std::sync::Arc;
 use pd_host_function::pd_host_function;
 use vm::HostModuleDescriptor;
 use vm::resource::HostResource;
-use vm::{HostResourceType, ResourceRef, ResourceTypeKey, Value, Vm, VmError, VmMap};
+use vm::{
+    HostNamedStruct, HostResourceType, HostStructField, HostTypeSchema, ResourceRef,
+    ResourceTypeKey, Value, Vm, VmError, VmMap,
+};
 
 use super::{CallOutcome, IntoHostCallOutcome};
 use super::super::VmResult;
@@ -70,6 +73,31 @@ impl From<shared_dict::GetResult> for SharedGetResult {
     }
 }
 
+fn optional_string_schema() -> HostTypeSchema {
+    HostTypeSchema::Optional(Box::new(HostTypeSchema::String))
+}
+
+fn optional_unknown_schema() -> HostTypeSchema {
+    HostTypeSchema::Optional(Box::new(HostTypeSchema::Unknown))
+}
+
+fn optional_number_schema() -> HostTypeSchema {
+    HostTypeSchema::Optional(Box::new(HostTypeSchema::Number))
+}
+
+impl HostNamedStruct for SharedGetResult {
+    const NAME: &'static str = "SharedGetResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new("value", optional_unknown_schema()),
+            HostStructField::new("flags", HostTypeSchema::Int),
+            HostStructField::new("stale", HostTypeSchema::Bool),
+            HostStructField::new("error", optional_string_schema()),
+        ]
+    }
+}
+
 impl IntoHostCallOutcome for SharedGetResult {
     fn into_host_call_outcome(self) -> CallOutcome {
         struct_outcome([
@@ -98,6 +126,18 @@ impl From<shared_dict::StoreResult> for SharedStoreResult {
     }
 }
 
+impl HostNamedStruct for SharedStoreResult {
+    const NAME: &'static str = "SharedStoreResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new("ok", HostTypeSchema::Bool),
+            HostStructField::new("error", optional_string_schema()),
+            HostStructField::new("forcible", HostTypeSchema::Bool),
+        ]
+    }
+}
+
 impl IntoHostCallOutcome for SharedStoreResult {
     fn into_host_call_outcome(self) -> CallOutcome {
         struct_outcome([
@@ -120,6 +160,17 @@ impl From<shared_dict::StoreResult> for SharedSafeStoreResult {
             ok: result.ok,
             error: result.error,
         }
+    }
+}
+
+impl HostNamedStruct for SharedSafeStoreResult {
+    const NAME: &'static str = "SharedSafeStoreResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new("ok", HostTypeSchema::Bool),
+            HostStructField::new("error", optional_string_schema()),
+        ]
     }
 }
 
@@ -146,6 +197,18 @@ impl From<shared_dict::StoreResult> for SharedIncrResult {
             error: result.error,
             forcible: result.forcible,
         }
+    }
+}
+
+impl HostNamedStruct for SharedIncrResult {
+    const NAME: &'static str = "SharedIncrResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new("value", optional_number_schema()),
+            HostStructField::new("error", optional_string_schema()),
+            HostStructField::new("forcible", HostTypeSchema::Bool),
+        ]
     }
 }
 
@@ -180,6 +243,17 @@ impl From<shared_dict::StoreResult> for SharedNumberResult {
             value: dict_value_to_vm(result.value),
             error: result.error,
         }
+    }
+}
+
+impl HostNamedStruct for SharedNumberResult {
+    const NAME: &'static str = "SharedNumberResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new("value", optional_number_schema()),
+            HostStructField::new("error", optional_string_schema()),
+        ]
     }
 }
 
@@ -291,6 +365,9 @@ fn zone_op<T>(
 }
 
 /// Fetch a typed handle for the named `rss_shared_dict` zone.
+///
+/// The guest catalog type is `Resource(ngx.shared.dict)`; the constructor still
+/// returns the raw guest token because `push_resource` requires `&mut Vm`.
 #[pd_host_function(name = "ngx::shared::dict", contract = crate::host::catalog::ngx_shared_dict_contract)]
 fn dict(vm: &mut Vm, name: String) -> VmResult<CallOutcome> {
     let handle = shared_dict::open_handle(&name).map_err(|err| {
