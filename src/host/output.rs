@@ -22,6 +22,7 @@ use nginx_sys::{
 };
 use ngx::http::Request;
 use pd_host_function::pd_host_function;
+use vm::HostModuleDescriptor;
 use vm::{Value, VmError};
 
 use super::super::VmResult;
@@ -772,7 +773,7 @@ unsafe extern "C" fn flush_write_handler(r: *mut ngx_http_request_t) {
 }
 
 /// Send response headers. Idempotent after the first successful send.
-#[pd_host_function(name = "ngx::send_headers")]
+#[pd_host_function(name = "ngx::send_headers", contract = crate::host::catalog::ngx_send_headers_contract)]
 pub fn send_headers() -> VmResult<CallOutcome> {
     with_request(|raw| {
         with_output(raw, |state| {
@@ -786,7 +787,7 @@ pub fn send_headers() -> VmResult<CallOutcome> {
 }
 
 /// Write response body without a trailing newline.
-#[pd_host_function(name = "ngx::print")]
+#[pd_host_function(name = "ngx::print", contract = crate::host::catalog::ngx_print_contract)]
 pub fn print(data: &Value) -> VmResult<CallOutcome> {
     let mut payload = Vec::new();
     append_output(&mut payload, data, 0)?;
@@ -795,7 +796,7 @@ pub fn print(data: &Value) -> VmResult<CallOutcome> {
 }
 
 /// Write response body and a trailing newline.
-#[pd_host_function(name = "ngx::say")]
+#[pd_host_function(name = "ngx::say", contract = crate::host::catalog::ngx_say_contract)]
 pub fn say(data: &Value) -> VmResult<CallOutcome> {
     let mut payload = Vec::new();
     append_output(&mut payload, data, 0)?;
@@ -804,7 +805,7 @@ pub fn say(data: &Value) -> VmResult<CallOutcome> {
 }
 
 /// Flush buffered output. `wait=true` yields on NGINX write backpressure.
-#[pd_host_function(name = "ngx::flush")]
+#[pd_host_function(name = "ngx::flush", contract = crate::host::catalog::ngx_flush_contract)]
 pub async fn flush(wait: bool) -> VmResult<()> {
     if let Some(pending) = prepare_flush(wait)? {
         pending.await.map_err(host_err)?;
@@ -813,7 +814,7 @@ pub async fn flush(wait: bool) -> VmResult<()> {
 }
 
 /// Send the last buffer and reject further output.
-#[pd_host_function(name = "ngx::eof")]
+#[pd_host_function(name = "ngx::eof", contract = crate::host::catalog::ngx_eof_contract)]
 pub fn eof() -> VmResult<CallOutcome> {
     with_request(send_eof)?;
     ret(())
@@ -866,4 +867,21 @@ mod output_stub_tests {
         env!("CARGO_MANIFEST_DIR"),
         "/src/host/output_stub_tests.rs"
     ));
+}
+
+
+const OUTPUT_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+        send_headers_descriptor,
+        print_descriptor,
+        say_descriptor,
+        flush_descriptor,
+        eof_descriptor,
+];
+
+pub fn output_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.output",
+        functions: OUTPUT_HOST_MODULE_FUNCTIONS,
+        resources: &[],
+    }
 }

@@ -55,6 +55,11 @@ impl UdpCosocket {
     }
 }
 
+impl vm::HostResourceType for UdpCosocket {
+    const KEY: &'static str = NGX_SOCKET_UDP_RESOURCE_KEY;
+    const DESCRIPTION: &'static str = "OpenResty ngx.socket.udp handle";
+}
+
 impl HostResource for UdpCosocket {
     fn resource_type_key() -> Option<ResourceTypeKey>
     where

@@ -7,6 +7,7 @@
 use nginx_sys::{ngx_cycle, ngx_exiting, ngx_pid, ngx_processes, ngx_str_t, ngx_worker};
 use ngx::core::{CoreModuleMainConf, NgxCoreModule};
 use pd_host_function::pd_host_function;
+use vm::HostModuleDescriptor;
 use vm::{Value, VmError};
 
 use super::super::VmResult;
@@ -63,220 +64,338 @@ fn phase_openresty_name(phase: crate::host::NgxPhase) -> &'static str {
     }
 }
 
-macro_rules! ngx_int_const {
-    ($fn_name:ident, $host:literal, $value:expr) => {
-        /// Zero-argument OpenResty-compatible NGINX constant.
-        #[pd_host_function(name = $host)]
-        pub fn $fn_name() -> VmResult<CallOutcome> {
-            ret($value as i64)
-        }
-    };
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::core::ok", contract = crate::host::catalog::ngx_core_ok_contract)]
+pub fn core_ok() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_OK as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::core::error", contract = crate::host::catalog::ngx_core_error_contract)]
+pub fn core_error() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_ERROR as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::core::again", contract = crate::host::catalog::ngx_core_again_contract)]
+pub fn core_again() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_AGAIN as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::core::done", contract = crate::host::catalog::ngx_core_done_contract)]
+pub fn core_done() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_DONE as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::core::declined", contract = crate::host::catalog::ngx_core_declined_contract)]
+pub fn core_declined() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_DECLINED as i64)
 }
 
-ngx_int_const!(core_ok, "ngx::core::ok", nginx_sys::NGX_OK);
-ngx_int_const!(core_error, "ngx::core::error", nginx_sys::NGX_ERROR);
-ngx_int_const!(core_again, "ngx::core::again", nginx_sys::NGX_AGAIN);
-ngx_int_const!(core_done, "ngx::core::done", nginx_sys::NGX_DONE);
-ngx_int_const!(core_declined, "ngx::core::declined", nginx_sys::NGX_DECLINED);
-
 /// OpenResty `ngx.null`. Named `null_value` because `null` is a reserved token.
-#[pd_host_function(name = "ngx::core::null_value")]
+#[pd_host_function(name = "ngx::core::null_value", contract = crate::host::catalog::ngx_core_null_value_contract)]
 pub fn core_null_value() -> VmResult<CallOutcome> {
     ret(())
 }
 
-ngx_int_const!(http_get, "ngx::http::get", nginx_sys::NGX_HTTP_GET);
-ngx_int_const!(http_head, "ngx::http::head", nginx_sys::NGX_HTTP_HEAD);
-ngx_int_const!(http_put, "ngx::http::put", nginx_sys::NGX_HTTP_PUT);
-ngx_int_const!(http_post, "ngx::http::post", nginx_sys::NGX_HTTP_POST);
-ngx_int_const!(http_delete, "ngx::http::delete", nginx_sys::NGX_HTTP_DELETE);
-ngx_int_const!(http_options, "ngx::http::options", nginx_sys::NGX_HTTP_OPTIONS);
-ngx_int_const!(http_mkcol, "ngx::http::mkcol", nginx_sys::NGX_HTTP_MKCOL);
-ngx_int_const!(http_copy, "ngx::http::copy", nginx_sys::NGX_HTTP_COPY);
-ngx_int_const!(http_move, "ngx::http::move", nginx_sys::NGX_HTTP_MOVE);
-ngx_int_const!(http_propfind, "ngx::http::propfind", nginx_sys::NGX_HTTP_PROPFIND);
-ngx_int_const!(http_proppatch, "ngx::http::proppatch", nginx_sys::NGX_HTTP_PROPPATCH);
-ngx_int_const!(http_lock, "ngx::http::lock", nginx_sys::NGX_HTTP_LOCK);
-ngx_int_const!(http_unlock, "ngx::http::unlock", nginx_sys::NGX_HTTP_UNLOCK);
-ngx_int_const!(http_patch, "ngx::http::patch", nginx_sys::NGX_HTTP_PATCH);
-ngx_int_const!(http_trace, "ngx::http::trace", nginx_sys::NGX_HTTP_TRACE);
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::get", contract = crate::host::catalog::ngx_http_get_contract)]
+pub fn http_get() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_GET as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::head", contract = crate::host::catalog::ngx_http_head_contract)]
+pub fn http_head() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_HEAD as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::put", contract = crate::host::catalog::ngx_http_put_contract)]
+pub fn http_put() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_PUT as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::post", contract = crate::host::catalog::ngx_http_post_contract)]
+pub fn http_post() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_POST as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::delete", contract = crate::host::catalog::ngx_http_delete_contract)]
+pub fn http_delete() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_DELETE as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::options", contract = crate::host::catalog::ngx_http_options_contract)]
+pub fn http_options() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_OPTIONS as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::mkcol", contract = crate::host::catalog::ngx_http_mkcol_contract)]
+pub fn http_mkcol() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_MKCOL as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::copy", contract = crate::host::catalog::ngx_http_copy_contract)]
+pub fn http_copy() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_COPY as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::move", contract = crate::host::catalog::ngx_http_move_contract)]
+pub fn http_move() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_MOVE as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::propfind", contract = crate::host::catalog::ngx_http_propfind_contract)]
+pub fn http_propfind() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_PROPFIND as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::proppatch", contract = crate::host::catalog::ngx_http_proppatch_contract)]
+pub fn http_proppatch() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_PROPPATCH as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::lock", contract = crate::host::catalog::ngx_http_lock_contract)]
+pub fn http_lock() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_LOCK as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::unlock", contract = crate::host::catalog::ngx_http_unlock_contract)]
+pub fn http_unlock() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_UNLOCK as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::patch", contract = crate::host::catalog::ngx_http_patch_contract)]
+pub fn http_patch() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_PATCH as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::trace", contract = crate::host::catalog::ngx_http_trace_contract)]
+pub fn http_trace() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_TRACE as i64)
+}
 
-ngx_int_const!(
-    http_status_continue,
-    "ngx::http::status_continue",
-    nginx_sys::NGX_HTTP_CONTINUE
-);
-ngx_int_const!(
-    http_status_switching_protocols,
-    "ngx::http::status_switching_protocols",
-    nginx_sys::NGX_HTTP_SWITCHING_PROTOCOLS
-);
-ngx_int_const!(http_status_ok, "ngx::http::status_ok", nginx_sys::NGX_HTTP_OK);
-ngx_int_const!(
-    http_status_created,
-    "ngx::http::status_created",
-    nginx_sys::NGX_HTTP_CREATED
-);
-ngx_int_const!(
-    http_status_accepted,
-    "ngx::http::status_accepted",
-    nginx_sys::NGX_HTTP_ACCEPTED
-);
-ngx_int_const!(
-    http_status_no_content,
-    "ngx::http::status_no_content",
-    nginx_sys::NGX_HTTP_NO_CONTENT
-);
-ngx_int_const!(
-    http_status_partial_content,
-    "ngx::http::status_partial_content",
-    nginx_sys::NGX_HTTP_PARTIAL_CONTENT
-);
-ngx_int_const!(
-    http_status_special_response,
-    "ngx::http::status_special_response",
-    nginx_sys::NGX_HTTP_SPECIAL_RESPONSE
-);
-ngx_int_const!(
-    http_status_moved_permanently,
-    "ngx::http::status_moved_permanently",
-    nginx_sys::NGX_HTTP_MOVED_PERMANENTLY
-);
-ngx_int_const!(
-    http_status_moved_temporarily,
-    "ngx::http::status_moved_temporarily",
-    nginx_sys::NGX_HTTP_MOVED_TEMPORARILY
-);
-ngx_int_const!(
-    http_status_see_other,
-    "ngx::http::status_see_other",
-    nginx_sys::NGX_HTTP_SEE_OTHER
-);
-ngx_int_const!(
-    http_status_not_modified,
-    "ngx::http::status_not_modified",
-    nginx_sys::NGX_HTTP_NOT_MODIFIED
-);
-ngx_int_const!(
-    http_status_temporary_redirect,
-    "ngx::http::status_temporary_redirect",
-    nginx_sys::NGX_HTTP_TEMPORARY_REDIRECT
-);
-ngx_int_const!(
-    http_status_permanent_redirect,
-    "ngx::http::status_permanent_redirect",
-    nginx_sys::NGX_HTTP_PERMANENT_REDIRECT
-);
-ngx_int_const!(
-    http_status_bad_request,
-    "ngx::http::status_bad_request",
-    nginx_sys::NGX_HTTP_BAD_REQUEST
-);
-ngx_int_const!(
-    http_status_unauthorized,
-    "ngx::http::status_unauthorized",
-    nginx_sys::NGX_HTTP_UNAUTHORIZED
-);
-ngx_int_const!(
-    http_status_payment_required,
-    "ngx::http::status_payment_required",
-    402
-);
-ngx_int_const!(
-    http_status_forbidden,
-    "ngx::http::status_forbidden",
-    nginx_sys::NGX_HTTP_FORBIDDEN
-);
-ngx_int_const!(
-    http_status_not_found,
-    "ngx::http::status_not_found",
-    nginx_sys::NGX_HTTP_NOT_FOUND
-);
-ngx_int_const!(
-    http_status_not_allowed,
-    "ngx::http::status_not_allowed",
-    nginx_sys::NGX_HTTP_NOT_ALLOWED
-);
-ngx_int_const!(
-    http_status_not_acceptable,
-    "ngx::http::status_not_acceptable",
-    406
-);
-ngx_int_const!(
-    http_status_request_timeout,
-    "ngx::http::status_request_timeout",
-    nginx_sys::NGX_HTTP_REQUEST_TIME_OUT
-);
-ngx_int_const!(
-    http_status_conflict,
-    "ngx::http::status_conflict",
-    nginx_sys::NGX_HTTP_CONFLICT
-);
-ngx_int_const!(http_status_gone, "ngx::http::status_gone", 410);
-ngx_int_const!(
-    http_status_upgrade_required,
-    "ngx::http::status_upgrade_required",
-    426
-);
-ngx_int_const!(
-    http_status_too_many_requests,
-    "ngx::http::status_too_many_requests",
-    nginx_sys::NGX_HTTP_TOO_MANY_REQUESTS
-);
-ngx_int_const!(http_status_illegal, "ngx::http::status_illegal", 451);
-ngx_int_const!(
-    http_status_close,
-    "ngx::http::status_close",
-    nginx_sys::NGX_HTTP_CLOSE
-);
-ngx_int_const!(
-    http_status_internal_server_error,
-    "ngx::http::status_internal_server_error",
-    nginx_sys::NGX_HTTP_INTERNAL_SERVER_ERROR
-);
-ngx_int_const!(
-    http_status_not_implemented,
-    "ngx::http::status_not_implemented",
-    nginx_sys::NGX_HTTP_NOT_IMPLEMENTED
-);
-ngx_int_const!(
-    http_status_bad_gateway,
-    "ngx::http::status_bad_gateway",
-    nginx_sys::NGX_HTTP_BAD_GATEWAY
-);
-ngx_int_const!(
-    http_status_service_unavailable,
-    "ngx::http::status_service_unavailable",
-    nginx_sys::NGX_HTTP_SERVICE_UNAVAILABLE
-);
-ngx_int_const!(
-    http_status_gateway_timeout,
-    "ngx::http::status_gateway_timeout",
-    nginx_sys::NGX_HTTP_GATEWAY_TIME_OUT
-);
-ngx_int_const!(
-    http_status_version_not_supported,
-    "ngx::http::status_version_not_supported",
-    nginx_sys::NGX_HTTP_VERSION_NOT_SUPPORTED
-);
-ngx_int_const!(
-    http_status_insufficient_storage,
-    "ngx::http::status_insufficient_storage",
-    nginx_sys::NGX_HTTP_INSUFFICIENT_STORAGE
-);
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_continue", contract = crate::host::catalog::ngx_http_status_continue_contract)]
+pub fn http_status_continue() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_CONTINUE as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_switching_protocols", contract = crate::host::catalog::ngx_http_status_switching_protocols_contract)]
+pub fn http_status_switching_protocols() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_SWITCHING_PROTOCOLS as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_ok", contract = crate::host::catalog::ngx_http_status_ok_contract)]
+pub fn http_status_ok() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_OK as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_created", contract = crate::host::catalog::ngx_http_status_created_contract)]
+pub fn http_status_created() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_CREATED as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_accepted", contract = crate::host::catalog::ngx_http_status_accepted_contract)]
+pub fn http_status_accepted() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_ACCEPTED as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_no_content", contract = crate::host::catalog::ngx_http_status_no_content_contract)]
+pub fn http_status_no_content() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_NO_CONTENT as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_partial_content", contract = crate::host::catalog::ngx_http_status_partial_content_contract)]
+pub fn http_status_partial_content() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_PARTIAL_CONTENT as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_special_response", contract = crate::host::catalog::ngx_http_status_special_response_contract)]
+pub fn http_status_special_response() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_SPECIAL_RESPONSE as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_moved_permanently", contract = crate::host::catalog::ngx_http_status_moved_permanently_contract)]
+pub fn http_status_moved_permanently() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_MOVED_PERMANENTLY as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_moved_temporarily", contract = crate::host::catalog::ngx_http_status_moved_temporarily_contract)]
+pub fn http_status_moved_temporarily() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_MOVED_TEMPORARILY as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_see_other", contract = crate::host::catalog::ngx_http_status_see_other_contract)]
+pub fn http_status_see_other() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_SEE_OTHER as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_not_modified", contract = crate::host::catalog::ngx_http_status_not_modified_contract)]
+pub fn http_status_not_modified() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_NOT_MODIFIED as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_temporary_redirect", contract = crate::host::catalog::ngx_http_status_temporary_redirect_contract)]
+pub fn http_status_temporary_redirect() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_TEMPORARY_REDIRECT as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_permanent_redirect", contract = crate::host::catalog::ngx_http_status_permanent_redirect_contract)]
+pub fn http_status_permanent_redirect() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_PERMANENT_REDIRECT as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_bad_request", contract = crate::host::catalog::ngx_http_status_bad_request_contract)]
+pub fn http_status_bad_request() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_BAD_REQUEST as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_unauthorized", contract = crate::host::catalog::ngx_http_status_unauthorized_contract)]
+pub fn http_status_unauthorized() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_UNAUTHORIZED as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_payment_required", contract = crate::host::catalog::ngx_http_status_payment_required_contract)]
+pub fn http_status_payment_required() -> VmResult<CallOutcome> {
+    ret(402_i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_forbidden", contract = crate::host::catalog::ngx_http_status_forbidden_contract)]
+pub fn http_status_forbidden() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_FORBIDDEN as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_not_found", contract = crate::host::catalog::ngx_http_status_not_found_contract)]
+pub fn http_status_not_found() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_NOT_FOUND as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_not_allowed", contract = crate::host::catalog::ngx_http_status_not_allowed_contract)]
+pub fn http_status_not_allowed() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_NOT_ALLOWED as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_not_acceptable", contract = crate::host::catalog::ngx_http_status_not_acceptable_contract)]
+pub fn http_status_not_acceptable() -> VmResult<CallOutcome> {
+    ret(406_i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_request_timeout", contract = crate::host::catalog::ngx_http_status_request_timeout_contract)]
+pub fn http_status_request_timeout() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_REQUEST_TIME_OUT as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_conflict", contract = crate::host::catalog::ngx_http_status_conflict_contract)]
+pub fn http_status_conflict() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_CONFLICT as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_gone", contract = crate::host::catalog::ngx_http_status_gone_contract)]
+pub fn http_status_gone() -> VmResult<CallOutcome> {
+    ret(410_i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_upgrade_required", contract = crate::host::catalog::ngx_http_status_upgrade_required_contract)]
+pub fn http_status_upgrade_required() -> VmResult<CallOutcome> {
+    ret(426_i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_too_many_requests", contract = crate::host::catalog::ngx_http_status_too_many_requests_contract)]
+pub fn http_status_too_many_requests() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_TOO_MANY_REQUESTS as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_illegal", contract = crate::host::catalog::ngx_http_status_illegal_contract)]
+pub fn http_status_illegal() -> VmResult<CallOutcome> {
+    ret(451_i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_close", contract = crate::host::catalog::ngx_http_status_close_contract)]
+pub fn http_status_close() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_CLOSE as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_internal_server_error", contract = crate::host::catalog::ngx_http_status_internal_server_error_contract)]
+pub fn http_status_internal_server_error() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_INTERNAL_SERVER_ERROR as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_not_implemented", contract = crate::host::catalog::ngx_http_status_not_implemented_contract)]
+pub fn http_status_not_implemented() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_NOT_IMPLEMENTED as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_bad_gateway", contract = crate::host::catalog::ngx_http_status_bad_gateway_contract)]
+pub fn http_status_bad_gateway() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_BAD_GATEWAY as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_service_unavailable", contract = crate::host::catalog::ngx_http_status_service_unavailable_contract)]
+pub fn http_status_service_unavailable() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_SERVICE_UNAVAILABLE as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_gateway_timeout", contract = crate::host::catalog::ngx_http_status_gateway_timeout_contract)]
+pub fn http_status_gateway_timeout() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_GATEWAY_TIME_OUT as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_version_not_supported", contract = crate::host::catalog::ngx_http_status_version_not_supported_contract)]
+pub fn http_status_version_not_supported() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_VERSION_NOT_SUPPORTED as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::http::status_insufficient_storage", contract = crate::host::catalog::ngx_http_status_insufficient_storage_contract)]
+pub fn http_status_insufficient_storage() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_HTTP_INSUFFICIENT_STORAGE as i64)
+}
 
-ngx_int_const!(log_level_stderr, "ngx::log_level::stderr", nginx_sys::NGX_LOG_STDERR);
-ngx_int_const!(log_level_emerg, "ngx::log_level::emerg", nginx_sys::NGX_LOG_EMERG);
-ngx_int_const!(log_level_alert, "ngx::log_level::alert", nginx_sys::NGX_LOG_ALERT);
-ngx_int_const!(log_level_crit, "ngx::log_level::crit", nginx_sys::NGX_LOG_CRIT);
-ngx_int_const!(log_level_error, "ngx::log_level::error", nginx_sys::NGX_LOG_ERR);
-ngx_int_const!(log_level_warn, "ngx::log_level::warn", nginx_sys::NGX_LOG_WARN);
-ngx_int_const!(log_level_notice, "ngx::log_level::notice", nginx_sys::NGX_LOG_NOTICE);
-ngx_int_const!(log_level_info, "ngx::log_level::info", nginx_sys::NGX_LOG_INFO);
-ngx_int_const!(log_level_debug, "ngx::log_level::debug", nginx_sys::NGX_LOG_DEBUG);
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::log_level::stderr", contract = crate::host::catalog::ngx_log_level_stderr_contract)]
+pub fn log_level_stderr() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_LOG_STDERR as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::log_level::emerg", contract = crate::host::catalog::ngx_log_level_emerg_contract)]
+pub fn log_level_emerg() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_LOG_EMERG as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::log_level::alert", contract = crate::host::catalog::ngx_log_level_alert_contract)]
+pub fn log_level_alert() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_LOG_ALERT as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::log_level::crit", contract = crate::host::catalog::ngx_log_level_crit_contract)]
+pub fn log_level_crit() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_LOG_CRIT as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::log_level::error", contract = crate::host::catalog::ngx_log_level_error_contract)]
+pub fn log_level_error() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_LOG_ERR as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::log_level::warn", contract = crate::host::catalog::ngx_log_level_warn_contract)]
+pub fn log_level_warn() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_LOG_WARN as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::log_level::notice", contract = crate::host::catalog::ngx_log_level_notice_contract)]
+pub fn log_level_notice() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_LOG_NOTICE as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::log_level::info", contract = crate::host::catalog::ngx_log_level_info_contract)]
+pub fn log_level_info() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_LOG_INFO as i64)
+}
+/// Zero-argument OpenResty-compatible NGINX constant.
+#[pd_host_function(name = "ngx::log_level::debug", contract = crate::host::catalog::ngx_log_level_debug_contract)]
+pub fn log_level_debug() -> VmResult<CallOutcome> {
+    ret(nginx_sys::NGX_LOG_DEBUG as i64)
+}
 
 /// Current NGINX execution phase as an OpenResty `ngx.get_phase` name.
-#[pd_host_function(name = "ngx::get_phase")]
+#[pd_host_function(name = "ngx::get_phase", contract = crate::host::catalog::ngx_get_phase_contract)]
 pub fn get_phase() -> VmResult<CallOutcome> {
     match crate::host::current_phase() {
         Ok(phase) => ret(phase_openresty_name(phase)),
@@ -287,19 +406,19 @@ pub fn get_phase() -> VmResult<CallOutcome> {
 }
 
 /// OpenResty `ngx.config.subsystem` (`http`).
-#[pd_host_function(name = "ngx::config::subsystem")]
+#[pd_host_function(name = "ngx::config::subsystem", contract = crate::host::catalog::ngx_config_subsystem_contract)]
 pub fn config_subsystem() -> VmResult<CallOutcome> {
     ret("http")
 }
 
 /// OpenResty `ngx.config.debug`.
-#[pd_host_function(name = "ngx::config::debug")]
+#[pd_host_function(name = "ngx::config::debug", contract = crate::host::catalog::ngx_config_debug_contract)]
 pub fn config_debug() -> VmResult<CallOutcome> {
     ret(ngx::log::DEBUG)
 }
 
 /// OpenResty `ngx.config.prefix`.
-#[pd_host_function(name = "ngx::config::prefix")]
+#[pd_host_function(name = "ngx::config::prefix", contract = crate::host::catalog::ngx_config_prefix_contract)]
 pub fn config_prefix() -> VmResult<CallOutcome> {
     let cycle = live_cycle().map_err(|_| {
         VmError::HostError("ngx::config::prefix requires a live NGINX cycle".into())
@@ -308,25 +427,25 @@ pub fn config_prefix() -> VmResult<CallOutcome> {
 }
 
 /// OpenResty `ngx.config.nginx_version`.
-#[pd_host_function(name = "ngx::config::nginx_version")]
+#[pd_host_function(name = "ngx::config::nginx_version", contract = crate::host::catalog::ngx_config_nginx_version_contract)]
 pub fn config_nginx_version() -> VmResult<CallOutcome> {
     ret(nginx_sys::nginx_version as i64)
 }
 
 /// OpenResty `ngx.config.nginx_configure`.
-#[pd_host_function(name = "ngx::config::nginx_configure")]
+#[pd_host_function(name = "ngx::config::nginx_configure", contract = crate::host::catalog::ngx_config_nginx_configure_contract)]
 pub fn config_nginx_configure() -> VmResult<CallOutcome> {
     ret(nginx_sys::NGX_CONFIGURE.to_string_lossy().into_owned())
 }
 
 /// Module version analog of `ngx.config.ngx_lua_version`.
-#[pd_host_function(name = "ngx::config::ngx_rustscript_version")]
+#[pd_host_function(name = "ngx::config::ngx_rustscript_version", contract = crate::host::catalog::ngx_config_ngx_rustscript_version_contract)]
 pub fn config_ngx_rustscript_version() -> VmResult<CallOutcome> {
     ret(NGX_RUSTSCRIPT_VERSION)
 }
 
 /// OpenResty `ngx.worker.exiting`.
-#[pd_host_function(name = "ngx::worker::exiting")]
+#[pd_host_function(name = "ngx::worker::exiting", contract = crate::host::catalog::ngx_worker_exiting_contract)]
 pub fn worker_exiting() -> VmResult<CallOutcome> {
     // SAFETY: `ngx_exiting` is a worker-local NGINX global.
     let exiting = unsafe { core::ptr::addr_of!(ngx_exiting).read() };
@@ -334,7 +453,7 @@ pub fn worker_exiting() -> VmResult<CallOutcome> {
 }
 
 /// OpenResty `ngx.worker.pid`.
-#[pd_host_function(name = "ngx::worker::pid")]
+#[pd_host_function(name = "ngx::worker::pid", contract = crate::host::catalog::ngx_worker_pid_contract)]
 pub fn worker_pid() -> VmResult<CallOutcome> {
     // SAFETY: `ngx_pid` is the current process pid published by NGINX.
     let pid = unsafe { core::ptr::addr_of!(ngx_pid).read() };
@@ -348,7 +467,7 @@ pub fn worker_pid() -> VmResult<CallOutcome> {
 /// entries. Invalid `ngx_process_slot` values are ignored. Duplicate pids are
 /// collapsed so a mixed table and a `master_process off` worker both stay
 /// unique.
-#[pd_host_function(name = "ngx::worker::pids")]
+#[pd_host_function(name = "ngx::worker::pids", contract = crate::host::catalog::ngx_worker_pids_contract)]
 pub fn worker_pids() -> VmResult<CallOutcome> {
     let mut pids = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -369,7 +488,7 @@ pub fn worker_pids() -> VmResult<CallOutcome> {
 }
 
 /// OpenResty `ngx.worker.count`.
-#[pd_host_function(name = "ngx::worker::count")]
+#[pd_host_function(name = "ngx::worker::count", contract = crate::host::catalog::ngx_worker_count_contract)]
 pub fn worker_count() -> VmResult<CallOutcome> {
     let cycle = live_cycle().map_err(|_| {
         VmError::HostError("ngx::worker::count requires a live NGINX cycle".into())
@@ -383,9 +502,98 @@ pub fn worker_count() -> VmResult<CallOutcome> {
 }
 
 /// OpenResty `ngx.worker.id`.
-#[pd_host_function(name = "ngx::worker::id")]
+#[pd_host_function(name = "ngx::worker::id", contract = crate::host::catalog::ngx_worker_id_contract)]
 pub fn worker_id() -> VmResult<CallOutcome> {
     // SAFETY: `ngx_worker` is the worker ordinal assigned at process init.
     let id = unsafe { core::ptr::addr_of!(ngx_worker).read() };
     ret(id as i64)
+}
+
+
+const META_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+        core_ok_descriptor,
+        core_error_descriptor,
+        core_again_descriptor,
+        core_done_descriptor,
+        core_declined_descriptor,
+        http_get_descriptor,
+        http_head_descriptor,
+        http_put_descriptor,
+        http_post_descriptor,
+        http_delete_descriptor,
+        http_options_descriptor,
+        http_mkcol_descriptor,
+        http_copy_descriptor,
+        http_move_descriptor,
+        http_propfind_descriptor,
+        http_proppatch_descriptor,
+        http_lock_descriptor,
+        http_unlock_descriptor,
+        http_patch_descriptor,
+        http_trace_descriptor,
+        http_status_continue_descriptor,
+        http_status_switching_protocols_descriptor,
+        http_status_ok_descriptor,
+        http_status_created_descriptor,
+        http_status_accepted_descriptor,
+        http_status_no_content_descriptor,
+        http_status_partial_content_descriptor,
+        http_status_special_response_descriptor,
+        http_status_moved_permanently_descriptor,
+        http_status_moved_temporarily_descriptor,
+        http_status_see_other_descriptor,
+        http_status_not_modified_descriptor,
+        http_status_temporary_redirect_descriptor,
+        http_status_permanent_redirect_descriptor,
+        http_status_bad_request_descriptor,
+        http_status_unauthorized_descriptor,
+        http_status_payment_required_descriptor,
+        http_status_forbidden_descriptor,
+        http_status_not_found_descriptor,
+        http_status_not_allowed_descriptor,
+        http_status_not_acceptable_descriptor,
+        http_status_request_timeout_descriptor,
+        http_status_conflict_descriptor,
+        http_status_gone_descriptor,
+        http_status_upgrade_required_descriptor,
+        http_status_too_many_requests_descriptor,
+        http_status_illegal_descriptor,
+        http_status_close_descriptor,
+        http_status_internal_server_error_descriptor,
+        http_status_not_implemented_descriptor,
+        http_status_bad_gateway_descriptor,
+        http_status_service_unavailable_descriptor,
+        http_status_gateway_timeout_descriptor,
+        http_status_version_not_supported_descriptor,
+        http_status_insufficient_storage_descriptor,
+        log_level_stderr_descriptor,
+        log_level_emerg_descriptor,
+        log_level_alert_descriptor,
+        log_level_crit_descriptor,
+        log_level_error_descriptor,
+        log_level_warn_descriptor,
+        log_level_notice_descriptor,
+        log_level_info_descriptor,
+        log_level_debug_descriptor,
+        core_null_value_descriptor,
+        get_phase_descriptor,
+        config_subsystem_descriptor,
+        config_debug_descriptor,
+        config_prefix_descriptor,
+        config_nginx_version_descriptor,
+        config_nginx_configure_descriptor,
+        config_ngx_rustscript_version_descriptor,
+        worker_exiting_descriptor,
+        worker_pid_descriptor,
+        worker_pids_descriptor,
+        worker_count_descriptor,
+        worker_id_descriptor,
+];
+
+pub fn meta_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.meta",
+        functions: META_HOST_MODULE_FUNCTIONS,
+        resources: &[],
+    }
 }

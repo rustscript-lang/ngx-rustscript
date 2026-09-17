@@ -1191,62 +1191,14 @@ pub fn ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
 
 fn build_ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
     let catalog = catalog::compile_host_catalog();
-    // The catalog fingerprint is a whole-catalog hash. Compute it once and
-    // reuse it for every exact import schema instead of paying it per host.
-    let fingerprint = catalog.fingerprint();
-    // Build from `empty()`, not `new()`: `new()` pre-registers pd-vm's own
-    // standard catalog snapshot (HTTP named-record schemas with the *standard*
-    // catalog fingerprint). This registry owns every entry itself — the ngx
-    // hosts and timer family from the ngx catalog, and the standard surface
-    // through the composition — so a program's exact import schemas resolve
-    // against exactly the catalog it was compiled with, and a standard import
-    // that the compiler leaves dynamic resolves through the staged standard
-    // composition by name.
     let mut registry = vm::HostFunctionRegistry::empty();
-    registry
-        .install_named_struct_schemas(vm::catalog_named_struct_schemas(&catalog))
-        .map_err(|error| format!("install named struct schemas: {error}"))?;
     registry.set_standard_composition(vm::standard_composition());
-    for (name, wrapper) in ngx_host_bindings() {
-        let functions = catalog.functions_named(name);
-        if functions.is_empty() {
-            return Err(format!("{name} is missing from the ngx compile catalog"));
-        }
-        for function in functions {
-            let schema = import_schema_with_fingerprint(function, &fingerprint);
-            let result = match wrapper {
-                NgxHostWrapper::Static(host) => registry.register_catalog_static(schema, *host),
-                NgxHostWrapper::Args(host) => registry.register_catalog_static_args(schema, *host),
-            };
-            result.map_err(|error| format!("register {name}: {error}"))?;
-        }
+    for module in ngx_host_modules() {
+        module
+            .install_from_catalog(&mut registry, &catalog)
+            .map_err(|error| format!("install {}: {error}", module.name))?;
     }
-    crate::host::timer::register_timer_hosts(&mut registry, &catalog)?;
     Ok(registry)
-}
-
-/// Builds the exact import schema the compiler embeds for `function`.
-///
-/// Identical to [`vm::HostImportSchema::from_function`] except that the
-/// caller-supplied whole-catalog fingerprint is reused.
-fn import_schema_with_fingerprint(
-    function: &vm::HostFunctionSchema,
-    fingerprint: &vm::HostApiFingerprint,
-) -> vm::HostImportSchema {
-    vm::HostImportSchema {
-        name: function.name.clone(),
-        params: function
-            .params
-            .iter()
-            .map(|param| vm::HostImportParam {
-                name: param.name.clone(),
-                schema: param.ty.clone(),
-                passing: param.passing,
-            })
-            .collect(),
-        return_type: function.return_type.clone(),
-        fingerprint: *fingerprint,
-    }
 }
 
 #[cfg(test)]
@@ -1258,6 +1210,7 @@ pub(crate) fn bind_test_hosts(vm: &mut Vm) {
 }
 
 mod layout {
+    #[allow(unused_imports)]
     pub use vm::{Value, Vm, VmError, VmResult, resource};
 
     pub mod helpers {
@@ -1389,7 +1342,7 @@ mod layout {
             /// `seconds` is an OpenResty-style number (integer or float). The
             /// generated wrapper submits an owned host future; this body only
             /// validates and awaits Tokio.
-            #[pd_host_function(name = "ngx::sleep")]
+            #[pd_host_function(name = "ngx::sleep", contract = crate::host::catalog::ngx_sleep_contract)]
             pub async fn sleep(seconds: NumberValue) -> VmResult<()> {
                 let duration = duration_from_seconds(seconds)?;
                 tokio::time::sleep(duration).await;
@@ -1400,7 +1353,7 @@ mod layout {
             ///
             /// `ms` must be a nonnegative integer. The generated wrapper submits
             /// an owned host future; this body only validates and awaits Tokio.
-            #[pd_host_function(name = "ngx::sleep_ms")]
+            #[pd_host_function(name = "ngx::sleep_ms", contract = crate::host::catalog::ngx_sleep_ms_contract)]
             pub async fn sleep_ms(ms: i64) -> VmResult<()> {
                 if ms < 0 {
                     return Err(VmError::HostError(format!(
@@ -1438,8 +1391,44 @@ mod layout {
             pub async fn fail() -> VmResult<i64> {
                 Err(VmError::HostError("ngx::fail".into()))
             }
+
+            const FUNCTIONS_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] =
+                &[sleep_descriptor, sleep_ms_descriptor];
+
+            pub fn functions_host_module() -> vm::HostModuleDescriptor {
+                vm::HostModuleDescriptor {
+                    name: "ngx.sleep",
+                    functions: FUNCTIONS_HOST_MODULE_FUNCTIONS,
+                    resources: &[],
+                }
+            }
         }
     }
+}
+
+/// Deterministic ngx host module composition.
+///
+/// Catalog schemas, exact adapters, resource types, and named structs are
+/// derived from these descriptors. `bind_ngx_hosts` remains a name-binding
+/// compatibility path that does not install owned timer adapters.
+pub fn ngx_host_modules() -> Vec<vm::HostModuleDescriptor> {
+    vec![
+        layout::helpers::functions::functions_host_module(),
+        layout::helpers::codec::codec_host_module(),
+        layout::helpers::time::time_host_module(),
+        layout::helpers::meta::meta_host_module(),
+        layout::helpers::log::log_host_module(),
+        layout::helpers::request::request_host_module(),
+        layout::helpers::body::body_host_module(),
+        layout::helpers::variables::variables_host_module(),
+        layout::helpers::response_meta::response_meta_host_module(),
+        layout::helpers::request_ctx::request_ctx_host_module(),
+        layout::helpers::shared_dict::shared_dict_host_module(),
+        layout::helpers::socket::socket_host_module(),
+        layout::helpers::semaphore::semaphore_host_module(),
+        layout::helpers::output::output_host_module(),
+        crate::host::timer::timer_host_module(),
+    ]
 }
 
 #[cfg(test)]

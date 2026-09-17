@@ -49,7 +49,8 @@ use std::time::Duration;
 
 use vm::resource::{CloseProgress, HostResource, ResourceResult};
 use vm::{
-    CaptureAsyncHostContext, ResourceCloseReason, ResourceTypeKey, Value, Vm, VmError, VmResult,
+    CaptureAsyncHostContext, HostResourceType, ResourceCloseReason, ResourceTypeKey, Value, Vm,
+    VmError, VmResult,
 };
 
 /// Resource type key of the VM-local semaphore handle entry.
@@ -334,6 +335,11 @@ impl HostResource for SemaphoreHandle {
         self.release();
         Ok(CloseProgress::Ready)
     }
+}
+
+impl HostResourceType for SemaphoreHandle {
+    const KEY: &'static str = NGX_SEMAPHORE_RESOURCE_KEY;
+    const DESCRIPTION: &'static str = "VM-local handle to a worker-owned counting semaphore";
 }
 
 struct WorkerSemaphores {

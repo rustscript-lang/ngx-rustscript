@@ -13,7 +13,8 @@ use nginx_sys::{
 };
 use ngx::http::Request;
 use pd_host_function::pd_host_function;
-use vm::{Value, VmError, VmMap};
+use vm::HostModuleDescriptor;
+use vm::{HostNamedStruct, HostStructField, HostTypeSchema, Value, VmError, VmMap};
 
 use super::super::VmResult;
 use super::{CallOutcome, IntoHostCallOutcome};
@@ -43,6 +44,34 @@ struct RequestHeadersResult {
 struct RequestArgsResult {
     args: VmMap,
     truncated: bool,
+}
+
+impl HostNamedStruct for RequestHeadersResult {
+    const NAME: &'static str = "RequestHeadersResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new(
+                "headers",
+                HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+            ),
+            HostStructField::new("truncated", HostTypeSchema::Bool),
+        ]
+    }
+}
+
+impl HostNamedStruct for RequestArgsResult {
+    const NAME: &'static str = "RequestArgsResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new(
+                "args",
+                HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+            ),
+            HostStructField::new("truncated", HostTypeSchema::Bool),
+        ]
+    }
 }
 
 fn map_envelope_outcome(field: &'static str, values: VmMap, truncated: bool) -> CallOutcome {
@@ -691,7 +720,7 @@ fn copy_raw_header(raw: &ngx_http_request_t, no_request_line: bool) -> VmResult<
 }
 
 /// Current request method name. Custom methods keep the textual token.
-#[pd_host_function(name = "ngx::req::get_method")]
+#[pd_host_function(name = "ngx::req::get_method", contract = crate::host::catalog::ngx_req_get_method_contract)]
 pub fn get_method() -> VmResult<CallOutcome> {
     with_request(|request| {
         let raw = request.as_ref();
@@ -701,20 +730,20 @@ pub fn get_method() -> VmResult<CallOutcome> {
 }
 
 /// HTTP version as 0.9/1.0/1.1/2.0/3.0, or `null` if unrecognized.
-#[pd_host_function(name = "ngx::req::http_version")]
+#[pd_host_function(name = "ngx::req::http_version", contract = crate::host::catalog::ngx_req_http_version_contract)]
 pub fn http_version() -> VmResult<CallOutcome> {
     with_request(|request| ret(http_version_number(request.as_ref().http_version)))
 }
 
 /// Original request header bytes. `no_request_line` is `null`/`false`/`true`.
-#[pd_host_function(name = "ngx::req::raw_header")]
+#[pd_host_function(name = "ngx::req::raw_header", contract = crate::host::catalog::ngx_req_raw_header_contract)]
 pub fn raw_header(no_request_line: &Value) -> VmResult<CallOutcome> {
     let skip = optional_bool(no_request_line, "ngx::req::raw_header no_request_line")?.unwrap_or(false);
     with_request(|request| ret(copy_raw_header(request.as_ref(), skip)?))
 }
 
 /// Request headers as `{ headers, truncated }`. `raw` keeps original names.
-#[pd_host_function(name = "ngx::req::get_headers")]
+#[pd_host_function(name = "ngx::req::get_headers", contract = crate::host::catalog::ngx_req_get_headers_contract)]
 pub fn get_headers(max_headers: &Value, raw: &Value) -> VmResult<CallOutcome> {
     let max = clamp_count(
         max_headers,
@@ -730,7 +759,7 @@ pub fn get_headers(max_headers: &Value, raw: &Value) -> VmResult<CallOutcome> {
 }
 
 /// URI query args as `{ args, truncated }`, matching `ngx::decode_args`.
-#[pd_host_function(name = "ngx::req::get_uri_args")]
+#[pd_host_function(name = "ngx::req::get_uri_args", contract = crate::host::catalog::ngx_req_get_uri_args_contract)]
 pub fn get_uri_args(max_args: &Value) -> VmResult<CallOutcome> {
     let max = clamp_count(
         max_args,
@@ -746,7 +775,7 @@ pub fn get_uri_args(max_args: &Value) -> VmResult<CallOutcome> {
 }
 
 /// POST args from a completed request body (memory or bounded temp file).
-#[pd_host_function(name = "ngx::req::get_post_args")]
+#[pd_host_function(name = "ngx::req::get_post_args", contract = crate::host::catalog::ngx_req_get_post_args_contract)]
 pub fn get_post_args(max_args: &Value) -> VmResult<CallOutcome> {
     let max = clamp_count(
         max_args,
@@ -767,7 +796,7 @@ pub fn get_post_args(max_args: &Value) -> VmResult<CallOutcome> {
 }
 
 /// True when NGINX marked the request internal.
-#[pd_host_function(name = "ngx::req::is_internal")]
+#[pd_host_function(name = "ngx::req::is_internal", contract = crate::host::catalog::ngx_req_is_internal_contract)]
 pub fn is_internal() -> VmResult<CallOutcome> {
     with_request(|request| {
         ret(request_flag(
@@ -778,7 +807,7 @@ pub fn is_internal() -> VmResult<CallOutcome> {
 }
 
 /// Request start time as seconds + milliseconds / 1000.
-#[pd_host_function(name = "ngx::req::start_time")]
+#[pd_host_function(name = "ngx::req::start_time", contract = crate::host::catalog::ngx_req_start_time_contract)]
 pub fn start_time() -> VmResult<CallOutcome> {
     with_request(|request| {
         let raw = request.as_ref();
@@ -787,7 +816,7 @@ pub fn start_time() -> VmResult<CallOutcome> {
 }
 
 /// True when the current request is not the main request.
-#[pd_host_function(name = "ngx::is_subrequest")]
+#[pd_host_function(name = "ngx::is_subrequest", contract = crate::host::catalog::ngx_is_subrequest_contract)]
 pub fn is_subrequest() -> VmResult<CallOutcome> {
     with_request(|request| {
         let raw = request.as_ref();
@@ -802,7 +831,7 @@ pub fn is_subrequest() -> VmResult<CallOutcome> {
 }
 
 /// True when NGINX has already sent response headers.
-#[pd_host_function(name = "ngx::headers_sent")]
+#[pd_host_function(name = "ngx::headers_sent", contract = crate::host::catalog::ngx_headers_sent_contract)]
 pub fn headers_sent() -> VmResult<CallOutcome> {
     with_request(|request| {
         ret(request_flag(
@@ -1242,7 +1271,7 @@ fn set_or_clear_request_header(
 }
 
 /// Override the current request method using OpenResty method IDs.
-#[pd_host_function(name = "ngx::req::set_method")]
+#[pd_host_function(name = "ngx::req::set_method", contract = crate::host::catalog::ngx_req_set_method_contract)]
 pub fn set_method(method_id: i64) -> VmResult<CallOutcome> {
     let (name, id) = method_spec(method_id).ok_or_else(|| {
         VmError::HostError(format!("unsupported method id {method_id}"))
@@ -1260,7 +1289,7 @@ pub fn set_method(method_id: i64) -> VmResult<CallOutcome> {
 }
 
 /// Rewrite the parsed URI. First release rejects `jump=true` before mutation.
-#[pd_host_function(name = "ngx::req::set_uri")]
+#[pd_host_function(name = "ngx::req::set_uri", contract = crate::host::catalog::ngx_req_set_uri_contract)]
 pub fn set_uri(uri: String, jump: &Value) -> VmResult<CallOutcome> {
     if uri.is_empty() {
         return Err(VmError::HostError("uri cannot be empty".into()));
@@ -1292,7 +1321,7 @@ pub fn set_uri(uri: String, jump: &Value) -> VmResult<CallOutcome> {
 }
 
 /// Replace the query string from a raw string or map.
-#[pd_host_function(name = "ngx::req::set_uri_args")]
+#[pd_host_function(name = "ngx::req::set_uri_args", contract = crate::host::catalog::ngx_req_set_uri_args_contract)]
 pub fn set_uri_args(args: &Value) -> VmResult<CallOutcome> {
     let encoded = match args {
         Value::String(text) => {
@@ -1326,7 +1355,7 @@ pub fn set_uri_args(args: &Value) -> VmResult<CallOutcome> {
 }
 
 /// Set or replace a request header. `null` clears.
-#[pd_host_function(name = "ngx::req::set_header")]
+#[pd_host_function(name = "ngx::req::set_header", contract = crate::host::catalog::ngx_req_set_header_contract)]
 pub fn set_header(name: String, value: &Value) -> VmResult<CallOutcome> {
     let values = parse_header_values(value)?;
     with_request_write(|request| {
@@ -1336,10 +1365,37 @@ pub fn set_header(name: String, value: &Value) -> VmResult<CallOutcome> {
 }
 
 /// Clear a request header, including dedicated special-field pointers.
-#[pd_host_function(name = "ngx::req::clear_header")]
+#[pd_host_function(name = "ngx::req::clear_header", contract = crate::host::catalog::ngx_req_clear_header_contract)]
 pub fn clear_header(name: String) -> VmResult<CallOutcome> {
     with_request_write(|request| {
         set_or_clear_request_header(request.as_mut(), &name, None)?;
         ret(())
     })
+}
+
+
+const REQUEST_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+        get_method_descriptor,
+        http_version_descriptor,
+        raw_header_descriptor,
+        get_headers_descriptor,
+        get_uri_args_descriptor,
+        get_post_args_descriptor,
+        is_internal_descriptor,
+        start_time_descriptor,
+        is_subrequest_descriptor,
+        headers_sent_descriptor,
+        set_method_descriptor,
+        set_uri_descriptor,
+        set_uri_args_descriptor,
+        set_header_descriptor,
+        clear_header_descriptor,
+];
+
+pub fn request_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.req",
+        functions: REQUEST_HOST_MODULE_FUNCTIONS,
+        resources: &[],
+    }
 }

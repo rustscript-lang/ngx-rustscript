@@ -7,6 +7,7 @@
 // future is submitted; no request, pool, VM, or raw pointer crosses Tokio.
 
 use pd_host_function::pd_host_function;
+use vm::HostModuleDescriptor;
 use vm::{Value, Vm};
 
 use super::super::VmResult;
@@ -39,7 +40,7 @@ fn named(host: &str, error: vm::VmError) -> vm::VmError {
 /// `count` must be an integer in `0..=MAX_SEMAPHORE_COUNT`. The handle lives in
 /// the **current** VM resource table; the permit counter and waiter queue live
 /// in the worker registry.
-#[pd_host_function(name = "ngx::semaphore::new")]
+#[pd_host_function(name = "ngx::semaphore::new", contract = crate::host::catalog::ngx_semaphore_new_contract)]
 pub fn new(vm: &mut Vm, count: i64) -> VmResult<CallOutcome> {
     let count = semaphore::parse_new_count(count, NGX_SEMAPHORE_NEW_NAME)?;
     let state = semaphore::create_worker_semaphore(count).map_err(|error| named(NGX_SEMAPHORE_NEW_NAME, error))?;
@@ -56,7 +57,7 @@ pub fn new(vm: &mut Vm, count: i64) -> VmResult<CallOutcome> {
 /// a timer and `0` performs an immediate acquisition attempt. The generated
 /// wrapper submits an owned host future; this body only awaits worker-owned
 /// state and the owned timeout.
-#[pd_host_function(name = "ngx::semaphore::wait")]
+#[pd_host_function(name = "ngx::semaphore::wait", contract = crate::host::catalog::ngx_semaphore_wait_contract)]
 pub async fn wait(
     #[pd_host_context] context: SemaphoreWaitContext,
     _sem: i64,
@@ -66,7 +67,7 @@ pub async fn wait(
 }
 
 /// Adds `count` permits (`null` means one) and wakes FIFO waiters.
-#[pd_host_function(name = "ngx::semaphore::post")]
+#[pd_host_function(name = "ngx::semaphore::post", contract = crate::host::catalog::ngx_semaphore_post_contract)]
 pub fn post(vm: &mut Vm, sem: i64, count: Value) -> VmResult<CallOutcome> {
     let amount = semaphore::parse_post_amount(&count, NGX_SEMAPHORE_POST_NAME)?;
     let state = semaphore::resolve_handle(vm, sem, NGX_SEMAPHORE_POST_NAME)?;
@@ -77,7 +78,7 @@ pub fn post(vm: &mut Vm, sem: i64, count: Value) -> VmResult<CallOutcome> {
 }
 
 /// Returns the current count: permits ready minus queued waiters.
-#[pd_host_function(name = "ngx::semaphore::count")]
+#[pd_host_function(name = "ngx::semaphore::count", contract = crate::host::catalog::ngx_semaphore_count_contract)]
 pub fn count(vm: &mut Vm, sem: i64) -> VmResult<CallOutcome> {
     let state = semaphore::resolve_handle(vm, sem, NGX_SEMAPHORE_COUNT_NAME)?;
     ret(
@@ -85,4 +86,24 @@ pub fn count(vm: &mut Vm, sem: i64) -> VmResult<CallOutcome> {
             .count()
             .map_err(|error| named(NGX_SEMAPHORE_COUNT_NAME, error))?,
     )
+}
+
+
+fn semaphore_resource() -> vm::HostResourceTypeMeta {
+    vm::HostResourceTypeMeta::of::<crate::semaphore::SemaphoreHandle>()
+}
+
+const SEMAPHORE_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+        new_descriptor,
+        wait_descriptor,
+        post_descriptor,
+        count_descriptor,
+];
+
+pub fn semaphore_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.semaphore",
+        functions: SEMAPHORE_HOST_MODULE_FUNCTIONS,
+        resources: &[semaphore_resource],
+    }
 }

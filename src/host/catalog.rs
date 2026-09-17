@@ -4,13 +4,13 @@
 //! capability data. This module is the import allowlist and config-time
 //! validator. Runtime dispatch stays in [`crate::host::bind_ngx_hosts`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::OnceLock;
 
 use vm::{
-    HostApiBuilder, HostApiCatalog, HostFunctionSchema, HostParamPassing, HostParamSchema,
-    HostTypeSchema, ResourceTypeKey, ResourceTypeSchema,
+    HostApiCatalog, HostFunctionDescriptor, HostFunctionSchema, HostParamPassing, HostParamSchema,
+    HostStructField, HostTypeSchema, ResourceTypeKey,
 };
 
 /// Import name compiled into access-phase programs for OpenResty-style sleep.
@@ -1770,6 +1770,40 @@ fn nullary(name: &str, return_type: HostTypeSchema) -> HostFunctionSchema {
     HostFunctionSchema::with_return(name, Vec::new(), return_type)
 }
 
+fn map_unknown() -> HostTypeSchema {
+    HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown))
+}
+
+fn decoded_args_result_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "DecodedArgsResult",
+        vec![
+            HostStructField::new("args", map_unknown()),
+            HostStructField::new("truncated", HostTypeSchema::Bool),
+        ],
+    )
+}
+
+fn request_headers_result_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "RequestHeadersResult",
+        vec![
+            HostStructField::new("headers", map_unknown()),
+            HostStructField::new("truncated", HostTypeSchema::Bool),
+        ],
+    )
+}
+
+fn request_args_result_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "RequestArgsResult",
+        vec![
+            HostStructField::new("args", map_unknown()),
+            HostStructField::new("truncated", HostTypeSchema::Bool),
+        ],
+    )
+}
+
 fn dict_handle_param() -> HostParamSchema {
     HostParamSchema::with_passing(
         "dict",
@@ -1803,7 +1837,7 @@ fn dict_store_schema(name: &'static str) -> HostFunctionSchema {
     )
 }
 
-fn schema_for(name: &str) -> HostFunctionSchema {
+fn host_function_contract(name: &str) -> HostFunctionSchema {
     match name {
         NGX_SLEEP_NAME => sleep_schema(),
         NGX_SLEEP_MS_NAME => sleep_ms_schema(),
@@ -1857,7 +1891,7 @@ fn schema_for(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("query", HostTypeSchema::String),
                 HostParamSchema::value("max_args", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Unknown,
+            decoded_args_result_schema(),
         ),
         NGX_ENCODE_BASE64_NAME => HostFunctionSchema::with_return(
             NGX_ENCODE_BASE64_NAME,
@@ -1931,17 +1965,17 @@ fn schema_for(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("max_headers", HostTypeSchema::Unknown),
                 HostParamSchema::value("raw", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Unknown,
+            request_headers_result_schema(),
         ),
         NGX_REQ_GET_URI_ARGS_NAME => HostFunctionSchema::with_return(
             NGX_REQ_GET_URI_ARGS_NAME,
             vec![HostParamSchema::value("max_args", HostTypeSchema::Unknown)],
-            HostTypeSchema::Unknown,
+            request_args_result_schema(),
         ),
         NGX_REQ_GET_POST_ARGS_NAME => HostFunctionSchema::with_return(
             NGX_REQ_GET_POST_ARGS_NAME,
             vec![HostParamSchema::value("max_args", HostTypeSchema::Unknown)],
-            HostTypeSchema::Unknown,
+            request_args_result_schema(),
         ),
         NGX_REQ_READ_BODY_NAME => nullary(NGX_REQ_READ_BODY_NAME, HostTypeSchema::Null),
         NGX_REQ_DISCARD_BODY_NAME => nullary(NGX_REQ_DISCARD_BODY_NAME, HostTypeSchema::Null),
@@ -2485,44 +2519,835 @@ fn is_int_constant(name: &str) -> bool {
     )
 }
 
+pub(crate) fn ngx_req_read_body_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::read_body")
+}
+
+pub(crate) fn ngx_req_discard_body_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::discard_body")
+}
+
+pub(crate) fn ngx_req_get_body_data_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::get_body_data")
+}
+
+pub(crate) fn ngx_req_get_body_file_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::get_body_file")
+}
+
+pub(crate) fn ngx_req_set_body_data_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::set_body_data")
+}
+
+pub(crate) fn ngx_req_set_body_file_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::set_body_file")
+}
+
+pub(crate) fn ngx_req_init_body_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::init_body")
+}
+
+pub(crate) fn ngx_req_append_body_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::append_body")
+}
+
+pub(crate) fn ngx_req_finish_body_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::finish_body")
+}
+
+pub(crate) fn ngx_escape_uri_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::escape_uri")
+}
+
+pub(crate) fn ngx_unescape_uri_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::unescape_uri")
+}
+
+pub(crate) fn ngx_encode_args_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::encode_args")
+}
+
+pub(crate) fn ngx_decode_args_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::decode_args")
+}
+
+pub(crate) fn ngx_encode_base64_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::encode_base64")
+}
+
+pub(crate) fn ngx_decode_base64_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::decode_base64")
+}
+
+pub(crate) fn ngx_decode_base64mime_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::decode_base64mime")
+}
+
+pub(crate) fn ngx_crc32_short_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::crc32_short")
+}
+
+pub(crate) fn ngx_crc32_long_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::crc32_long")
+}
+
+pub(crate) fn ngx_hmac_sha1_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::hmac_sha1")
+}
+
+pub(crate) fn ngx_md5_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::md5")
+}
+
+pub(crate) fn ngx_md5_bin_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::md5_bin")
+}
+
+pub(crate) fn ngx_sha1_bin_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::sha1_bin")
+}
+
+pub(crate) fn ngx_quote_sql_str_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::quote_sql_str")
+}
+
+pub(crate) fn ngx_log_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::log")
+}
+
+pub(crate) fn ngx_core_ok_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::core::ok")
+}
+
+pub(crate) fn ngx_core_error_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::core::error")
+}
+
+pub(crate) fn ngx_core_again_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::core::again")
+}
+
+pub(crate) fn ngx_core_done_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::core::done")
+}
+
+pub(crate) fn ngx_core_declined_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::core::declined")
+}
+
+pub(crate) fn ngx_http_get_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::get")
+}
+
+pub(crate) fn ngx_http_head_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::head")
+}
+
+pub(crate) fn ngx_http_put_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::put")
+}
+
+pub(crate) fn ngx_http_post_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::post")
+}
+
+pub(crate) fn ngx_http_delete_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::delete")
+}
+
+pub(crate) fn ngx_http_options_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::options")
+}
+
+pub(crate) fn ngx_http_mkcol_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::mkcol")
+}
+
+pub(crate) fn ngx_http_copy_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::copy")
+}
+
+pub(crate) fn ngx_http_move_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::move")
+}
+
+pub(crate) fn ngx_http_propfind_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::propfind")
+}
+
+pub(crate) fn ngx_http_proppatch_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::proppatch")
+}
+
+pub(crate) fn ngx_http_lock_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::lock")
+}
+
+pub(crate) fn ngx_http_unlock_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::unlock")
+}
+
+pub(crate) fn ngx_http_patch_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::patch")
+}
+
+pub(crate) fn ngx_http_trace_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::trace")
+}
+
+pub(crate) fn ngx_http_status_continue_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_continue")
+}
+
+pub(crate) fn ngx_http_status_switching_protocols_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_switching_protocols")
+}
+
+pub(crate) fn ngx_http_status_ok_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_ok")
+}
+
+pub(crate) fn ngx_http_status_created_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_created")
+}
+
+pub(crate) fn ngx_http_status_accepted_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_accepted")
+}
+
+pub(crate) fn ngx_http_status_no_content_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_no_content")
+}
+
+pub(crate) fn ngx_http_status_partial_content_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_partial_content")
+}
+
+pub(crate) fn ngx_http_status_special_response_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_special_response")
+}
+
+pub(crate) fn ngx_http_status_moved_permanently_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_moved_permanently")
+}
+
+pub(crate) fn ngx_http_status_moved_temporarily_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_moved_temporarily")
+}
+
+pub(crate) fn ngx_http_status_see_other_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_see_other")
+}
+
+pub(crate) fn ngx_http_status_not_modified_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_not_modified")
+}
+
+pub(crate) fn ngx_http_status_temporary_redirect_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_temporary_redirect")
+}
+
+pub(crate) fn ngx_http_status_permanent_redirect_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_permanent_redirect")
+}
+
+pub(crate) fn ngx_http_status_bad_request_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_bad_request")
+}
+
+pub(crate) fn ngx_http_status_unauthorized_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_unauthorized")
+}
+
+pub(crate) fn ngx_http_status_payment_required_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_payment_required")
+}
+
+pub(crate) fn ngx_http_status_forbidden_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_forbidden")
+}
+
+pub(crate) fn ngx_http_status_not_found_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_not_found")
+}
+
+pub(crate) fn ngx_http_status_not_allowed_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_not_allowed")
+}
+
+pub(crate) fn ngx_http_status_not_acceptable_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_not_acceptable")
+}
+
+pub(crate) fn ngx_http_status_request_timeout_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_request_timeout")
+}
+
+pub(crate) fn ngx_http_status_conflict_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_conflict")
+}
+
+pub(crate) fn ngx_http_status_gone_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_gone")
+}
+
+pub(crate) fn ngx_http_status_upgrade_required_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_upgrade_required")
+}
+
+pub(crate) fn ngx_http_status_too_many_requests_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_too_many_requests")
+}
+
+pub(crate) fn ngx_http_status_illegal_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_illegal")
+}
+
+pub(crate) fn ngx_http_status_close_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_close")
+}
+
+pub(crate) fn ngx_http_status_internal_server_error_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_internal_server_error")
+}
+
+pub(crate) fn ngx_http_status_not_implemented_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_not_implemented")
+}
+
+pub(crate) fn ngx_http_status_bad_gateway_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_bad_gateway")
+}
+
+pub(crate) fn ngx_http_status_service_unavailable_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_service_unavailable")
+}
+
+pub(crate) fn ngx_http_status_gateway_timeout_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_gateway_timeout")
+}
+
+pub(crate) fn ngx_http_status_version_not_supported_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_version_not_supported")
+}
+
+pub(crate) fn ngx_http_status_insufficient_storage_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http::status_insufficient_storage")
+}
+
+pub(crate) fn ngx_log_level_stderr_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::log_level::stderr")
+}
+
+pub(crate) fn ngx_log_level_emerg_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::log_level::emerg")
+}
+
+pub(crate) fn ngx_log_level_alert_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::log_level::alert")
+}
+
+pub(crate) fn ngx_log_level_crit_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::log_level::crit")
+}
+
+pub(crate) fn ngx_log_level_error_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::log_level::error")
+}
+
+pub(crate) fn ngx_log_level_warn_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::log_level::warn")
+}
+
+pub(crate) fn ngx_log_level_notice_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::log_level::notice")
+}
+
+pub(crate) fn ngx_log_level_info_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::log_level::info")
+}
+
+pub(crate) fn ngx_log_level_debug_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::log_level::debug")
+}
+
+pub(crate) fn ngx_core_null_value_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::core::null_value")
+}
+
+pub(crate) fn ngx_get_phase_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::get_phase")
+}
+
+pub(crate) fn ngx_config_subsystem_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::config::subsystem")
+}
+
+pub(crate) fn ngx_config_debug_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::config::debug")
+}
+
+pub(crate) fn ngx_config_prefix_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::config::prefix")
+}
+
+pub(crate) fn ngx_config_nginx_version_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::config::nginx_version")
+}
+
+pub(crate) fn ngx_config_nginx_configure_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::config::nginx_configure")
+}
+
+pub(crate) fn ngx_config_ngx_rustscript_version_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::config::ngx_rustscript_version")
+}
+
+pub(crate) fn ngx_worker_exiting_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::worker::exiting")
+}
+
+pub(crate) fn ngx_worker_pid_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::worker::pid")
+}
+
+pub(crate) fn ngx_worker_pids_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::worker::pids")
+}
+
+pub(crate) fn ngx_worker_count_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::worker::count")
+}
+
+pub(crate) fn ngx_worker_id_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::worker::id")
+}
+
+pub(crate) fn ngx_sleep_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::sleep")
+}
+
+pub(crate) fn ngx_sleep_ms_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::sleep_ms")
+}
+
+pub(crate) fn ngx_send_headers_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::send_headers")
+}
+
+pub(crate) fn ngx_print_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::print")
+}
+
+pub(crate) fn ngx_say_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::say")
+}
+
+pub(crate) fn ngx_flush_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::flush")
+}
+
+pub(crate) fn ngx_eof_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::eof")
+}
+
+pub(crate) fn ngx_req_get_method_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::get_method")
+}
+
+pub(crate) fn ngx_req_http_version_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::http_version")
+}
+
+pub(crate) fn ngx_req_raw_header_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::raw_header")
+}
+
+pub(crate) fn ngx_req_get_headers_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::get_headers")
+}
+
+pub(crate) fn ngx_req_get_uri_args_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::get_uri_args")
+}
+
+pub(crate) fn ngx_req_get_post_args_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::get_post_args")
+}
+
+pub(crate) fn ngx_req_is_internal_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::is_internal")
+}
+
+pub(crate) fn ngx_req_start_time_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::start_time")
+}
+
+pub(crate) fn ngx_is_subrequest_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::is_subrequest")
+}
+
+pub(crate) fn ngx_headers_sent_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::headers_sent")
+}
+
+pub(crate) fn ngx_req_set_method_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::set_method")
+}
+
+pub(crate) fn ngx_req_set_uri_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::set_uri")
+}
+
+pub(crate) fn ngx_req_set_uri_args_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::set_uri_args")
+}
+
+pub(crate) fn ngx_req_set_header_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::set_header")
+}
+
+pub(crate) fn ngx_req_clear_header_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::req::clear_header")
+}
+
+pub(crate) fn ngx_ctx_get_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::ctx::get")
+}
+
+pub(crate) fn ngx_ctx_set_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::ctx::set")
+}
+
+pub(crate) fn ngx_ctx_delete_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::ctx::delete")
+}
+
+pub(crate) fn ngx_ctx_clear_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::ctx::clear")
+}
+
+pub(crate) fn ngx_status_get_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::status::get")
+}
+
+pub(crate) fn ngx_status_set_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::status::set")
+}
+
+pub(crate) fn ngx_header_get_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::header::get")
+}
+
+pub(crate) fn ngx_header_set_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::header::set")
+}
+
+pub(crate) fn ngx_header_set_all_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::header::set_all")
+}
+
+pub(crate) fn ngx_header_clear_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::header::clear")
+}
+
+pub(crate) fn ngx_exit_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::exit")
+}
+
+pub(crate) fn ngx_redirect_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::redirect")
+}
+
+pub(crate) fn ngx_semaphore_new_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::semaphore::new")
+}
+
+pub(crate) fn ngx_semaphore_wait_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::semaphore::wait")
+}
+
+pub(crate) fn ngx_semaphore_post_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::semaphore::post")
+}
+
+pub(crate) fn ngx_semaphore_count_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::semaphore::count")
+}
+
+pub(crate) fn ngx_shared_dict_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::dict")
+}
+
+pub(crate) fn ngx_shared_get_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::get")
+}
+
+pub(crate) fn ngx_shared_get_stale_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::get_stale")
+}
+
+pub(crate) fn ngx_shared_set_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::set")
+}
+
+pub(crate) fn ngx_shared_safe_set_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::safe_set")
+}
+
+pub(crate) fn ngx_shared_add_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::add")
+}
+
+pub(crate) fn ngx_shared_safe_add_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::safe_add")
+}
+
+pub(crate) fn ngx_shared_replace_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::replace")
+}
+
+pub(crate) fn ngx_shared_delete_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::delete")
+}
+
+pub(crate) fn ngx_shared_incr_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::incr")
+}
+
+pub(crate) fn ngx_shared_ttl_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::ttl")
+}
+
+pub(crate) fn ngx_shared_expire_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::expire")
+}
+
+pub(crate) fn ngx_shared_capacity_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::capacity")
+}
+
+pub(crate) fn ngx_shared_free_space_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::free_space")
+}
+
+pub(crate) fn ngx_shared_lpush_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::lpush")
+}
+
+pub(crate) fn ngx_shared_rpush_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::rpush")
+}
+
+pub(crate) fn ngx_shared_lpop_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::lpop")
+}
+
+pub(crate) fn ngx_shared_rpop_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::rpop")
+}
+
+pub(crate) fn ngx_shared_llen_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::llen")
+}
+
+pub(crate) fn ngx_shared_flush_all_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::flush_all")
+}
+
+pub(crate) fn ngx_shared_flush_expired_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::flush_expired")
+}
+
+pub(crate) fn ngx_shared_get_keys_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::shared::get_keys")
+}
+
+pub(crate) fn ngx_socket_udp_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::udp")
+}
+
+pub(crate) fn ngx_socket_udp_bind_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::udp::bind")
+}
+
+pub(crate) fn ngx_socket_udp_setpeername_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::udp::setpeername")
+}
+
+pub(crate) fn ngx_socket_udp_send_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::udp::send")
+}
+
+pub(crate) fn ngx_socket_udp_receive_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::udp::receive")
+}
+
+pub(crate) fn ngx_socket_udp_close_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::udp::close")
+}
+
+pub(crate) fn ngx_socket_udp_settimeout_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::udp::settimeout")
+}
+
+pub(crate) fn ngx_socket_tcp_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp")
+}
+
+pub(crate) fn ngx_socket_tcp_connect_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::connect")
+}
+
+pub(crate) fn ngx_socket_connect_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::connect")
+}
+
+pub(crate) fn ngx_socket_tcp_send_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::send")
+}
+
+pub(crate) fn ngx_socket_tcp_receive_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::receive")
+}
+
+pub(crate) fn ngx_socket_tcp_receiveany_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::receiveany")
+}
+
+pub(crate) fn ngx_socket_tcp_receiveuntil_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::receiveuntil")
+}
+
+pub(crate) fn ngx_socket_tcp_close_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::close")
+}
+
+pub(crate) fn ngx_socket_tcp_settimeout_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::settimeout")
+}
+
+pub(crate) fn ngx_socket_tcp_setkeepalive_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::setkeepalive")
+}
+
+pub(crate) fn ngx_socket_tcp_getreusedtimes_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::getreusedtimes")
+}
+
+pub(crate) fn ngx_socket_tcp_sslhandshake_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::sslhandshake")
+}
+
+pub(crate) fn ngx_socket_tcp_settrustedstore_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::settrustedstore")
+}
+
+pub(crate) fn ngx_socket_tcp_setclientcert_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::setclientcert")
+}
+
+pub(crate) fn ngx_socket_tcp_trustedstore_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::trustedstore")
+}
+
+pub(crate) fn ngx_socket_tcp_clientcert_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::socket::tcp::clientcert")
+}
+
+pub(crate) fn ngx_today_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::today")
+}
+
+pub(crate) fn ngx_time_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::time")
+}
+
+pub(crate) fn ngx_now_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::now")
+}
+
+pub(crate) fn ngx_update_time_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::update_time")
+}
+
+pub(crate) fn ngx_localtime_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::localtime")
+}
+
+pub(crate) fn ngx_utctime_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::utctime")
+}
+
+pub(crate) fn ngx_cookie_time_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::cookie_time")
+}
+
+pub(crate) fn ngx_http_time_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::http_time")
+}
+
+pub(crate) fn ngx_parse_http_time_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::parse_http_time")
+}
+
+pub(crate) fn ngx_var_get_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::var::get")
+}
+
+pub(crate) fn ngx_var_set_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::var::set")
+}
+
+pub(crate) fn ngx_timer_at_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::timer::at")
+}
+
+pub(crate) fn ngx_timer_every_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::timer::every")
+}
+
+pub(crate) fn ngx_timer_pending_count_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::timer::pending_count")
+}
+
+pub(crate) fn ngx_timer_running_count_contract() -> HostFunctionSchema {
+    host_function_contract("ngx::timer::running_count")
+}
+
 /// Compiler catalog for production ngx imports.
 ///
-/// This is compiler import-allowlist metadata, not a runtime binding. The
-/// pinned `pd-host-function` macro generates the wrapper, argument conversion,
-/// and `submit_host_future` call; it does not emit catalog APIs. Bindings stay
-/// exclusively macro-generated via [`crate::host::bind_ngx_hosts`].
+/// Schemas, resource types, and named structs come from the explicit
+/// [`crate::host::ngx_host_modules`] descriptors, ordered to match
+/// [`MANIFEST`] so catalog fingerprints stay stable. Bindings stay
+/// name-compatible via [`crate::host::bind_ngx_hosts`] for tests that do not
+/// use owned timer dispatch.
 pub fn ngx_host_catalog() -> HostApiCatalog {
-    let mut builder = HostApiBuilder::new();
-    builder.resource(ResourceTypeSchema::new(
-        crate::shared_dict::shared_dict_resource_key(),
-        "Shared dictionary zone handle",
-    ));
-    builder.resource(ResourceTypeSchema::new(
-        udp_socket_resource_key(),
-        "OpenResty ngx.socket.udp handle",
-    ));
-    builder.resource(ResourceTypeSchema::new(
-        tcp_socket_resource_key(),
-        "OpenResty ngx.socket.tcp handle",
-    ));
-    builder.resource(ResourceTypeSchema::new(
-        tls_trustedstore_resource_key(),
-        "VM-owned TLS trusted-store (parsed rustls RootCertStore)",
-    ));
-    builder.resource(ResourceTypeSchema::new(
-        tls_clientcert_resource_key(),
-        "VM-owned TLS client certificate and private key",
-    ));
-    builder.resource(ResourceTypeSchema::new(
-        semaphore_resource_key(),
-        "VM-local handle to a worker-owned counting semaphore",
-    ));
-    for entry in MANIFEST {
-        builder.function(schema_for(entry.name));
+    let descriptors: Vec<HostFunctionDescriptor> = crate::host::ngx_host_modules()
+        .iter()
+        .flat_map(|module| module.descriptors())
+        .collect();
+    let mut by_name = HashMap::with_capacity(descriptors.len());
+    for descriptor in descriptors {
+        let name = descriptor.schema.name.clone();
+        if by_name.insert(name.clone(), descriptor).is_some() {
+            panic!("duplicate ngx host descriptor: {name}");
+        }
     }
-    builder
-        .build()
-        .expect("ngx host catalog must be a valid HostApiCatalog")
+    let mut ordered = Vec::with_capacity(MANIFEST.len());
+    for entry in MANIFEST {
+        let Some(descriptor) = by_name.remove(entry.name) else {
+            panic!("ngx host catalog missing descriptor for {}", entry.name);
+        };
+        ordered.push(descriptor);
+    }
+    if !by_name.is_empty() {
+        let mut extras: Vec<_> = by_name.keys().cloned().collect();
+        extras.sort();
+        panic!("ngx host catalog has descriptors not in the manifest: {extras:?}");
+    }
+    HostFunctionDescriptor::collect_catalog(&ordered)
+        .unwrap_or_else(|error| panic!("ngx host catalog must be a valid HostApiCatalog: {error}"))
 }
 
 /// Compiler catalog for production ngx scripts.
