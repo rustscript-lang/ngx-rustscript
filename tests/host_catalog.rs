@@ -462,21 +462,6 @@ fn dynamic_map_envelopes_compile_as_explicit_struct_types() {
         r#"
         use ngx;
 
-        struct DecodedArgsResult {
-            args: map,
-            truncated: bool
-        }
-
-        struct RequestHeadersResult {
-            headers: map,
-            truncated: bool
-        }
-
-        struct RequestArgsResult {
-            args: map,
-            truncated: bool
-        }
-
         let decoded: DecodedArgsResult = ngx::decode_args("a=1", null);
         if !decoded.truncated {
             ngx::encode_args(decoded.args);
@@ -500,17 +485,24 @@ fn dynamic_map_envelopes_compile_as_explicit_struct_types() {
 #[test]
 fn dynamic_map_envelopes_are_not_declared_as_maps() {
     let catalog = ngx_host_catalog();
-    for name in [
-        "ngx::decode_args",
-        "ngx::req::get_headers",
-        "ngx::req::get_uri_args",
-        "ngx::req::get_post_args",
+    for (name, expected) in [
+        ("ngx::decode_args", "DecodedArgsResult"),
+        ("ngx::req::get_headers", "RequestHeadersResult"),
+        ("ngx::req::get_uri_args", "RequestArgsResult"),
+        ("ngx::req::get_post_args", "RequestArgsResult"),
     ] {
-        assert_eq!(
-            catalog.function(name).expect("host schema").return_type,
-            HostTypeSchema::Unknown,
-            "{name} has a fixed outer result shape"
-        );
+        match &catalog.function(name).expect("host schema").return_type {
+            HostTypeSchema::Named {
+                name: struct_name,
+                fields,
+            } => {
+                assert_eq!(struct_name, expected, "{name} named envelope");
+                assert_eq!(fields.len(), 2, "{name} envelope field count");
+                assert_eq!(fields[1].name, "truncated");
+                assert_eq!(fields[1].ty, HostTypeSchema::Bool);
+            }
+            other => panic!("{name} must return a named envelope, got {other:?}"),
+        }
     }
 }
 
@@ -1076,4 +1068,33 @@ fn nginx_version_allows_init_worker_and_exit_worker_unlike_nginx_configure() {
         "ngx::config::nginx_configure",
         NgxPhase::Init
     ));
+}
+
+#[test]
+fn intentional_dynamic_unknown_slots_are_allowlisted() {
+    let catalog = ngx_host_catalog();
+    let unknown_returns = [
+        "ngx::shared::get",
+        "ngx::shared::get_stale",
+        "ngx::shared::set",
+        "ngx::shared::incr",
+        "ngx::ctx::get",
+        "ngx::encode_args",
+    ];
+    for name in unknown_returns {
+        let schema = catalog.function(name).expect(name);
+        if name == "ngx::encode_args" {
+            assert_eq!(
+                schema.params[0].ty,
+                HostTypeSchema::Unknown,
+                "{name} args stay an open dictionary"
+            );
+            continue;
+        }
+        assert_eq!(
+            schema.return_type,
+            HostTypeSchema::Unknown,
+            "{name} stays Unknown so guest generic/result structs keep compiling"
+        );
+    }
 }
