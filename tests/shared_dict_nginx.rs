@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use support::artifact::module_cdylib;
 use support::nginx::{
@@ -50,50 +50,12 @@ fn write_conf(prefix: &Path, body: &str) {
     fs::write(prefix.join("conf/nginx.conf"), body).unwrap();
 }
 
-/// RustScript declarations for the ngx shared-dict fixed-shape results.
-///
-/// The host catalog exposes every fixed multi-return shared-dict call as
-/// `unknown`, so a script that consumes one must declare the matching struct
-/// and annotate the binding; field access is then the only member access.
-/// Declaring them once here keeps the embedded scripts focused on behavior.
-const RSS_SHARED_RESULT_STRUCTS: &str = r#"
-struct SharedGetResult<T> {
-    value: T?,
-    flags: int,
-    stale: bool,
-    error: string?
-}
-
-struct SharedStoreResult {
-    ok: bool,
-    error: string?,
-    forcible: bool
-}
-
-struct SharedSafeStoreResult {
-    ok: bool,
-    error: string?
-}
-
-struct SharedIncrResult {
-    value: number?,
-    error: string?,
-    forcible: bool
-}
-
-struct SharedNumberResult {
-    value: number?,
-    error: string?
-}
-"#;
-
-/// Write an RSS script with the shared-dict result structs prepended.
+/// Shared-dict result types now come from the host catalog.
 fn write_script(path: &Path, body: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
-    let source = format!("{}{}", RSS_SHARED_RESULT_STRUCTS, body);
-    fs::write(path, source).unwrap();
+    fs::write(path, body).unwrap();
 }
 
 fn conf_body(module: &Path, prefix: &Path, port: u16, locations: &str) -> String {
@@ -156,17 +118,8 @@ fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
     }
 }
 
-fn wait_for_port(port: u16, timeout: Duration) {
-    let start = Instant::now();
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
-        if start.elapsed() >= timeout {
-            panic!("nginx did not listen on 127.0.0.1:{port} within {timeout:?}");
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+fn wait_for_port(port: u16, timeout: Duration, prefix: &Path) {
+    support::nginx::wait_for_workers_ready(port, timeout, Some(&prefix.join("logs/error.log")));
 }
 
 fn error_log(tmp: &OwnedTempDir) -> String {
@@ -229,7 +182,7 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let r: SharedGetResult<string> = ngx::shared::get(d, "Jim");
+let r: SharedGetResult = ngx::shared::get(d, "Jim");
 ngx::header::set("X-Value", r.value);
 ngx::exit(200);
 "#,
@@ -249,7 +202,7 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let r: SharedGetResult<int> = ngx::shared::get(d, "hits");
+let r: SharedGetResult = ngx::shared::get(d, "hits");
 ngx::header::set("X-Value", ngx::encode_args({ n: r.value }));
 ngx::exit(200);
 "#,
@@ -263,10 +216,10 @@ ngx::shared::set(d, "b", true, null, 3);
 ngx::shared::set(d, "i", 42, null, null);
 ngx::shared::set(d, "f", 1.5, null, null);
 ngx::shared::set(d, "s", "hi", null, null);
-let gb: SharedGetResult<bool> = ngx::shared::get(d, "b");
-let gi: SharedGetResult<int> = ngx::shared::get(d, "i");
-let gf: SharedGetResult<float> = ngx::shared::get(d, "f");
-let gs: SharedGetResult<string> = ngx::shared::get(d, "s");
+let gb: SharedGetResult = ngx::shared::get(d, "b");
+let gi: SharedGetResult = ngx::shared::get(d, "i");
+let gf: SharedGetResult = ngx::shared::get(d, "f");
+let gs: SharedGetResult = ngx::shared::get(d, "s");
 if gb.value {
     ngx::header::set("X-Bool", "1");
 } else {
@@ -294,7 +247,7 @@ if add1.ok {
     ngx::header::set("X-Add1", "0");
 }
 ngx::header::set("X-Add2", add2.error);
-let replaced: SharedGetResult<string> = ngx::shared::get(d, "once");
+let replaced: SharedGetResult = ngx::shared::get(d, "once");
 ngx::header::set("X-Rep", replaced.value);
 ngx::header::set("X-Nil", niladd.error);
 ngx::exit(200);
@@ -331,8 +284,8 @@ let dogs = ngx::shared::dict("dogs");
 let cats = ngx::shared::dict("cats");
 ngx::shared::set(dogs, "k", "woof", null, null);
 ngx::shared::set(cats, "k", "meow", null, null);
-let dog: SharedGetResult<string> = ngx::shared::get(dogs, "k");
-let cat: SharedGetResult<string> = ngx::shared::get(cats, "k");
+let dog: SharedGetResult = ngx::shared::get(dogs, "k");
+let cat: SharedGetResult = ngx::shared::get(cats, "k");
 ngx::header::set("X-Dogs", dog.value);
 ngx::header::set("X-Cats", cat.value);
 ngx::exit(200);
@@ -377,7 +330,7 @@ ngx::exit(200);
         combined(&out)
     );
     let running = spawn_nginx(&nginx, tmp.path());
-    wait_for_port(port, Duration::from_secs(5));
+    wait_for_port(port, Duration::from_secs(5), tmp.path());
     (nginx, port, tmp, running)
 }
 
@@ -436,7 +389,7 @@ fn reload_preserves_zone() {
         "reload failed: {}",
         combined(&reload)
     );
-    wait_for_port(port, Duration::from_secs(5));
+    wait_for_port(port, Duration::from_secs(5), tmp.path());
     let mut ok = false;
     for _ in 0..20 {
         thread::sleep(Duration::from_millis(50));
@@ -542,8 +495,8 @@ ngx::exit(200);
 use ngx;
 ngx::update_time();
 let d = ngx::shared::dict("dogs");
-let live: SharedGetResult<string> = ngx::shared::get(d, "k");
-let stale: SharedGetResult<string> = ngx::shared::get_stale(d, "k");
+let live: SharedGetResult = ngx::shared::get(d, "k");
+let stale: SharedGetResult = ngx::shared::get_stale(d, "k");
 ngx::header::set("X-Live", ngx::encode_args({ n: live.flags }));
 if stale.stale {
     ngx::header::set("X-Stale", "1");
@@ -621,7 +574,7 @@ http {{
         combined(&out)
     );
     let _running = spawn_nginx(&nginx, tmp.path());
-    wait_for_port(port, Duration::from_secs(5));
+    wait_for_port(port, Duration::from_secs(5), tmp.path());
 
     let (status, body) = http_get(port, "/stale_set");
     assert_eq!(status, 200, "stale_set failed: {body}\n{}", error_log(&tmp));
@@ -685,8 +638,8 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let left: SharedGetResult<string> = ngx::shared::lpop(d, "q");
-let right: SharedGetResult<string> = ngx::shared::rpop(d, "q");
+let left: SharedGetResult = ngx::shared::lpop(d, "q");
+let right: SharedGetResult = ngx::shared::rpop(d, "q");
 ngx::header::set("X-Left", left.value);
 ngx::header::set("X-Right", right.value);
 let len: SharedNumberResult = ngx::shared::llen(d, "q");
@@ -702,7 +655,7 @@ use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::set(d, "scalar", "keep", null, null);
 let push: SharedNumberResult = ngx::shared::lpush(d, "scalar", "x");
-let got: SharedGetResult<string> = ngx::shared::get(d, "scalar");
+let got: SharedGetResult = ngx::shared::get(d, "scalar");
 ngx::header::set("X-Err", push.error);
 ngx::header::set("X-Val", got.value);
 ngx::exit(200);
@@ -714,7 +667,7 @@ ngx::exit(200);
 use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::rpush(d, "lst", "a");
-let got: SharedGetResult<string> = ngx::shared::get(d, "lst");
+let got: SharedGetResult = ngx::shared::get(d, "lst");
 ngx::header::set("X-Err", got.error);
 let list_len: SharedNumberResult = ngx::shared::llen(d, "lst");
 ngx::header::set("X-Len", ngx::encode_args({ n: list_len.value }));
@@ -746,9 +699,9 @@ ngx::header::set("X-0", keys[0]);
 ngx::header::set("X-1", keys[1]);
 ngx::header::set("X-2", keys[2]);
 ngx::header::set("X-3", keys[3]);
-let ga: SharedGetResult<string> = ngx::shared::get(d, "a");
-let gb2: SharedGetResult<string> = ngx::shared::get(d, "b");
-let gc: SharedGetResult<string> = ngx::shared::get(d, "c");
+let ga: SharedGetResult = ngx::shared::get(d, "a");
+let gb2: SharedGetResult = ngx::shared::get(d, "b");
+let gc: SharedGetResult = ngx::shared::get(d, "c");
 ngx::header::set("X-A", ga.value);
 ngx::header::set("X-B", gb2.value);
 ngx::header::set("X-C", gc.value);
@@ -765,7 +718,7 @@ let d = ngx::shared::dict("dogs");
 ngx::shared::set(d, "live", "1", 1, null);
 ngx::shared::flush_all(d);
 let n = ngx::shared::flush_expired(d, 0);
-let live: SharedGetResult<string> = ngx::shared::get(d, "live");
+let live: SharedGetResult = ngx::shared::get(d, "live");
 ngx::header::set("X-Freed", ngx::encode_args({ n: n }));
 if live.stale {
     ngx::header::set("X-Stale", "1");
@@ -819,7 +772,7 @@ use ngx;
 let d = ngx::shared::dict("dogs");
 let n: SharedNumberResult = ngx::shared::llen(d, "reload");
 ngx::header::set("X-Len", ngx::encode_args({ n: n.value }));
-let popped: SharedGetResult<string> = ngx::shared::lpop(d, "reload");
+let popped: SharedGetResult = ngx::shared::lpop(d, "reload");
 ngx::header::set("X-Pop", popped.value);
 ngx::exit(200);
 "#,
@@ -885,7 +838,7 @@ http {{
         combined(&out)
     );
     let running = spawn_nginx(&nginx, tmp.path());
-    wait_for_port(port, Duration::from_secs(5));
+    wait_for_port(port, Duration::from_secs(5), tmp.path());
 
     let (status, body) = http_get(port, "/push");
     assert_eq!(status, 200, "push failed: {body}\n{}", error_log(&tmp));
@@ -1036,7 +989,7 @@ use ngx;
 let d = ngx::shared::dict("dogs");
 let n: SharedNumberResult = ngx::shared::llen(d, "reload");
 ngx::header::set("X-Len", ngx::encode_args({ n: n.value }));
-let popped: SharedGetResult<string> = ngx::shared::lpop(d, "reload");
+let popped: SharedGetResult = ngx::shared::lpop(d, "reload");
 ngx::header::set("X-Pop", popped.value);
 ngx::exit(200);
 "#,
@@ -1163,8 +1116,8 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-let k0: SharedGetResult<int> = ngx::shared::get(d, "k0000");
-let kn: SharedGetResult<int> = ngx::shared::get(d, "k1099");
+let k0: SharedGetResult = ngx::shared::get(d, "k0000");
+let kn: SharedGetResult = ngx::shared::get(d, "k1099");
 if k0.value == null {
     ngx::header::set("X-K0", "missing");
 } else {
@@ -1199,7 +1152,7 @@ ngx::update_time();
 let d = ngx::shared::dict("visit");
 let keys = ngx::shared::get_keys(d, 10);
 ngx::header::set("X-N", ngx::encode_args({ n: keys.length }));
-let live: SharedGetResult<string> = ngx::shared::get(d, "live");
+let live: SharedGetResult = ngx::shared::get(d, "live");
 ngx::header::set("X-Live", live.value);
 ngx::exit(200);
 "#,
@@ -1229,7 +1182,7 @@ use ngx;
 ngx::update_time();
 let d = ngx::shared::dict("cats");
 let n = ngx::shared::flush_expired(d, 10);
-let stale: SharedGetResult<int> = ngx::shared::get_stale(d, "expired-mru-4");
+let stale: SharedGetResult = ngx::shared::get_stale(d, "expired-mru-4");
 ngx::header::set("X-Freed", ngx::encode_args({ n: n }));
 if stale.value == null {
     ngx::header::set("X-Stale", "missing");
@@ -1246,7 +1199,7 @@ use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::rpush(d, "decode", "keep");
 ngx::shared::rpush(d, "decode", "tail");
-let popped: SharedGetResult<string> = ngx::shared::lpop(d, "decode");
+let popped: SharedGetResult = ngx::shared::lpop(d, "decode");
 let rest: SharedNumberResult = ngx::shared::llen(d, "decode");
 ngx::header::set("X-Pop", popped.value);
 if popped.error == null {
@@ -1318,7 +1271,7 @@ http {{
         combined(&out)
     );
     let running = spawn_nginx(&nginx, tmp.path());
-    wait_for_port(port, Duration::from_secs(5));
+    wait_for_port(port, Duration::from_secs(5), tmp.path());
 
     let (status, body) = http_get_timeout(port, "/seed_many", Duration::from_secs(30));
     assert_eq!(status, 200, "seed_many failed: {body}\n{}", error_log(&tmp));

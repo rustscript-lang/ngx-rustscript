@@ -5,7 +5,7 @@
 
 use ngx_rustscript_nginx_test_stubs as _;
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use ngx_rustscript::config::{
@@ -16,11 +16,12 @@ use ngx_rustscript::host::{
     HostCapability, HostFamily, HostSyncKind, NGX_CRC32_LONG_NAME, NGX_CRC32_SHORT_NAME,
     NGX_DECODE_ARGS_NAME, NGX_DECODE_BASE64_NAME, NGX_DECODE_BASE64MIME_NAME, NGX_ENCODE_ARGS_NAME,
     NGX_ENCODE_BASE64_NAME, NGX_ESCAPE_URI_NAME, NGX_HEADER_GET_NAME, NGX_HMAC_SHA1_NAME,
+    NGX_HOST_CATALOG_FINGERPRINT, NGX_HOST_CATALOG_FINGERPRINT_V1, NGX_HOST_CATALOG_SCHEMA_VERSION,
     NGX_MD5_BIN_NAME, NGX_MD5_NAME, NGX_NOW_NAME, NGX_QUOTE_SQL_STR_NAME, NGX_SHA1_BIN_NAME,
     NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_STATUS_GET_NAME, NGX_TIME_NAME, NGX_UNESCAPE_URI_NAME,
     NGX_UPDATE_TIME_NAME, NgxPhase, StandardHostPolicy, bind_ngx_hosts, compile_host_catalog,
     host_allowed_in_phase, install_standard_runtime, is_standard_host_import, ngx_host_catalog,
-    ngx_host_manifest, production_runtime_host_names,
+    ngx_host_manifest, ngx_host_registry, production_runtime_host_names,
 };
 use vm::{HostTypeSchema, Program, Vm};
 
@@ -396,37 +397,8 @@ fn shared_fixed_results_compile_as_explicit_struct_types() {
         r#"
         use ngx;
 
-        struct SharedGetResult<T> {
-            value: T?,
-            flags: int,
-            stale: bool,
-            error: string?
-        }
-
-        struct SharedStoreResult {
-            ok: bool,
-            error: string?,
-            forcible: bool
-        }
-
-        struct SharedSafeStoreResult {
-            ok: bool,
-            error: string?
-        }
-
-        struct SharedIncrResult {
-            value: number?,
-            error: string?,
-            forcible: bool
-        }
-
-        struct SharedNumberResult {
-            value: number?,
-            error: string?
-        }
-
         let dict = ngx::shared::dict("ratelimit");
-        let got: SharedGetResult<number> = ngx::shared::get(dict, "key");
+        let got: SharedGetResult = ngx::shared::get(dict, "key");
         if got.error == null && !got.stale {
             got.value;
             got.flags;
@@ -462,21 +434,6 @@ fn dynamic_map_envelopes_compile_as_explicit_struct_types() {
         r#"
         use ngx;
 
-        struct DecodedArgsResult {
-            args: map,
-            truncated: bool
-        }
-
-        struct RequestHeadersResult {
-            headers: map,
-            truncated: bool
-        }
-
-        struct RequestArgsResult {
-            args: map,
-            truncated: bool
-        }
-
         let decoded: DecodedArgsResult = ngx::decode_args("a=1", null);
         if !decoded.truncated {
             ngx::encode_args(decoded.args);
@@ -500,46 +457,61 @@ fn dynamic_map_envelopes_compile_as_explicit_struct_types() {
 #[test]
 fn dynamic_map_envelopes_are_not_declared_as_maps() {
     let catalog = ngx_host_catalog();
-    for name in [
-        "ngx::decode_args",
-        "ngx::req::get_headers",
-        "ngx::req::get_uri_args",
-        "ngx::req::get_post_args",
+    for (name, expected) in [
+        ("ngx::decode_args", "DecodedArgsResult"),
+        ("ngx::req::get_headers", "RequestHeadersResult"),
+        ("ngx::req::get_uri_args", "RequestArgsResult"),
+        ("ngx::req::get_post_args", "RequestArgsResult"),
     ] {
-        assert_eq!(
-            catalog.function(name).expect("host schema").return_type,
-            HostTypeSchema::Unknown,
-            "{name} has a fixed outer result shape"
-        );
+        match &catalog.function(name).expect("host schema").return_type {
+            HostTypeSchema::Named {
+                name: struct_name,
+                fields,
+            } => {
+                assert_eq!(struct_name, expected, "{name} named envelope");
+                assert_eq!(fields.len(), 2, "{name} envelope field count");
+                assert_eq!(fields[1].name, "truncated");
+                assert_eq!(fields[1].ty, HostTypeSchema::Bool);
+            }
+            other => panic!("{name} must return a named envelope, got {other:?}"),
+        }
     }
 }
 
 #[test]
 fn shared_fixed_results_are_not_declared_as_dynamic_maps() {
     let catalog = ngx_host_catalog();
-    for name in [
-        "ngx::shared::get",
-        "ngx::shared::get_stale",
-        "ngx::shared::set",
-        "ngx::shared::safe_set",
-        "ngx::shared::add",
-        "ngx::shared::safe_add",
-        "ngx::shared::replace",
-        "ngx::shared::incr",
-        "ngx::shared::ttl",
-        "ngx::shared::expire",
-        "ngx::shared::lpush",
-        "ngx::shared::rpush",
-        "ngx::shared::lpop",
-        "ngx::shared::rpop",
-        "ngx::shared::llen",
+    for (name, expected) in [
+        ("ngx::shared::get", "SharedGetResult"),
+        ("ngx::shared::get_stale", "SharedGetResult"),
+        ("ngx::shared::set", "SharedStoreResult"),
+        ("ngx::shared::safe_set", "SharedSafeStoreResult"),
+        ("ngx::shared::add", "SharedStoreResult"),
+        ("ngx::shared::safe_add", "SharedSafeStoreResult"),
+        ("ngx::shared::replace", "SharedStoreResult"),
+        ("ngx::shared::incr", "SharedIncrResult"),
+        ("ngx::shared::ttl", "SharedNumberResult"),
+        ("ngx::shared::expire", "SharedSafeStoreResult"),
+        ("ngx::shared::lpush", "SharedNumberResult"),
+        ("ngx::shared::rpush", "SharedNumberResult"),
+        ("ngx::shared::lpop", "SharedGetResult"),
+        ("ngx::shared::rpop", "SharedGetResult"),
+        ("ngx::shared::llen", "SharedNumberResult"),
     ] {
-        let schema = catalog.function(name).expect("shared host schema");
-        assert_eq!(
-            schema.return_type,
-            HostTypeSchema::Unknown,
-            "{name} has a fixed result shape and must use an explicit RustScript struct type"
-        );
+        match &catalog
+            .function(name)
+            .expect("shared host schema")
+            .return_type
+        {
+            HostTypeSchema::Named {
+                name: struct_name, ..
+            } => {
+                assert_eq!(struct_name, expected, "{name} named envelope");
+            }
+            other => panic!(
+                "{name} has a fixed result shape and must use an explicit RustScript struct type, got {other:?}"
+            ),
+        }
     }
 }
 
@@ -559,8 +531,8 @@ fn runtime_host_names_are_unique() {
     );
     assert_eq!(
         names.len(),
-        195,
-        "production runtime host count must stay 195"
+        199,
+        "production runtime host count must stay 199"
     );
 }
 
@@ -587,25 +559,10 @@ fn manifest_catalog_and_runtime_names_correspond() {
         manifest_names.len(),
         "catalog must not declare overloads for production ngx hosts"
     );
-    // The owned `ngx::timer::{at,every}` registrations have no name-binding API
-    // (they transfer their callback through `HostParamPassing::TakeOwned`), so
-    // the four timer hosts resolve through the timer-host registry
-    // (`ngx_host_registry`) instead of the per-name bind list. Every other
-    // manifest entry keeps a 1:1 per-name runtime binding.
-    let (timer_names, per_name_expected): (Vec<&str>, Vec<&str>) = manifest_names
-        .iter()
-        .copied()
-        .partition(|name| name.starts_with("ngx::timer::"));
-    assert_eq!(timer_names.len(), 4, "the timer family has four hosts");
     assert_eq!(
         runtime_names,
-        per_name_expected.as_slice(),
-        "per-name runtime bindings must match the manifest minus the timer registry family"
-    );
-    assert_eq!(
-        runtime_names.len() + timer_names.len(),
-        manifest_names.len(),
-        "per-name bindings plus the timer family must cover the manifest"
+        manifest_names.as_slice(),
+        "production runtime names must match the catalog/manifest order exactly"
     );
 }
 
@@ -813,15 +770,23 @@ fn catalog_sleep_ms_schema_preserves_millisecond_int() {
 
 #[test]
 fn bound_vm_has_every_catalogued_runtime_host_and_no_test_hosts() {
+    let registry = ngx_host_registry().expect("production registry");
+    for name in production_runtime_host_names() {
+        assert!(
+            registry.contains_name(name),
+            "production registry must contain catalogued host {name}"
+        );
+    }
+    for banned in ["ngx::probe", "ngx::fail", "ngx::ready"] {
+        assert!(
+            !registry.contains_name(banned),
+            "production registry must not install {banned}"
+        );
+    }
+
     let program = compile("let x = 1;\n");
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
     bind_ngx_hosts(&mut vm);
-    for name in production_runtime_host_names() {
-        assert!(
-            vm.has_bound_function(name),
-            "runtime VM must bind catalogued host {name}"
-        );
-    }
     for banned in [
         "ngx::probe",
         "ngx::fail",
@@ -834,10 +799,13 @@ fn bound_vm_has_every_catalogued_runtime_host_and_no_test_hosts() {
             "production bind must not install {banned}"
         );
     }
-    assert!(
-        vm.has_bound_function(NGX_NOW_NAME),
-        "production bind must install ngx::now as the time host"
-    );
+
+    let now_program = compile_rss_source("use ngx;\nngx::now();\n").expect("ngx::now program");
+    let mut now_vm = Vm::new_shared(now_program);
+    bind_ngx_hosts(&mut now_vm);
+    now_vm
+        .run()
+        .expect("production bind must execute imported ngx::now");
 }
 
 #[test]
@@ -1076,4 +1044,166 @@ fn nginx_version_allows_init_worker_and_exit_worker_unlike_nginx_configure() {
         "ngx::config::nginx_configure",
         NgxPhase::Init
     ));
+}
+
+fn collect_dynamic_slots(ty: &HostTypeSchema, path: &str, out: &mut BTreeSet<String>) {
+    match ty {
+        HostTypeSchema::Unknown => {
+            out.insert(format!("{path}:Unknown"));
+        }
+        HostTypeSchema::Map(inner) => {
+            out.insert(format!("{path}:Map"));
+            collect_dynamic_slots(inner, &format!("{path}.<map>"), out);
+        }
+        HostTypeSchema::Array(inner) => {
+            collect_dynamic_slots(inner, &format!("{path}[]"), out);
+        }
+        HostTypeSchema::Optional(inner) => {
+            collect_dynamic_slots(inner, &format!("{path}?"), out);
+        }
+        HostTypeSchema::Named { name, fields } => {
+            for field in fields {
+                collect_dynamic_slots(&field.ty, &format!("{path}.{name}.{}", field.name), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn catalog_dynamic_slots() -> BTreeSet<String> {
+    let catalog = ngx_host_catalog();
+    let mut slots = BTreeSet::new();
+    for schema in catalog.functions() {
+        for param in &schema.params {
+            collect_dynamic_slots(
+                &param.ty,
+                &format!("{}#{}", schema.name, param.name),
+                &mut slots,
+            );
+        }
+        collect_dynamic_slots(
+            &schema.return_type,
+            &format!("{}#return", schema.name),
+            &mut slots,
+        );
+    }
+    slots
+}
+
+/// Exact per-function/slot allowlist for remaining Unknown/Map catalog types.
+///
+/// Rationales:
+/// - `header::get` return: OpenResty can yield a string or a multi-value array.
+/// - request/codec maps: query/header bags are open-keyed.
+/// - shared-dict `value`/store payloads: heterogeneous zone values.
+/// - optional OpenResty trailing args (`exptime`, `flags`, `max_*`, timeouts).
+/// - print/say/socket payloads: mixed printable or buffer values.
+/// - request ctx: opaque per-request table, not a VM resource.
+const ALLOWED_DYNAMIC_SLOTS: &[&str] = &[
+    "ngx::ctx::delete#return:Unknown",
+    "ngx::ctx::get#return:Unknown",
+    "ngx::ctx::set#value:Unknown",
+    "ngx::decode_args#max_args:Unknown",
+    "ngx::decode_args#return.DecodedArgsResult.args.<map>:Unknown",
+    "ngx::decode_args#return.DecodedArgsResult.args:Map",
+    "ngx::encode_args#args:Unknown",
+    "ngx::encode_base64#input:Unknown",
+    "ngx::encode_base64#no_padding:Unknown",
+    "ngx::escape_uri#escape_type:Unknown",
+    "ngx::header::get#return:Unknown",
+    "ngx::header::set#value:Unknown",
+    "ngx::header::set_all#headers:Unknown",
+    "ngx::print#data:Unknown",
+    "ngx::redirect#status:Unknown",
+    "ngx::req::get_headers#max_headers:Unknown",
+    "ngx::req::get_headers#raw:Unknown",
+    "ngx::req::get_headers#return.RequestHeadersResult.headers.<map>:Unknown",
+    "ngx::req::get_headers#return.RequestHeadersResult.headers:Map",
+    "ngx::req::get_post_args#max_args:Unknown",
+    "ngx::req::get_post_args#return.RequestArgsResult.args.<map>:Unknown",
+    "ngx::req::get_post_args#return.RequestArgsResult.args:Map",
+    "ngx::req::get_uri_args#max_args:Unknown",
+    "ngx::req::get_uri_args#return.RequestArgsResult.args.<map>:Unknown",
+    "ngx::req::get_uri_args#return.RequestArgsResult.args:Map",
+    "ngx::req::init_body#buffer_size:Unknown",
+    "ngx::req::raw_header#no_request_line:Unknown",
+    "ngx::req::set_body_file#auto_clean:Unknown",
+    "ngx::req::set_header#value:Unknown",
+    "ngx::req::set_uri#jump:Unknown",
+    "ngx::req::set_uri_args#args:Unknown",
+    "ngx::say#data:Unknown",
+    "ngx::semaphore::post#count:Unknown",
+    "ngx::semaphore::wait#timeout:Unknown",
+    "ngx::shared::add#exptime:Unknown",
+    "ngx::shared::add#flags:Unknown",
+    "ngx::shared::add#value:Unknown",
+    "ngx::shared::expire#exptime:Unknown",
+    "ngx::shared::flush_expired#max:Unknown",
+    "ngx::shared::get#return.SharedGetResult.value?:Unknown",
+    "ngx::shared::get_keys#max:Unknown",
+    "ngx::shared::get_stale#return.SharedGetResult.value?:Unknown",
+    "ngx::shared::incr#init:Unknown",
+    "ngx::shared::incr#init_ttl:Unknown",
+    "ngx::shared::incr#value:Unknown",
+    "ngx::shared::lpop#return.SharedGetResult.value?:Unknown",
+    "ngx::shared::lpush#value:Unknown",
+    "ngx::shared::replace#exptime:Unknown",
+    "ngx::shared::replace#flags:Unknown",
+    "ngx::shared::replace#value:Unknown",
+    "ngx::shared::rpop#return.SharedGetResult.value?:Unknown",
+    "ngx::shared::rpush#value:Unknown",
+    "ngx::shared::safe_add#exptime:Unknown",
+    "ngx::shared::safe_add#flags:Unknown",
+    "ngx::shared::safe_add#value:Unknown",
+    "ngx::shared::safe_set#exptime:Unknown",
+    "ngx::shared::safe_set#flags:Unknown",
+    "ngx::shared::safe_set#value:Unknown",
+    "ngx::shared::set#exptime:Unknown",
+    "ngx::shared::set#flags:Unknown",
+    "ngx::shared::set#value:Unknown",
+    "ngx::socket::tcp::clientcert#cert:Unknown",
+    "ngx::socket::tcp::clientcert#pkey:Unknown",
+    "ngx::socket::tcp::receive#mode:Unknown",
+    "ngx::socket::tcp::receiveuntil#delimiter:Unknown",
+    "ngx::socket::tcp::send#data:Unknown",
+    "ngx::socket::tcp::setkeepalive#pool_size:Unknown",
+    "ngx::socket::tcp::setkeepalive#timeout:Unknown",
+    "ngx::socket::tcp::sslhandshake#reused_session:Unknown",
+    "ngx::socket::tcp::sslhandshake#send_status_req:Unknown",
+    "ngx::socket::tcp::sslhandshake#server_name:Unknown",
+    "ngx::socket::tcp::sslhandshake#ssl_verify:Unknown",
+    "ngx::socket::tcp::trustedstore#pem:Unknown",
+    "ngx::socket::udp::bind#host:Unknown",
+    "ngx::socket::udp::receive#size:Unknown",
+    "ngx::socket::udp::send#data:Unknown",
+    "ngx::var::set#value:Unknown",
+];
+
+#[test]
+fn catalog_schema_version_and_fingerprint_goldens() {
+    let catalog = ngx_host_catalog();
+    assert_eq!(NGX_HOST_CATALOG_SCHEMA_VERSION, 2);
+    assert_eq!(NGX_HOST_CATALOG_FINGERPRINT_V1, 0x5e37_8285_8fa0_b584);
+    assert_eq!(
+        catalog.fingerprint().as_u64(),
+        NGX_HOST_CATALOG_FINGERPRINT,
+        "catalog fingerprint drifted; bump schema version and goldens"
+    );
+    assert_ne!(
+        NGX_HOST_CATALOG_FINGERPRINT, NGX_HOST_CATALOG_FINGERPRINT_V1,
+        "current fingerprint must differ from the v1 golden"
+    );
+}
+
+#[test]
+fn exact_dynamic_unknown_and_map_slots_are_allowlisted() {
+    let actual = catalog_dynamic_slots();
+    let expected: BTreeSet<String> = ALLOWED_DYNAMIC_SLOTS
+        .iter()
+        .map(|slot| (*slot).to_string())
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "Unknown/Map catalog slots drifted; update ALLOWED_DYNAMIC_SLOTS with rationale"
+    );
 }

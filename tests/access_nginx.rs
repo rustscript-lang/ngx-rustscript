@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use support::artifact::module_cdylib;
 use support::nginx::{
@@ -100,16 +100,7 @@ fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
 }
 
 fn wait_for_port(port: u16, timeout: Duration) {
-    let start = Instant::now();
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
-        if start.elapsed() >= timeout {
-            panic!("nginx did not listen on 127.0.0.1:{port} within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    support::nginx::wait_for_worker_http(port, timeout);
 }
 
 fn http_get(port: u16, path: &str) -> (u16, String) {

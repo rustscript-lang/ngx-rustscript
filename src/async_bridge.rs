@@ -131,36 +131,7 @@ mod tests {
     }
 
     fn test_catalog() -> vm::HostApiCatalog {
-        let mut builder = vm::HostApiBuilder::new();
-        builder.function(vm::HostFunctionSchema::with_return(
-            "ngx::sleep",
-            vec![vm::HostParamSchema::value(
-                "seconds",
-                vm::HostTypeSchema::Number,
-            )],
-            vm::HostTypeSchema::Null,
-        ));
-        builder.function(vm::HostFunctionSchema::with_return(
-            "ngx::sleep_ms",
-            vec![vm::HostParamSchema::value("ms", vm::HostTypeSchema::Int)],
-            vm::HostTypeSchema::Null,
-        ));
-        builder.function(vm::HostFunctionSchema::with_return(
-            "ngx::probe",
-            vec![vm::HostParamSchema::value("ms", vm::HostTypeSchema::Int)],
-            vm::HostTypeSchema::Int,
-        ));
-        builder.function(vm::HostFunctionSchema::with_return(
-            "ngx::ready",
-            vec![],
-            vm::HostTypeSchema::Int,
-        ));
-        builder.function(vm::HostFunctionSchema::with_return(
-            "ngx::fail",
-            vec![],
-            vm::HostTypeSchema::Int,
-        ));
-        builder.build().expect("test catalog")
+        crate::host::test_bind_catalog()
     }
 
     fn bind_vm(program: vm::Program, handle: Handle, test_hosts: bool) -> Vm {

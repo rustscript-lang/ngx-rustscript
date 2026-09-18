@@ -346,11 +346,11 @@ fn oversized_datagram_is_rejected() {
 fn udp_echo_round_trip() {
     let peer = bind_echo_peer();
     let port = peer.local_addr().unwrap().port();
-    let echo = spawn_echo(peer, b"pong");
-    let status = Driver::new(compile(&format!(
+    let driver = Driver::new(compile(&format!(
         "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, null);\nngx::socket::udp::close(sock);\n"
-    )))
-    .pump_until(Duration::from_secs(3));
+    )));
+    let echo = spawn_echo(peer, b"pong");
+    let status = driver.pump_until(Duration::from_secs(3));
     echo.join().expect("echo thread");
     assert_eq!(status, AccessStatus::Ok);
 }
@@ -443,11 +443,11 @@ fn worker_shutdown_drops_a_pending_receive() {
 fn bind_then_echo_round_trip() {
     let peer = bind_echo_peer();
     let port = peer.local_addr().unwrap().port();
-    let echo = spawn_echo(peer, b"pong");
-    let status = Driver::new(compile(&format!(
+    let driver = Driver::new(compile(&format!(
         "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::bind(sock, \"127.0.0.1\", 0);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, null);\nngx::socket::udp::close(sock);\n"
-    )))
-    .pump_until(Duration::from_secs(3));
+    )));
+    let echo = spawn_echo(peer, b"pong");
+    let status = driver.pump_until(Duration::from_secs(3));
     echo.join().expect("echo thread");
     assert_eq!(status, AccessStatus::Ok);
 }

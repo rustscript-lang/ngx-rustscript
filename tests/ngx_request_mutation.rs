@@ -10,7 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use nginx_sys::{NGX_HTTP_GET, NGX_HTTP_POST, ngx_http_request_t, ngx_str_t, ngx_uint_t};
 use ngx_rustscript::config::{ConfigError, compile_rss_source, program_requires_request_state};
@@ -458,16 +458,7 @@ fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
 }
 
 fn wait_for_port(port: u16, timeout: Duration) {
-    let start = Instant::now();
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
-        if start.elapsed() >= timeout {
-            panic!("nginx did not listen on 127.0.0.1:{port} within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    support::nginx::wait_for_worker_http(port, timeout);
 }
 
 fn http_exchange(port: u16, request: &str) -> (u16, String) {
@@ -575,10 +566,6 @@ ngx::var::set("uri", "/nope");
         &header_script,
         r#"
 use ngx;
-struct RequestHeadersResult {
-    headers: map,
-    truncated: bool
-}
 ngx::req::set_header("X-Dup", "first");
 ngx::req::set_header("X-Dup", ["a", "b"]);
 ngx::req::clear_header("X-Remove");

@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use pd_host_function::pd_host_function;
+use vm::HostModuleDescriptor;
 use vm::{Value, VmError, VmMap};
 
 use super::super::VmResult;
@@ -393,7 +394,7 @@ fn ret(value: impl IntoHostCallOutcome) -> VmResult<CallOutcome> {
 }
 
 /// OpenResty-adapted `ngx.ctx[key]` read. Missing keys return `null`.
-#[pd_host_function(name = "ngx::ctx::get")]
+#[pd_host_function(name = "ngx::ctx::get", contract = crate::host::catalog::ngx_ctx_get_contract)]
 pub fn get(key: &str) -> VmResult<CallOutcome> {
     let identity = current_identity().map_err(scope_err)?;
     let value = with_current_ctx(identity, |ctx| ctx.get(key)).map_err(scope_err)?;
@@ -401,7 +402,7 @@ pub fn get(key: &str) -> VmResult<CallOutcome> {
 }
 
 /// OpenResty-adapted `ngx.ctx[key] = value`. Returns `null`.
-#[pd_host_function(name = "ngx::ctx::set")]
+#[pd_host_function(name = "ngx::ctx::set", contract = crate::host::catalog::ngx_ctx_set_contract)]
 pub fn set(key: &str, value: &Value) -> VmResult<CallOutcome> {
     let identity = current_identity().map_err(scope_err)?;
     with_current_ctx_mut(identity, |ctx| ctx.set(key, value))
@@ -411,7 +412,7 @@ pub fn set(key: &str, value: &Value) -> VmResult<CallOutcome> {
 }
 
 /// Adapted delete: returns the removed value, or `null` if missing.
-#[pd_host_function(name = "ngx::ctx::delete")]
+#[pd_host_function(name = "ngx::ctx::delete", contract = crate::host::catalog::ngx_ctx_delete_contract)]
 pub fn delete(key: &str) -> VmResult<CallOutcome> {
     let identity = current_identity().map_err(scope_err)?;
     let value = with_current_ctx_mut(identity, |ctx| ctx.delete(key))
@@ -421,11 +422,26 @@ pub fn delete(key: &str) -> VmResult<CallOutcome> {
 }
 
 /// Clear every ctx entry. Returns `null`.
-#[pd_host_function(name = "ngx::ctx::clear")]
+#[pd_host_function(name = "ngx::ctx::clear", contract = crate::host::catalog::ngx_ctx_clear_contract)]
 pub fn clear() -> VmResult<CallOutcome> {
     let identity = current_identity().map_err(scope_err)?;
     with_current_ctx_mut(identity, |ctx| ctx.clear()).map_err(scope_err)?;
     ret(())
+}
+
+const REQUEST_CTX_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+        get_descriptor,
+        set_descriptor,
+        delete_descriptor,
+        clear_descriptor,
+];
+
+pub fn request_ctx_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.ctx",
+        functions: REQUEST_CTX_HOST_MODULE_FUNCTIONS,
+        resources: &[],
+    }
 }
 
 #[cfg(test)]

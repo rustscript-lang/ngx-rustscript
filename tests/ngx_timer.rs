@@ -122,7 +122,7 @@ fn timer_hosts_are_catalogued_and_manifested_in_access_and_content() {
     }
     assert_eq!(ngx_host_manifest().len(), 199);
     assert_eq!(catalog.functions().len(), 199);
-    assert_eq!(production_runtime_host_names().len(), 195);
+    assert_eq!(production_runtime_host_names().len(), 199);
     assert!(catalog.function("ngx::timer").is_none());
     assert!(manifest_entry("ngx::timer").is_none());
 }
@@ -196,8 +196,13 @@ fn at_registers_one_fake_request_with_an_ordinary_identity() {
     let mut worker = WorkerRuntime::start().expect("worker runtime");
     assert_eq!(live_timer_count(), 0);
 
+    // Catalog/registry install is paid during VM construction. Time only the
+    // host call so a slow first bind cannot be mistaken for waiting on the
+    // 10s deadline.
+    let mut vm = timer_vm("use ngx;\nngx::timer::at(10, |premature| null);\n", &worker);
     let start = Instant::now();
-    run_script("use ngx;\nngx::timer::at(10, |premature| null);\n", &worker)
+    vm.run()
+        .map(|_| ())
         .expect("registration returns immediately");
     assert!(
         start.elapsed() < Duration::from_secs(2),

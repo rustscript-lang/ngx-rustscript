@@ -43,10 +43,11 @@ impl Default for StandardHostPolicy {
     }
 }
 
-/// Install pd-vm's standard runtime composition and embedding policies.
-pub fn install_standard_runtime(vm: &mut Vm, policy: &StandardHostPolicy) -> Result<(), String> {
-    let composition = standard_composition();
-    vm.set_standard_composition(composition.clone());
+/// Apply I/O, HTTP, and SQLite policies without per-name binds.
+///
+/// Production VMs resolve standard imports through the descriptor registry
+/// plan. A later name bind would flip them back to name resolution.
+pub fn install_standard_policy(vm: &mut Vm, policy: &StandardHostPolicy) -> Result<(), String> {
     vm.configure_io(IoPolicy {
         allowed_roots: policy.io_roots.clone(),
         allow_write: policy.io_write,
@@ -67,17 +68,14 @@ pub fn install_standard_runtime(vm: &mut Vm, policy: &StandardHostPolicy) -> Res
         allow_unsafe_sql: false,
         ..SqlitePolicy::default()
     });
-    let standard_imports: Vec<String> = vm
-        .program()
-        .imports
-        .iter()
-        .filter(|import| composition.import_in_standard(import))
-        .map(|import| import.name.clone())
-        .collect();
-    for name in standard_imports {
-        if !composition.bind_default_name(vm, &name) {
-            return Err(format!("cannot bind standard host import '{name}'"));
-        }
-    }
     Ok(())
+}
+
+/// Install pd-vm's standard runtime composition and embedding policies.
+///
+/// Production VMs already resolve standard imports through
+/// [`crate::host::ngx_host_registry`]; this only applies the location policy.
+pub fn install_standard_runtime(vm: &mut Vm, policy: &StandardHostPolicy) -> Result<(), String> {
+    vm.set_standard_composition(standard_composition());
+    install_standard_policy(vm, policy)
 }

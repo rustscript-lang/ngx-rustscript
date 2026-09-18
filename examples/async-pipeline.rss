@@ -5,11 +5,6 @@ use sqlite;
 use json;
 use bytes as builtin_bytes;
 
-struct SharedStoreResult {
-    ok: bool,
-    error: string?
-}
-
 let url_file = ngx::var::get("rss_pipeline_url_file").unwrap_or("");
 let database_file = ngx::var::get("rss_pipeline_database").unwrap_or("");
 

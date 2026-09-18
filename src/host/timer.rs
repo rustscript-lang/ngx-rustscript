@@ -11,15 +11,13 @@
 use std::time::Duration;
 
 use vm::{
-    CallOutcome, CallReturn, HostApiCatalog, HostFunctionRegistry, HostImportSchema,
+    CallOutcome, CallReturn, HostAdapterDescriptor, HostBindingDescriptor, HostBindingKind,
+    HostFunctionDescriptor, HostFunctionRegistry, HostModuleDescriptor, HostOwnedAdapterFactory,
     HostOwnedFunction, OwnedHostCall, OwnedHostContext, TIMER_CALLBACK_ARG, Value, Vm, VmError,
     VmResult, installed_timer_counts, register_owned_timer,
 };
 
-use crate::host::catalog::{
-    NGX_TIMER_AT_NAME, NGX_TIMER_EVERY_NAME, NGX_TIMER_PENDING_COUNT_NAME,
-    NGX_TIMER_RUNNING_COUNT_NAME,
-};
+use crate::host::catalog::{NGX_TIMER_AT_NAME, NGX_TIMER_EVERY_NAME};
 
 /// One `ngx::timer::{at,every}` registration adapter.
 struct TimerRegister {
@@ -119,63 +117,94 @@ pub(crate) fn running_count(vm: &mut Vm, _args: &[Value]) -> VmResult<CallOutcom
     timer_count(vm, false)
 }
 
-/// Registers the four `ngx::timer` hosts against `catalog`.
-///
-/// `at`/`every` transfer their callback through `HostParamPassing::TakeOwned`,
-/// so they register as exact owned entries and can only be bound through the
-/// registry path ([`crate::host::ngx_host_registry`]); the counters are exact
-/// static hosts. Registration is transactional: a schema or entry failure
-/// leaves `registry` unchanged.
-pub fn register_timer_hosts(
-    registry: &mut HostFunctionRegistry,
-    catalog: &HostApiCatalog,
-) -> Result<(), String> {
-    let mut schemas: Vec<(&'static str, HostImportSchema)> = Vec::new();
-    for name in [
-        NGX_TIMER_AT_NAME,
-        NGX_TIMER_EVERY_NAME,
-        NGX_TIMER_PENDING_COUNT_NAME,
-        NGX_TIMER_RUNNING_COUNT_NAME,
-    ] {
-        let found = vm::catalog_import_schemas(catalog, name);
-        if found.is_empty() {
-            return Err(format!("{name} is missing from the compile catalog"));
-        }
-        for schema in found {
-            schemas.push((name, schema));
-        }
-    }
-    registry
-        .transactionally(|staged| {
-            for (name, schema) in schemas {
-                match name {
-                    NGX_TIMER_AT_NAME | NGX_TIMER_EVERY_NAME => {
-                        let repeating = name == NGX_TIMER_EVERY_NAME;
-                        staged.register_exact_owned(
-                            name,
-                            2,
-                            schema,
-                            move |context: OwnedHostContext<'_>| -> Box<dyn HostOwnedFunction> {
-                                Box::new(TimerRegister {
-                                    registry: context.registry().clone(),
-                                    name,
-                                    repeating,
-                                })
-                            },
-                        )?;
-                    }
-                    NGX_TIMER_PENDING_COUNT_NAME => {
-                        staged.register_exact_static(name, 0, schema, pending_count)?;
-                    }
-                    NGX_TIMER_RUNNING_COUNT_NAME => {
-                        staged.register_exact_static(name, 0, schema, running_count)?;
-                    }
-                    _ => {
-                        return Err(VmError::HostError(format!("unexpected timer host {name}")));
-                    }
-                }
-            }
-            Ok(())
+struct TimerRegisterFactory {
+    name: &'static str,
+    repeating: bool,
+}
+
+impl HostOwnedAdapterFactory for TimerRegisterFactory {
+    fn create(&self, context: OwnedHostContext<'_>) -> Box<dyn HostOwnedFunction> {
+        Box::new(TimerRegister {
+            registry: context.registry().clone(),
+            name: self.name,
+            repeating: self.repeating,
         })
-        .map_err(|error| error.to_string())
+    }
+}
+
+static TIMER_AT_FACTORY: TimerRegisterFactory = TimerRegisterFactory {
+    name: NGX_TIMER_AT_NAME,
+    repeating: false,
+};
+static TIMER_EVERY_FACTORY: TimerRegisterFactory = TimerRegisterFactory {
+    name: NGX_TIMER_EVERY_NAME,
+    repeating: true,
+};
+
+fn timer_at_descriptor() -> HostFunctionDescriptor {
+    let schema = crate::host::catalog::ngx_timer_at_contract();
+    HostFunctionDescriptor {
+        schema: schema.clone(),
+        binding: HostBindingDescriptor {
+            kind: HostBindingKind::Owned,
+        },
+        effects: Vec::new(),
+        adapter: HostAdapterDescriptor::Owned(&TIMER_AT_FACTORY),
+        resource_types: Vec::new(),
+    }
+}
+
+fn timer_every_descriptor() -> HostFunctionDescriptor {
+    let schema = crate::host::catalog::ngx_timer_every_contract();
+    HostFunctionDescriptor {
+        schema: schema.clone(),
+        binding: HostBindingDescriptor {
+            kind: HostBindingKind::Owned,
+        },
+        effects: Vec::new(),
+        adapter: HostAdapterDescriptor::Owned(&TIMER_EVERY_FACTORY),
+        resource_types: Vec::new(),
+    }
+}
+
+fn timer_pending_count_descriptor() -> HostFunctionDescriptor {
+    let schema = crate::host::catalog::ngx_timer_pending_count_contract();
+    HostFunctionDescriptor {
+        schema: schema.clone(),
+        binding: HostBindingDescriptor {
+            kind: HostBindingKind::Static,
+        },
+        effects: Vec::new(),
+        adapter: HostAdapterDescriptor::Static(pending_count),
+        resource_types: Vec::new(),
+    }
+}
+
+fn timer_running_count_descriptor() -> HostFunctionDescriptor {
+    let schema = crate::host::catalog::ngx_timer_running_count_contract();
+    HostFunctionDescriptor {
+        schema: schema.clone(),
+        binding: HostBindingDescriptor {
+            kind: HostBindingKind::Static,
+        },
+        effects: Vec::new(),
+        adapter: HostAdapterDescriptor::Static(running_count),
+        resource_types: Vec::new(),
+    }
+}
+
+const TIMER_HOST_MODULE_FUNCTIONS: &[fn() -> HostFunctionDescriptor] = &[
+    timer_at_descriptor,
+    timer_every_descriptor,
+    timer_pending_count_descriptor,
+    timer_running_count_descriptor,
+];
+
+/// Explicit `ngx::timer` module: owned `at`/`every` plus static counters.
+pub fn timer_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.timer",
+        functions: TIMER_HOST_MODULE_FUNCTIONS,
+        resources: &[],
+    }
 }

@@ -135,16 +135,7 @@ fn inject_main_env(conf: &str, vars: &[(&str, &str)]) -> String {
 }
 
 fn wait_for_port(port: u16, timeout: Duration) {
-    let start = Instant::now();
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
-        if start.elapsed() >= timeout {
-            panic!("nginx did not listen on 127.0.0.1:{port} within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    support::nginx::wait_for_worker_http(port, timeout);
 }
 
 fn http_get(port: u16, path: &str) -> (u16, String) {

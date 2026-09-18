@@ -7,8 +7,12 @@
 use std::sync::Arc;
 
 use pd_host_function::pd_host_function;
+use vm::HostModuleDescriptor;
 use vm::resource::HostResource;
-use vm::{ResourceRef, ResourceTypeKey, Value, Vm, VmError, VmMap};
+use vm::{
+    HostNamedStruct, HostResourceType, HostStructField, HostTypeSchema, ResourceRef,
+    ResourceTypeKey, Value, Vm, VmError, VmMap,
+};
 
 use super::{CallOutcome, IntoHostCallOutcome};
 use super::super::VmResult;
@@ -23,6 +27,11 @@ impl HostResource for SharedDictHandle {
     {
         Some(shared_dict::shared_dict_resource_key())
     }
+}
+
+impl HostResourceType for SharedDictHandle {
+    const KEY: &'static str = "ngx.shared.dict";
+    const DESCRIPTION: &'static str = "Shared dictionary zone handle";
 }
 
 fn ret<T: IntoHostCallOutcome>(value: T) -> VmResult<CallOutcome> {
@@ -64,6 +73,31 @@ impl From<shared_dict::GetResult> for SharedGetResult {
     }
 }
 
+fn optional_string_schema() -> HostTypeSchema {
+    HostTypeSchema::Optional(Box::new(HostTypeSchema::String))
+}
+
+fn optional_unknown_schema() -> HostTypeSchema {
+    HostTypeSchema::Optional(Box::new(HostTypeSchema::Unknown))
+}
+
+fn optional_number_schema() -> HostTypeSchema {
+    HostTypeSchema::Optional(Box::new(HostTypeSchema::Number))
+}
+
+impl HostNamedStruct for SharedGetResult {
+    const NAME: &'static str = "SharedGetResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new("value", optional_unknown_schema()),
+            HostStructField::new("flags", HostTypeSchema::Int),
+            HostStructField::new("stale", HostTypeSchema::Bool),
+            HostStructField::new("error", optional_string_schema()),
+        ]
+    }
+}
+
 impl IntoHostCallOutcome for SharedGetResult {
     fn into_host_call_outcome(self) -> CallOutcome {
         struct_outcome([
@@ -92,6 +126,18 @@ impl From<shared_dict::StoreResult> for SharedStoreResult {
     }
 }
 
+impl HostNamedStruct for SharedStoreResult {
+    const NAME: &'static str = "SharedStoreResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new("ok", HostTypeSchema::Bool),
+            HostStructField::new("error", optional_string_schema()),
+            HostStructField::new("forcible", HostTypeSchema::Bool),
+        ]
+    }
+}
+
 impl IntoHostCallOutcome for SharedStoreResult {
     fn into_host_call_outcome(self) -> CallOutcome {
         struct_outcome([
@@ -114,6 +160,17 @@ impl From<shared_dict::StoreResult> for SharedSafeStoreResult {
             ok: result.ok,
             error: result.error,
         }
+    }
+}
+
+impl HostNamedStruct for SharedSafeStoreResult {
+    const NAME: &'static str = "SharedSafeStoreResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new("ok", HostTypeSchema::Bool),
+            HostStructField::new("error", optional_string_schema()),
+        ]
     }
 }
 
@@ -140,6 +197,18 @@ impl From<shared_dict::StoreResult> for SharedIncrResult {
             error: result.error,
             forcible: result.forcible,
         }
+    }
+}
+
+impl HostNamedStruct for SharedIncrResult {
+    const NAME: &'static str = "SharedIncrResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new("value", optional_number_schema()),
+            HostStructField::new("error", optional_string_schema()),
+            HostStructField::new("forcible", HostTypeSchema::Bool),
+        ]
     }
 }
 
@@ -174,6 +243,17 @@ impl From<shared_dict::StoreResult> for SharedNumberResult {
             value: dict_value_to_vm(result.value),
             error: result.error,
         }
+    }
+}
+
+impl HostNamedStruct for SharedNumberResult {
+    const NAME: &'static str = "SharedNumberResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new("value", optional_number_schema()),
+            HostStructField::new("error", optional_string_schema()),
+        ]
     }
 }
 
@@ -285,7 +365,10 @@ fn zone_op<T>(
 }
 
 /// Fetch a typed handle for the named `rss_shared_dict` zone.
-#[pd_host_function(name = "ngx::shared::dict")]
+///
+/// The guest catalog type is `Resource(ngx.shared.dict)`; the constructor still
+/// returns the raw guest token because `push_resource` requires `&mut Vm`.
+#[pd_host_function(name = "ngx::shared::dict", contract = crate::host::catalog::ngx_shared_dict_contract)]
 fn dict(vm: &mut Vm, name: String) -> VmResult<CallOutcome> {
     let handle = shared_dict::open_handle(&name).map_err(|err| {
         if err == "not found" {
@@ -302,7 +385,7 @@ fn dict(vm: &mut Vm, name: String) -> VmResult<CallOutcome> {
 }
 
 /// `value, flags = dict:get(key)` as `{ value, flags, stale, error }`.
-#[pd_host_function(name = "ngx::shared::get")]
+#[pd_host_function(name = "ngx::shared::get", contract = crate::host::catalog::ngx_shared_get_contract)]
 fn get(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     let result = zone_op(&dict, |name| shared_dict::dict_get(name, key, false))?;
@@ -310,7 +393,7 @@ fn get(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOut
 }
 
 /// `value, flags, stale = dict:get_stale(key)`.
-#[pd_host_function(name = "ngx::shared::get_stale")]
+#[pd_host_function(name = "ngx::shared::get_stale", contract = crate::host::catalog::ngx_shared_get_stale_contract)]
 fn get_stale(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     let result = zone_op(&dict, |name| shared_dict::dict_get(name, key, true))?;
@@ -348,7 +431,7 @@ fn store_host(
 }
 
 /// `success, err, forcible = dict:set(key, value, exptime?, flags?)`.
-#[pd_host_function(name = "ngx::shared::set")]
+#[pd_host_function(name = "ngx::shared::set", contract = crate::host::catalog::ngx_shared_set_contract)]
 fn set(
     dict: ResourceRef<'_, SharedDictHandle>,
     key: String,
@@ -367,7 +450,7 @@ fn set(
 }
 
 /// `success, err = dict:safe_set(...)` without LRU eviction.
-#[pd_host_function(name = "ngx::shared::safe_set")]
+#[pd_host_function(name = "ngx::shared::safe_set", contract = crate::host::catalog::ngx_shared_safe_set_contract)]
 fn safe_set(
     dict: ResourceRef<'_, SharedDictHandle>,
     key: String,
@@ -386,7 +469,7 @@ fn safe_set(
 }
 
 /// `success, err, forcible = dict:add(...)` if the key is absent.
-#[pd_host_function(name = "ngx::shared::add")]
+#[pd_host_function(name = "ngx::shared::add", contract = crate::host::catalog::ngx_shared_add_contract)]
 fn add(
     dict: ResourceRef<'_, SharedDictHandle>,
     key: String,
@@ -405,7 +488,7 @@ fn add(
 }
 
 /// `success, err = dict:safe_add(...)` without LRU eviction.
-#[pd_host_function(name = "ngx::shared::safe_add")]
+#[pd_host_function(name = "ngx::shared::safe_add", contract = crate::host::catalog::ngx_shared_safe_add_contract)]
 fn safe_add(
     dict: ResourceRef<'_, SharedDictHandle>,
     key: String,
@@ -424,7 +507,7 @@ fn safe_add(
 }
 
 /// `success, err, forcible = dict:replace(...)` if the key exists.
-#[pd_host_function(name = "ngx::shared::replace")]
+#[pd_host_function(name = "ngx::shared::replace", contract = crate::host::catalog::ngx_shared_replace_contract)]
 fn replace(
     dict: ResourceRef<'_, SharedDictHandle>,
     key: String,
@@ -443,7 +526,7 @@ fn replace(
 }
 
 /// Unconditionally removes `key`.
-#[pd_host_function(name = "ngx::shared::delete")]
+#[pd_host_function(name = "ngx::shared::delete", contract = crate::host::catalog::ngx_shared_delete_contract)]
 fn delete(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     zone_op(&dict, |name| shared_dict::dict_delete(name, key))?;
@@ -451,7 +534,7 @@ fn delete(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<Call
 }
 
 /// `newval, err, forcible = dict:incr(key, value, init?, init_ttl?)`.
-#[pd_host_function(name = "ngx::shared::incr")]
+#[pd_host_function(name = "ngx::shared::incr", contract = crate::host::catalog::ngx_shared_incr_contract)]
 fn incr(
     dict: ResourceRef<'_, SharedDictHandle>,
     key: String,
@@ -478,7 +561,7 @@ fn incr(
 }
 
 /// Remaining TTL in seconds, or `not found`.
-#[pd_host_function(name = "ngx::shared::ttl")]
+#[pd_host_function(name = "ngx::shared::ttl", contract = crate::host::catalog::ngx_shared_ttl_contract)]
 fn ttl(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     let result = zone_op(&dict, |name| shared_dict::dict_ttl(name, key))?;
@@ -500,7 +583,7 @@ fn ttl(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOut
 }
 
 /// Updates the remaining TTL for an existing key.
-#[pd_host_function(name = "ngx::shared::expire")]
+#[pd_host_function(name = "ngx::shared::expire", contract = crate::host::catalog::ngx_shared_expire_contract)]
 fn expire(
     dict: ResourceRef<'_, SharedDictHandle>,
     key: String,
@@ -515,14 +598,14 @@ fn expire(
 }
 
 /// Zone capacity in bytes.
-#[pd_host_function(name = "ngx::shared::capacity")]
+#[pd_host_function(name = "ngx::shared::capacity", contract = crate::host::catalog::ngx_shared_capacity_contract)]
 fn capacity(dict: ResourceRef<'_, SharedDictHandle>) -> VmResult<CallOutcome> {
     let bytes = zone_op(&dict, shared_dict::dict_capacity)?;
     ret(bytes as i64)
 }
 
 /// Approximate free space in bytes.
-#[pd_host_function(name = "ngx::shared::free_space")]
+#[pd_host_function(name = "ngx::shared::free_space", contract = crate::host::catalog::ngx_shared_free_space_contract)]
 fn free_space(dict: ResourceRef<'_, SharedDictHandle>) -> VmResult<CallOutcome> {
     let bytes = zone_op(&dict, shared_dict::dict_free_space)?;
     ret(bytes as i64)
@@ -583,7 +666,7 @@ fn list_push_host(
 }
 
 /// `len, err = dict:lpush(key, value)` — prepend a list item.
-#[pd_host_function(name = "ngx::shared::lpush")]
+#[pd_host_function(name = "ngx::shared::lpush", contract = crate::host::catalog::ngx_shared_lpush_contract)]
 fn lpush(
     dict: ResourceRef<'_, SharedDictHandle>,
     key: String,
@@ -593,7 +676,7 @@ fn lpush(
 }
 
 /// `len, err = dict:rpush(key, value)` — append a list item.
-#[pd_host_function(name = "ngx::shared::rpush")]
+#[pd_host_function(name = "ngx::shared::rpush", contract = crate::host::catalog::ngx_shared_rpush_contract)]
 fn rpush(
     dict: ResourceRef<'_, SharedDictHandle>,
     key: String,
@@ -603,7 +686,7 @@ fn rpush(
 }
 
 /// `value, err = dict:lpop(key)`.
-#[pd_host_function(name = "ngx::shared::lpop")]
+#[pd_host_function(name = "ngx::shared::lpop", contract = crate::host::catalog::ngx_shared_lpop_contract)]
 fn lpop(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     let result = zone_op(&dict, |name| shared_dict::dict_lpop(name, key))?;
@@ -611,7 +694,7 @@ fn lpop(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOu
 }
 
 /// `value, err = dict:rpop(key)`.
-#[pd_host_function(name = "ngx::shared::rpop")]
+#[pd_host_function(name = "ngx::shared::rpop", contract = crate::host::catalog::ngx_shared_rpop_contract)]
 fn rpop(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     let result = zone_op(&dict, |name| shared_dict::dict_rpop(name, key))?;
@@ -619,7 +702,7 @@ fn rpop(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOu
 }
 
 /// `len, err = dict:llen(key)`. Missing keys are length 0.
-#[pd_host_function(name = "ngx::shared::llen")]
+#[pd_host_function(name = "ngx::shared::llen", contract = crate::host::catalog::ngx_shared_llen_contract)]
 fn llen(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
     let result = zone_op(&dict, |name| shared_dict::dict_llen(name, key))?;
@@ -627,14 +710,14 @@ fn llen(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOu
 }
 
 /// Mark up to `MAX_FLUSH_BATCH` keys expired (OpenResty sets `expires=1`).
-#[pd_host_function(name = "ngx::shared::flush_all")]
+#[pd_host_function(name = "ngx::shared::flush_all", contract = crate::host::catalog::ngx_shared_flush_all_contract)]
 fn flush_all(dict: ResourceRef<'_, SharedDictHandle>) -> VmResult<CallOutcome> {
     zone_op(&dict, shared_dict::dict_flush_all)?;
     ret(())
 }
 
 /// Delete up to `max` expired keys. `null`/`0` still obey the project batch cap.
-#[pd_host_function(name = "ngx::shared::flush_expired")]
+#[pd_host_function(name = "ngx::shared::flush_expired", contract = crate::host::catalog::ngx_shared_flush_expired_contract)]
 fn flush_expired(
     dict: ResourceRef<'_, SharedDictHandle>,
     max: Value,
@@ -645,7 +728,7 @@ fn flush_expired(
 }
 
 /// Enumerate keys oldest-first. `null`/`0` still obey `MAX_GET_KEYS`.
-#[pd_host_function(name = "ngx::shared::get_keys")]
+#[pd_host_function(name = "ngx::shared::get_keys", contract = crate::host::catalog::ngx_shared_get_keys_contract)]
 fn get_keys(dict: ResourceRef<'_, SharedDictHandle>, max: Value) -> VmResult<CallOutcome> {
     let max = optional_max(&max)?;
     let keys = zone_op(&dict, |name| shared_dict::dict_get_keys(name, max))?;
@@ -654,6 +737,43 @@ fn get_keys(dict: ResourceRef<'_, SharedDictHandle>, max: Value) -> VmResult<Cal
         .map(|key| Value::string(String::from_utf8_lossy(&key).into_owned()))
         .collect();
     ret(Value::array(values))
+}
+
+fn shared_dict_resource() -> vm::HostResourceTypeMeta {
+    vm::HostResourceTypeMeta::of::<crate::shared_dict::SharedDictHandle>()
+}
+
+const SHARED_DICT_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+        dict_descriptor,
+        get_descriptor,
+        get_stale_descriptor,
+        set_descriptor,
+        safe_set_descriptor,
+        add_descriptor,
+        safe_add_descriptor,
+        replace_descriptor,
+        delete_descriptor,
+        incr_descriptor,
+        ttl_descriptor,
+        expire_descriptor,
+        capacity_descriptor,
+        free_space_descriptor,
+        lpush_descriptor,
+        rpush_descriptor,
+        lpop_descriptor,
+        rpop_descriptor,
+        llen_descriptor,
+        flush_all_descriptor,
+        flush_expired_descriptor,
+        get_keys_descriptor,
+];
+
+pub fn shared_dict_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.shared",
+        functions: SHARED_DICT_HOST_MODULE_FUNCTIONS,
+        resources: &[shared_dict_resource],
+    }
 }
 
 #[cfg(test)]

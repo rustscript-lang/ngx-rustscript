@@ -506,16 +506,7 @@ fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
 }
 
 fn wait_for_port(port: u16, timeout: Duration) {
-    let start = Instant::now();
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
-        if start.elapsed() > timeout {
-            panic!("nginx did not listen on {port} within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    support::nginx::wait_for_worker_http(port, timeout);
 }
 
 fn http_exchange(port: u16, request: &str) -> (u16, String) {
@@ -698,10 +689,6 @@ if file == null {
         &post,
         r#"
 use ngx;
-struct RequestArgsResult {
-    args: map,
-    truncated: bool
-}
 ngx::req::read_body();
 let parsed: RequestArgsResult = ngx::req::get_post_args(null);
 ngx::say(ngx::encode_args(parsed.args));

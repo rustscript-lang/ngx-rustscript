@@ -5,6 +5,7 @@ use nginx_sys::{
 };
 use ngx::http::Request;
 use pd_host_function::pd_host_function;
+use vm::HostModuleDescriptor;
 use vm::{Value, VmError};
 
 use super::super::VmResult;
@@ -62,7 +63,7 @@ fn hash_strlow(dst: &mut [u8], src: &[u8]) -> ngx_uint_t {
 }
 
 /// Read an NGINX variable. Missing/`not_found` is `null`; empty is `""`.
-#[pd_host_function(name = "ngx::var::get")]
+#[pd_host_function(name = "ngx::var::get", contract = crate::host::catalog::ngx_var_get_contract)]
 pub fn get(name: &str) -> VmResult<CallOutcome> {
     if name.is_empty() {
         return Err(VmError::HostError(
@@ -114,7 +115,7 @@ pub fn get(name: &str) -> VmResult<CallOutcome> {
 }
 
 /// Set an NGINX variable. `null` clears (`not_found`); empty is a present empty string.
-#[pd_host_function(name = "ngx::var::set")]
+#[pd_host_function(name = "ngx::var::set", contract = crate::host::catalog::ngx_var_set_contract)]
 pub fn set(name: String, value: &Value) -> VmResult<CallOutcome> {
     if name.is_empty() {
         return Err(VmError::HostError(
@@ -179,4 +180,18 @@ pub fn set(name: String, value: &Value) -> VmResult<CallOutcome> {
             _ => Err(VmError::HostError("variable set failed".into())),
         }
     })
+}
+
+
+const VARIABLES_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+        get_descriptor,
+        set_descriptor,
+];
+
+pub fn variables_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.var",
+        functions: VARIABLES_HOST_MODULE_FUNCTIONS,
+        resources: &[],
+    }
 }

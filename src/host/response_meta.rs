@@ -8,6 +8,7 @@ use nginx_sys::{
 };
 use ngx::http::Request;
 use pd_host_function::pd_host_function;
+use vm::HostModuleDescriptor;
 use vm::{Value, VmError, VmMap};
 
 use super::super::VmResult;
@@ -566,7 +567,7 @@ fn allowed_redirect_status(status: i64) -> bool {
 
 /// Current response status. Prefers `err_status`, then `headers_out.status`,
 /// then HTTP/0.9 maps to `9`. Unset HTTP/1.x is `0`.
-#[pd_host_function(name = "ngx::status::get")]
+#[pd_host_function(name = "ngx::status::get", contract = crate::host::catalog::ngx_status_get_contract)]
 pub fn status_get() -> VmResult<CallOutcome> {
     with_response_read(|request| {
         let status = unsafe { ngx_rustscript_c_resp_status(request.as_ref()) };
@@ -575,7 +576,7 @@ pub fn status_get() -> VmResult<CallOutcome> {
 }
 
 /// Set `headers_out.status`. Rejected after headers are sent.
-#[pd_host_function(name = "ngx::status::set")]
+#[pd_host_function(name = "ngx::status::set", contract = crate::host::catalog::ngx_status_set_contract)]
 pub fn status_set(status: i64) -> VmResult<CallOutcome> {
     if !(0..=999).contains(&status) {
         return Err(VmError::HostError("invalid response status".into()));
@@ -589,7 +590,7 @@ pub fn status_set(status: i64) -> VmResult<CallOutcome> {
 }
 
 /// Read one response header. Missing is `null`; duplicates are an array.
-#[pd_host_function(name = "ngx::header::get")]
+#[pd_host_function(name = "ngx::header::get", contract = crate::host::catalog::ngx_header_get_contract)]
 pub fn header_get(name: String) -> VmResult<CallOutcome> {
     validate_header_name(&name)?;
     with_response_read(|request| {
@@ -602,7 +603,7 @@ pub fn header_get(name: String) -> VmResult<CallOutcome> {
 }
 
 /// Set or replace a response header. `null` clears.
-#[pd_host_function(name = "ngx::header::set")]
+#[pd_host_function(name = "ngx::header::set", contract = crate::host::catalog::ngx_header_set_contract)]
 pub fn header_set(name: String, value: &Value) -> VmResult<CallOutcome> {
     let values = parse_header_values(value)?;
     with_response_write(|request| {
@@ -612,7 +613,7 @@ pub fn header_set(name: String, value: &Value) -> VmResult<CallOutcome> {
 }
 
 /// Atomically replace every response header from a map.
-#[pd_host_function(name = "ngx::header::set_all")]
+#[pd_host_function(name = "ngx::header::set_all", contract = crate::host::catalog::ngx_header_set_all_contract)]
 pub fn header_set_all(headers: &VmMap) -> VmResult<CallOutcome> {
     let mut prepared = Vec::new();
     for (key, value) in headers.iter() {
@@ -668,7 +669,7 @@ pub fn header_set_all(headers: &VmMap) -> VmResult<CallOutcome> {
 }
 
 /// Clear every response header and dedicated special fields.
-#[pd_host_function(name = "ngx::header::clear")]
+#[pd_host_function(name = "ngx::header::clear", contract = crate::host::catalog::ngx_header_clear_contract)]
 pub fn header_clear() -> VmResult<CallOutcome> {
     with_response_write(|request| {
         let raw = request.as_mut();
@@ -680,7 +681,7 @@ pub fn header_clear() -> VmResult<CallOutcome> {
 }
 
 /// Stop the VM and finalize with `status`. First disposition wins.
-#[pd_host_function(name = "ngx::exit")]
+#[pd_host_function(name = "ngx::exit", contract = crate::host::catalog::ngx_exit_contract)]
 pub fn exit(status: i64) -> VmResult<CallOutcome> {
     if !allowed_exit_status(status) {
         return Err(VmError::HostError(format!("invalid exit status {status}")));
@@ -689,7 +690,7 @@ pub fn exit(status: i64) -> VmResult<CallOutcome> {
 }
 
 /// Write Location and stop the VM with an external redirect.
-#[pd_host_function(name = "ngx::redirect")]
+#[pd_host_function(name = "ngx::redirect", contract = crate::host::catalog::ngx_redirect_contract)]
 pub fn redirect(uri: String, status: &Value) -> VmResult<CallOutcome> {
     if uri.is_empty() {
         return Err(VmError::HostError("redirect uri cannot be empty".into()));
@@ -733,4 +734,24 @@ pub fn redirect(uri: String, status: &Value) -> VmResult<CallOutcome> {
     })
     .map_err(scope_err)??;
     Err(control_stop_error())
+}
+
+
+const RESPONSE_META_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+        status_get_descriptor,
+        status_set_descriptor,
+        header_get_descriptor,
+        header_set_descriptor,
+        header_set_all_descriptor,
+        header_clear_descriptor,
+        exit_descriptor,
+        redirect_descriptor,
+];
+
+pub fn response_meta_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.resp",
+        functions: RESPONSE_META_HOST_MODULE_FUNCTIONS,
+        resources: &[],
+    }
 }

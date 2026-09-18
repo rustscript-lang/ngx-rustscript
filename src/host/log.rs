@@ -3,6 +3,7 @@
 use nginx_sys::{ngx_cycle, NGX_LOG_DEBUG, NGX_LOG_STDERR};
 use ngx::http::Request;
 use pd_host_function::pd_host_function;
+use vm::HostModuleDescriptor;
 use vm::VmError;
 
 use super::super::VmResult;
@@ -54,7 +55,7 @@ fn cycle_log() -> Option<*mut nginx_sys::ngx_log_t> {
 }
 
 /// OpenResty `ngx.log(level, message)`.
-#[pd_host_function(name = "ngx::log")]
+#[pd_host_function(name = "ngx::log", contract = crate::host::catalog::ngx_log_contract)]
 pub fn log(level: i64, message: &str) -> VmResult<CallOutcome> {
     if level < NGX_LOG_STDERR as i64 || level > NGX_LOG_DEBUG as i64 {
         return Err(VmError::HostError(format!(
@@ -77,4 +78,17 @@ pub fn log(level: i64, message: &str) -> VmResult<CallOutcome> {
         "ngx-rustscript: {message}"
     );
     ret(())
+}
+
+
+const LOG_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+        log_descriptor,
+];
+
+pub fn log_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.log",
+        functions: LOG_HOST_MODULE_FUNCTIONS,
+        resources: &[],
+    }
 }

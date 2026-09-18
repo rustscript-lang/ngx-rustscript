@@ -192,16 +192,7 @@ fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
 }
 
 fn wait_for_port(port: u16, timeout: Duration) {
-    let start = Instant::now();
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
-        if start.elapsed() >= timeout {
-            panic!("nginx did not listen on 127.0.0.1:{port} within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    support::nginx::wait_for_worker_http(port, timeout);
 }
 
 fn http_exchange(port: u16, request: &str) -> (u16, String) {
@@ -455,8 +446,8 @@ fn assert_ok_200(label: &str, status: u16, response: &str, secrets: &[String]) {
 }
 
 #[test]
-fn production_host_count_stays_195() {
-    assert_eq!(production_runtime_host_names().len(), 195);
+fn production_host_count_stays_199() {
+    assert_eq!(production_runtime_host_names().len(), 199);
 }
 
 #[test]

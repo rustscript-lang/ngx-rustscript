@@ -23,6 +23,13 @@ fn compile(source: &str) -> Arc<Program> {
     compile_rss_source(source).unwrap_or_else(|err| panic!("compile failed: {err}\n{source}"))
 }
 
+fn assert_named_return(schema: &vm::HostFunctionSchema, expected: &str) {
+    match &schema.return_type {
+        HostTypeSchema::Named { name, .. } => assert_eq!(name, expected),
+        other => panic!("expected named {expected}, got {other:?}"),
+    }
+}
+
 fn eval(source: &str) -> Value {
     reset_process_zones();
     install_process_zone("dogs", 64 * 1024);
@@ -143,7 +150,7 @@ fn shared_dict_hosts_are_catalogued() {
                 assert_eq!(schema.params[0].passing, HostParamPassing::Borrow);
                 assert_eq!(schema.params[0].ty, HostTypeSchema::Resource(key.clone()));
                 assert_eq!(schema.params[1].ty, HostTypeSchema::String);
-                assert_eq!(schema.return_type, HostTypeSchema::Unknown);
+                assert_named_return(schema, "SharedGetResult");
             }
             NGX_SHARED_SET_NAME
             | NGX_SHARED_SAFE_SET_NAME
@@ -160,7 +167,12 @@ fn shared_dict_hosts_are_catalogued() {
                 assert_eq!(schema.params[2].ty, HostTypeSchema::Unknown);
                 assert_eq!(schema.params[3].ty, HostTypeSchema::Unknown);
                 assert_eq!(schema.params[4].ty, HostTypeSchema::Unknown);
-                assert_eq!(schema.return_type, HostTypeSchema::Unknown);
+                match *name {
+                    NGX_SHARED_SAFE_SET_NAME | NGX_SHARED_SAFE_ADD_NAME => {
+                        assert_named_return(schema, "SharedSafeStoreResult");
+                    }
+                    _ => assert_named_return(schema, "SharedStoreResult"),
+                }
             }
             NGX_SHARED_DELETE_NAME => {
                 assert!(host_allowed_in_phase(name, NgxPhase::Init));
@@ -176,7 +188,7 @@ fn shared_dict_hosts_are_catalogued() {
                 assert_eq!(schema.params.len(), 5);
                 assert_eq!(schema.params[0].passing, HostParamPassing::Borrow);
                 assert_eq!(schema.params[1].ty, HostTypeSchema::String);
-                assert_eq!(schema.return_type, HostTypeSchema::Unknown);
+                assert_named_return(schema, "SharedIncrResult");
             }
             NGX_SHARED_TTL_NAME => {
                 assert!(host_allowed_in_phase(name, NgxPhase::Init));
@@ -184,7 +196,7 @@ fn shared_dict_hosts_are_catalogued() {
                 assert_eq!(schema.params.len(), 2);
                 assert_eq!(schema.params[0].passing, HostParamPassing::Borrow);
                 assert_eq!(schema.params[1].ty, HostTypeSchema::String);
-                assert_eq!(schema.return_type, HostTypeSchema::Unknown);
+                assert_named_return(schema, "SharedNumberResult");
             }
             NGX_SHARED_EXPIRE_NAME => {
                 assert!(host_allowed_in_phase(name, NgxPhase::Init));
@@ -192,7 +204,7 @@ fn shared_dict_hosts_are_catalogued() {
                 assert_eq!(schema.params.len(), 3);
                 assert_eq!(schema.params[0].passing, HostParamPassing::Borrow);
                 assert_eq!(schema.params[1].ty, HostTypeSchema::String);
-                assert_eq!(schema.return_type, HostTypeSchema::Unknown);
+                assert_named_return(schema, "SharedSafeStoreResult");
             }
             NGX_SHARED_CAPACITY_NAME | NGX_SHARED_FREE_SPACE_NAME => {
                 assert!(host_allowed_in_phase(name, NgxPhase::Init));

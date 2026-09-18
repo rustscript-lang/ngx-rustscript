@@ -89,7 +89,51 @@ def directory_payload(path: Path) -> dict[str, bytes]:
     }
 
 
+FROZEN_RUSTSCRIPT_REV = "b1d6cffede77f49410bf63525f30b9a46b02dc01"
+STALE_RUSTSCRIPT_REV = "f5f71ebc2f38e276c35f2aebaf63f4e2780efe99"
+FULL_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def require_full_git_rev(rev: str, label: str) -> str:
+    if not FULL_GIT_SHA.fullmatch(rev):
+        raise AssertionError(f"{label} must be a full 40-character git SHA, got {rev!r}")
+    if rev == STALE_RUSTSCRIPT_REV:
+        raise AssertionError(f"{label} still pins the stale core revision {rev}")
+    if len(rev) != 40:
+        raise AssertionError(f"{label} rejected a non-full pin: {rev!r}")
+    return rev
+
+
 class ReleasePackagingTests(unittest.TestCase):
+    def test_rustscript_core_pin_is_frozen_full_sha(self) -> None:
+        cargo_toml = (ROOT / "Cargo.toml").read_text()
+        metadata = tomllib.loads(cargo_toml)["package"]["metadata"]["ngx-rustscript"]
+        deps = tomllib.loads(cargo_toml)["dependencies"]
+        lock = (ROOT / "Cargo.lock").read_text()
+
+        metadata_rev = require_full_git_rev(metadata["rustscript-rev"], "package.metadata.ngx-rustscript.rustscript-rev")
+        host_rev = require_full_git_rev(deps["pd-host-function"]["rev"], "pd-host-function.rev")
+        vm_rev = require_full_git_rev(deps["vm"]["rev"], "pd-vm.rev")
+        self.assertEqual(metadata_rev, FROZEN_RUSTSCRIPT_REV)
+        self.assertEqual(host_rev, FROZEN_RUSTSCRIPT_REV)
+        self.assertEqual(vm_rev, FROZEN_RUSTSCRIPT_REV)
+        self.assertEqual(deps["vm"]["package"], "pd-vm")
+
+        expected_source = (
+            f"git+https://github.com/rustscript-lang/rustscript?rev={FROZEN_RUSTSCRIPT_REV}"
+            f"#{FROZEN_RUSTSCRIPT_REV}"
+        )
+        self.assertIn(f'name = "pd-vm"', lock)
+        self.assertIn(f'name = "pd-host-function"', lock)
+        self.assertGreaterEqual(lock.count(expected_source), 2)
+        self.assertNotIn(STALE_RUSTSCRIPT_REV, cargo_toml)
+        self.assertNotIn(STALE_RUSTSCRIPT_REV, lock)
+
+        with self.assertRaises(AssertionError):
+            require_full_git_rev("b1d6cff", "abbreviated")
+        with self.assertRaises(AssertionError):
+            require_full_git_rev(STALE_RUSTSCRIPT_REV, "stale")
+
     def test_workflows_parse_and_cover_ci_cd_contract(self) -> None:
         self.assertTrue(CI_WORKFLOW.is_file())
         self.assertTrue(RELEASE_WORKFLOW.is_file())

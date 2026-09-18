@@ -120,6 +120,11 @@ impl ClientCertInner {
     }
 }
 
+impl vm::HostResourceType for TrustedStore {
+    const KEY: &'static str = NGX_SOCKET_TLS_TRUSTEDSTORE_RESOURCE_KEY;
+    const DESCRIPTION: &'static str = "VM-owned TLS trusted-store (parsed rustls RootCertStore)";
+}
+
 impl HostResource for TrustedStore {
     fn resource_type_key() -> Option<ResourceTypeKey>
     where
@@ -139,6 +144,11 @@ impl HostResource for TrustedStore {
         self.inner.generation.fetch_add(1, Ordering::SeqCst);
         Ok(CloseProgress::Ready)
     }
+}
+
+impl vm::HostResourceType for ClientCert {
+    const KEY: &'static str = NGX_SOCKET_TLS_CLIENTCERT_RESOURCE_KEY;
+    const DESCRIPTION: &'static str = "VM-owned TLS client certificate and private key";
 }
 
 impl HostResource for ClientCert {

@@ -22,6 +22,13 @@ fn compile(source: &str) -> Arc<Program> {
     compile_rss_source(source).unwrap_or_else(|err| panic!("compile failed: {err}\n{source}"))
 }
 
+fn assert_named_return(schema: &vm::HostFunctionSchema, expected: &str) {
+    match &schema.return_type {
+        HostTypeSchema::Named { name, .. } => assert_eq!(name, expected),
+        other => panic!("expected named {expected}, got {other:?}"),
+    }
+}
+
 fn eval(source: &str) -> Value {
     reset_process_zones();
     install_process_zone("dogs", 64 * 1024);
@@ -88,7 +95,7 @@ const LIST_HOSTS: &[&str] = &[
 fn list_and_maintenance_hosts_are_catalogued() {
     assert_eq!(
         production_runtime_host_names().len(),
-        195,
+        199,
         "production host inventory must stay in sync"
     );
     let key = ResourceTypeKey::new("ngx.shared.dict").unwrap();
@@ -113,12 +120,17 @@ fn list_and_maintenance_hosts_are_catalogued() {
                 assert_eq!(schema.params.len(), 3);
                 assert_eq!(schema.params[1].ty, HostTypeSchema::String);
                 assert_eq!(schema.params[2].ty, HostTypeSchema::Unknown);
-                assert_eq!(schema.return_type, HostTypeSchema::Unknown);
+                assert_named_return(schema, "SharedNumberResult");
             }
-            NGX_SHARED_LPOP_NAME | NGX_SHARED_RPOP_NAME | NGX_SHARED_LLEN_NAME => {
+            NGX_SHARED_LPOP_NAME | NGX_SHARED_RPOP_NAME => {
                 assert_eq!(schema.params.len(), 2);
                 assert_eq!(schema.params[1].ty, HostTypeSchema::String);
-                assert_eq!(schema.return_type, HostTypeSchema::Unknown);
+                assert_named_return(schema, "SharedGetResult");
+            }
+            NGX_SHARED_LLEN_NAME => {
+                assert_eq!(schema.params.len(), 2);
+                assert_eq!(schema.params[1].ty, HostTypeSchema::String);
+                assert_named_return(schema, "SharedNumberResult");
             }
             NGX_SHARED_FLUSH_ALL_NAME => {
                 assert_eq!(schema.params.len(), 1);

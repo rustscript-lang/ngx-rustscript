@@ -330,7 +330,7 @@ fn production_host_count_includes_tcp_pool_and_tls_hosts() {
     let runtime: BTreeSet<&str> = production_runtime_host_names().iter().copied().collect();
     assert_eq!(
         production_runtime_host_names().len(),
-        195,
+        199,
         "production host inventory must stay in sync"
     );
     assert_eq!(ngx_host_catalog().functions().len(), 199);

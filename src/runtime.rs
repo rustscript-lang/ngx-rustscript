@@ -36,6 +36,7 @@ thread_local! {
 pub enum RuntimeError {
     Notify(NotifyError),
     RuntimeBuild(String),
+    HostRegistry(String),
     AlreadyStarted,
 }
 
@@ -44,6 +45,7 @@ impl fmt::Display for RuntimeError {
         match self {
             Self::Notify(err) => write!(f, "{err}"),
             Self::RuntimeBuild(msg) => write!(f, "tokio runtime build failed: {msg}"),
+            Self::HostRegistry(msg) => write!(f, "host registry: {msg}"),
             Self::AlreadyStarted => write!(f, "worker runtime is already started"),
         }
     }
@@ -78,6 +80,7 @@ impl WorkerRuntime {
     }
 
     pub fn start_with_capacity(cap: usize) -> Result<Self, RuntimeError> {
+        crate::host::ngx_host_registry().map_err(RuntimeError::HostRegistry)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_time()
@@ -259,6 +262,11 @@ pub unsafe fn init_worker(cycle: *mut ngx_cycle_t) -> Result<(), RuntimeError> {
     if worker_is_active() {
         return Err(RuntimeError::AlreadyStarted);
     }
+    // Build the restricted catalog registry before the worker accepts
+    // connections. First `bind_vm_cached` is cheap once the process-wide
+    // table exists; constructing it on the first request would block the
+    // event loop for the entire install.
+    crate::host::ngx_host_registry().map_err(RuntimeError::HostRegistry)?;
     let mut worker = WorkerRuntime::start()?;
     unsafe { worker.register_nginx(cycle)? };
     if !cycle.is_null() {

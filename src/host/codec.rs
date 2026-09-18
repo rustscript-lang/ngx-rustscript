@@ -5,6 +5,7 @@
 // `optional<T>` as compatible with `T` or `null` at a host call site.
 
 use pd_host_function::pd_host_function;
+use vm::{HostModuleDescriptor, HostNamedStruct, HostStructField, HostTypeSchema};
 use vm::{Value, VmError, VmMap};
 
 use super::{CallOutcome, IntoHostCallOutcome};
@@ -24,6 +25,20 @@ fn ret<T: IntoHostCallOutcome>(value: T) -> VmResult<CallOutcome> {
 struct DecodedArgsResult {
     args: VmMap,
     truncated: bool,
+}
+
+impl HostNamedStruct for DecodedArgsResult {
+    const NAME: &'static str = "DecodedArgsResult";
+
+    fn host_struct_fields() -> Vec<HostStructField> {
+        vec![
+            HostStructField::new(
+                "args",
+                HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+            ),
+            HostStructField::new("truncated", HostTypeSchema::Bool),
+        ]
+    }
 }
 
 impl IntoHostCallOutcome for DecodedArgsResult {
@@ -214,7 +229,7 @@ fn hex_nibble(byte: u8) -> u8 {
 /// Escapes `uri` using OpenResty `ngx.escape_uri`.
 ///
 /// `escape_type` is `null` (default component / type 2) or an integer 0..=8.
-#[pd_host_function(name = "ngx::escape_uri")]
+#[pd_host_function(name = "ngx::escape_uri", contract = crate::host::catalog::ngx_escape_uri_contract)]
 pub fn escape_uri(uri: &str, escape_type: &Value) -> VmResult<CallOutcome> {
     limit_input("ngx::escape_uri", uri.len())?;
     let escape_type = optional_int(escape_type, "ngx::escape_uri type")?.unwrap_or(2);
@@ -223,7 +238,7 @@ pub fn escape_uri(uri: &str, escape_type: &Value) -> VmResult<CallOutcome> {
 }
 
 /// Unescapes URI text. `+` becomes space; invalid `%` sequences are left as-is.
-#[pd_host_function(name = "ngx::unescape_uri")]
+#[pd_host_function(name = "ngx::unescape_uri", contract = crate::host::catalog::ngx_unescape_uri_contract)]
 pub fn unescape_uri(uri: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::unescape_uri", uri.len())?;
     ret(bytes_as_string(unescape_bytes(uri.as_bytes())))
@@ -291,7 +306,7 @@ fn push_encoded_pair(
 /// `map<unknown>`. Array values emit repeated keys, matching OpenResty table
 /// values. VmMap duplicate-key inserts overwrite; callers must use arrays for
 /// multi-value keys.
-#[pd_host_function(name = "ngx::encode_args")]
+#[pd_host_function(name = "ngx::encode_args", contract = crate::host::catalog::ngx_encode_args_contract)]
 pub fn encode_args(args: &VmMap) -> VmResult<CallOutcome> {
     ret(encode_args_map(args)?)
 }
@@ -395,7 +410,7 @@ pub(crate) fn decode_query_args(query: &[u8], max_args: usize) -> (VmMap, bool) 
 /// Returns `{ args, truncated }`. `max_args` is `null` (default 100), a
 /// positive cap, or `0` which is clamped to the hard limit 1024 rather than
 /// becoming unbounded.
-#[pd_host_function(name = "ngx::decode_args")]
+#[pd_host_function(name = "ngx::decode_args", contract = crate::host::catalog::ngx_decode_args_contract)]
 pub fn decode_args(query: &str, max_args: &Value) -> VmResult<CallOutcome> {
     limit_input("ngx::decode_args", query.len())?;
     let max_args = match optional_int(max_args, "ngx::decode_args max_args")? {
@@ -461,7 +476,7 @@ fn decode_base64_mime(text: &str) -> Option<Vec<u8>> {
 
 /// Encodes string or bytes as standard Base64. `no_padding` is `null`/`false`
 /// or `true` to drop `=` padding.
-#[pd_host_function(name = "ngx::encode_base64")]
+#[pd_host_function(name = "ngx::encode_base64", contract = crate::host::catalog::ngx_encode_base64_contract)]
 pub fn encode_base64(input: &Value, no_padding: &Value) -> VmResult<CallOutcome> {
     let bytes = input_bytes(input, "ngx::encode_base64")?;
     let no_padding = optional_bool(no_padding, "ngx::encode_base64 no_padding")?.unwrap_or(false);
@@ -471,7 +486,7 @@ pub fn encode_base64(input: &Value, no_padding: &Value) -> VmResult<CallOutcome>
 }
 
 /// Decodes standard Base64. Padding may be omitted. Invalid input is `null`.
-#[pd_host_function(name = "ngx::decode_base64")]
+#[pd_host_function(name = "ngx::decode_base64", contract = crate::host::catalog::ngx_decode_base64_contract)]
 pub fn decode_base64(text: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::decode_base64", text.len())?;
     ret(decode_base64_bytes(text))
@@ -479,7 +494,7 @@ pub fn decode_base64(text: &str) -> VmResult<CallOutcome> {
 
 /// MIME Base64 decode: non-alphabet bytes are skipped and decoding stops at
 /// the first `=`, matching OpenResty `ngx.decode_base64mime`.
-#[pd_host_function(name = "ngx::decode_base64mime")]
+#[pd_host_function(name = "ngx::decode_base64mime", contract = crate::host::catalog::ngx_decode_base64mime_contract)]
 pub fn decode_base64mime(text: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::decode_base64mime", text.len())?;
     ret(decode_base64_mime(text))
@@ -501,21 +516,21 @@ fn crc32_ieee(data: &[u8]) -> u32 {
 }
 
 /// CRC-32 of `data`. OpenResty `crc32_short` and `crc32_long` currently match.
-#[pd_host_function(name = "ngx::crc32_short")]
+#[pd_host_function(name = "ngx::crc32_short", contract = crate::host::catalog::ngx_crc32_short_contract)]
 pub fn crc32_short(data: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::crc32_short", data.len())?;
     ret(i64::from(crc32_ieee(data.as_bytes())))
 }
 
 /// CRC-32 of `data`. Same result as [`crc32_short`].
-#[pd_host_function(name = "ngx::crc32_long")]
+#[pd_host_function(name = "ngx::crc32_long", contract = crate::host::catalog::ngx_crc32_long_contract)]
 pub fn crc32_long(data: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::crc32_long", data.len())?;
     ret(i64::from(crc32_ieee(data.as_bytes())))
 }
 
 /// HMAC-SHA1 of `data` with `secret`. Returns raw bytes.
-#[pd_host_function(name = "ngx::hmac_sha1")]
+#[pd_host_function(name = "ngx::hmac_sha1", contract = crate::host::catalog::ngx_hmac_sha1_contract)]
 pub fn hmac_sha1(secret: &str, data: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::hmac_sha1", secret.len())?;
     limit_input("ngx::hmac_sha1", data.len())?;
@@ -548,28 +563,28 @@ fn to_hex_lower(bytes: &[u8]) -> String {
 }
 
 /// MD5 hex digest (lowercase), matching OpenResty `ngx.md5`.
-#[pd_host_function(name = "ngx::md5")]
+#[pd_host_function(name = "ngx::md5", contract = crate::host::catalog::ngx_md5_contract)]
 pub fn md5(data: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::md5", data.len())?;
     ret(to_hex_lower(&md5_bytes(data.as_bytes())))
 }
 
 /// MD5 raw digest bytes.
-#[pd_host_function(name = "ngx::md5_bin")]
+#[pd_host_function(name = "ngx::md5_bin", contract = crate::host::catalog::ngx_md5_bin_contract)]
 pub fn md5_bin(data: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::md5_bin", data.len())?;
     ret(md5_bytes(data.as_bytes()))
 }
 
 /// SHA-1 raw digest bytes.
-#[pd_host_function(name = "ngx::sha1_bin")]
+#[pd_host_function(name = "ngx::sha1_bin", contract = crate::host::catalog::ngx_sha1_bin_contract)]
 pub fn sha1_bin(data: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::sha1_bin", data.len())?;
     ret(sha1_bytes(data.as_bytes()))
 }
 
 /// Quotes `value` as a MySQL string literal, matching `ngx.quote_sql_str`.
-#[pd_host_function(name = "ngx::quote_sql_str")]
+#[pd_host_function(name = "ngx::quote_sql_str", contract = crate::host::catalog::ngx_quote_sql_str_contract)]
 pub fn quote_sql_str(value: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::quote_sql_str", value.len())?;
     let mut out = String::with_capacity(value.len() + 2);
@@ -591,6 +606,31 @@ pub fn quote_sql_str(value: &str) -> VmResult<CallOutcome> {
     }
     out.push('\'');
     ret(out)
+}
+
+const CODEC_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+        escape_uri_descriptor,
+        unescape_uri_descriptor,
+        encode_args_descriptor,
+        decode_args_descriptor,
+        encode_base64_descriptor,
+        decode_base64_descriptor,
+        decode_base64mime_descriptor,
+        crc32_short_descriptor,
+        crc32_long_descriptor,
+        hmac_sha1_descriptor,
+        md5_descriptor,
+        md5_bin_descriptor,
+        sha1_bin_descriptor,
+        quote_sql_str_descriptor,
+];
+
+pub fn codec_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.codec",
+        functions: CODEC_HOST_MODULE_FUNCTIONS,
+        resources: &[],
+    }
 }
 
 #[cfg(test)]

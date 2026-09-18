@@ -23,6 +23,7 @@ use std::cell::Cell;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pd_host_function::pd_host_function;
+use vm::HostModuleDescriptor;
 use vm::VmError;
 
 use super::{CallOutcome, IntoHostCallOutcome};
@@ -318,60 +319,60 @@ fn parse_year(text: &str) -> Option<i32> {
 }
 
 /// Local date `yyyy-mm-dd` from the cached clock.
-#[pd_host_function(name = "ngx::today")]
+#[pd_host_function(name = "ngx::today", contract = crate::host::catalog::ngx_today_contract)]
 pub fn today() -> VmResult<CallOutcome> {
     let clock = read_clock();
     ret(format_civil_date(&broken_down(clock.sec, false)?))
 }
 
 /// Cached unix seconds as an integer. Distinct from [`now`].
-#[pd_host_function(name = "ngx::time")]
+#[pd_host_function(name = "ngx::time", contract = crate::host::catalog::ngx_time_contract)]
 pub fn time() -> VmResult<CallOutcome> {
     ret(read_clock().sec)
 }
 
 /// Cached unix time as seconds plus milliseconds (`float`).
-#[pd_host_function(name = "ngx::now")]
+#[pd_host_function(name = "ngx::now", contract = crate::host::catalog::ngx_now_contract)]
 pub fn now() -> VmResult<CallOutcome> {
     let clock = read_clock();
     ret(clock.sec as f64 + f64::from(clock.msec) / 1000.0)
 }
 
 /// Refreshes the cached clock from the OS. This is a real side effect.
-#[pd_host_function(name = "ngx::update_time")]
+#[pd_host_function(name = "ngx::update_time", contract = crate::host::catalog::ngx_update_time_contract)]
 pub fn update_time() -> VmResult<CallOutcome> {
     refresh_clock();
     ret(())
 }
 
 /// Local `yyyy-mm-dd hh:mm:ss` from the cached clock.
-#[pd_host_function(name = "ngx::localtime")]
+#[pd_host_function(name = "ngx::localtime", contract = crate::host::catalog::ngx_localtime_contract)]
 pub fn localtime() -> VmResult<CallOutcome> {
     let clock = read_clock();
     ret(format_civil_datetime(&broken_down(clock.sec, false)?))
 }
 
 /// UTC `yyyy-mm-dd hh:mm:ss` from the cached clock.
-#[pd_host_function(name = "ngx::utctime")]
+#[pd_host_function(name = "ngx::utctime", contract = crate::host::catalog::ngx_utctime_contract)]
 pub fn utctime() -> VmResult<CallOutcome> {
     let clock = read_clock();
     ret(format_civil_datetime(&broken_down(clock.sec, true)?))
 }
 
 /// Cookie date for `sec` (`Thu, 18-Nov-10 11:27:35 GMT`).
-#[pd_host_function(name = "ngx::cookie_time")]
+#[pd_host_function(name = "ngx::cookie_time", contract = crate::host::catalog::ngx_cookie_time_contract)]
 pub fn cookie_time(sec: i64) -> VmResult<CallOutcome> {
     ret(http_date(sec, true)?)
 }
 
 /// HTTP date for `sec` (`Thu, 18 Nov 2010 11:27:35 GMT`).
-#[pd_host_function(name = "ngx::http_time")]
+#[pd_host_function(name = "ngx::http_time", contract = crate::host::catalog::ngx_http_time_contract)]
 pub fn http_time(sec: i64) -> VmResult<CallOutcome> {
     ret(http_date(sec, false)?)
 }
 
 /// Parses an HTTP date into unix seconds, or `null` when invalid.
-#[pd_host_function(name = "ngx::parse_http_time")]
+#[pd_host_function(name = "ngx::parse_http_time", contract = crate::host::catalog::ngx_parse_http_time_contract)]
 pub fn parse_http_time(text: &str) -> VmResult<CallOutcome> {
     if text.len() > 128 {
         return Err(VmError::HostError(
@@ -379,4 +380,25 @@ pub fn parse_http_time(text: &str) -> VmResult<CallOutcome> {
         ));
     }
     ret(parse_http_date(text))
+}
+
+
+const TIME_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+        today_descriptor,
+        time_descriptor,
+        now_descriptor,
+        update_time_descriptor,
+        localtime_descriptor,
+        utctime_descriptor,
+        cookie_time_descriptor,
+        http_time_descriptor,
+        parse_http_time_descriptor,
+];
+
+pub fn time_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.time",
+        functions: TIME_HOST_MODULE_FUNCTIONS,
+        resources: &[],
+    }
 }

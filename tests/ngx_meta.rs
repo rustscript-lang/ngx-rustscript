@@ -181,19 +181,16 @@ fn catalog_runtime_and_manifest_agree_on_task4_hosts() {
         catalog, manifest,
         "compiler catalog and manifest must agree"
     );
-    // The owned `ngx::timer::{at,every}` registrations bind through the
-    // timer-host registry instead of the per-name path.
+    assert_eq!(
+        runtime, manifest,
+        "descriptor registry names must match the catalog/manifest"
+    );
     let timer_family: BTreeSet<&str> = manifest
         .iter()
         .copied()
         .filter(|name| name.starts_with("ngx::timer::"))
         .collect();
     assert_eq!(timer_family.len(), 4, "the timer family has four hosts");
-    let per_name: BTreeSet<&str> = manifest.difference(&timer_family).copied().collect();
-    assert_eq!(
-        runtime, per_name,
-        "per-name bindings must match the manifest minus the timer family"
-    );
     for name in [
         "ngx::get_phase",
         "ngx::config::prefix",

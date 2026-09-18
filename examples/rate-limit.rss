@@ -1,16 +1,5 @@
 use ngx;
 
-struct SharedSafeStoreResult {
-    ok: bool,
-    error: string?
-}
-
-struct SharedIncrResult {
-    value: number?,
-    error: string?,
-    forcible: bool
-}
-
 let LIMIT = 5;
 let WINDOW_SECONDS = 2;
 let RETRY_AFTER = "2";

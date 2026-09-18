@@ -64,13 +64,12 @@ use std::time::Duration;
 
 use tokio::runtime::Handle;
 use vm::{
-    HttpConfig, HttpHostExt, IoHostExt, IoPolicy, OwnedTimerCallback, SqliteHostExt, SqlitePolicy,
-    TimerBackend, TimerCallbackError, TimerCallbackState, TimerConfig, TimerHostExt,
-    TimerRegistration, Vm, VmError, VmResult,
+    OwnedTimerCallback, TimerBackend, TimerCallbackError, TimerCallbackState, TimerConfig,
+    TimerHostExt, TimerRegistration, Vm, VmError, VmResult,
 };
 
 use crate::async_bridge::NgxAsyncBridge;
-use crate::host::{AllowedOps, NgxPhase, StandardHostPolicy, ngx_host_registry};
+use crate::host::{AllowedOps, NgxPhase, StandardHostPolicy};
 use crate::notify::{CompletionSender, RequestIdentity, eventfd_waker};
 use crate::request_state::{IdentityRegistry, RegistryError};
 
@@ -195,7 +194,7 @@ pub(crate) fn install_worker_timers(handle: Handle, sender: CompletionSender) {
 
 /// True when `program` imports any `ngx::timer` host.
 ///
-/// Such programs are bound from [`ngx_host_registry`] (owned dispatch) and must
+/// Such programs are bound from [`crate::host::ngx_host_registry`] and must
 /// run on the request-owned VM path, so configuration marks them as requiring
 /// request state.
 pub fn program_uses_ngx_timer_hosts(program: &vm::Program) -> bool {
@@ -320,48 +319,19 @@ fn with_timer_scope<R>(identity: RequestIdentity, f: impl FnOnce() -> R) -> R {
 
 /// Installs the worker timer backend on a VM that imports the timer family.
 ///
-/// The timer family contains owned-dispatch hosts, which can only be bound
-/// through the registry path; the standard I/O, HTTP, and SQLite policies are
-/// installed without per-name binds because the registry plan already resolved
-/// every standard import.
+/// Hosts are bound through [`crate::host::ngx_host_registry`]; this only
+/// attaches the worker timer runtime after that bind.
 pub fn install_timer_vm(vm: &mut Vm, policy: &StandardHostPolicy) -> Result<(), String> {
-    let registry = ngx_host_registry()?;
-    registry
-        .bind_vm_cached(vm)
-        .map_err(|error| format!("bind ngx timer host registry: {error}"))?;
-    install_standard_policy(vm, policy)?;
-    let backend = worker_backend().unwrap_or_else(|| Arc::new(NgxTimerBackend));
-    vm.install_timer_runtime(backend, TimerConfig::default());
+    crate::host::bind_production_hosts(vm)?;
+    crate::host::install_standard_policy(vm, policy)?;
+    install_timer_runtime_on_vm(vm);
     Ok(())
 }
 
-/// Applies the location's standard-host policy without the per-name binds that
-/// [`crate::host::install_standard_runtime`] performs.
-///
-/// A plan-bound VM resolves imports by registry slot; a later name bind would
-/// flip it back to name resolution and fail on the owned timer entries.
-fn install_standard_policy(vm: &mut Vm, policy: &StandardHostPolicy) -> Result<(), String> {
-    vm.configure_io(IoPolicy {
-        allowed_roots: policy.io_roots.clone(),
-        allow_write: policy.io_write,
-        allow_process: false,
-        max_read_bytes: policy.io_max_read,
-        max_write_bytes: policy.io_max_write,
-    });
-    vm.configure_http(HttpConfig {
-        allowed_schemes: policy.http_schemes.clone(),
-        allowed_hosts: policy.http_hosts.clone(),
-        allowed_ports: policy.http_ports.clone(),
-        allow_private_ips: policy.http_allow_private,
-        ..HttpConfig::default()
-    })
-    .map_err(|err| err.to_string())?;
-    vm.configure_sqlite(SqlitePolicy {
-        database_root: policy.sqlite_root.clone(),
-        allow_unsafe_sql: false,
-        ..SqlitePolicy::default()
-    });
-    Ok(())
+/// Attach the worker-owned timer runtime to an already registry-bound VM.
+pub fn install_timer_runtime_on_vm(vm: &mut Vm) {
+    let backend = worker_backend().unwrap_or_else(|| Arc::new(NgxTimerBackend));
+    vm.install_timer_runtime(backend, TimerConfig::default());
 }
 
 /// Dispatches every ready identity that is a live timer registration.

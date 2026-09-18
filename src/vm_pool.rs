@@ -66,7 +66,7 @@ fn construct(program: &Arc<Program>) -> Vm {
     #[cfg(test)]
     CREATED.with(|created| created.set(created.get().saturating_add(1)));
     let mut vm = Vm::new_shared(Arc::clone(program));
-    crate::host::bind_ngx_hosts(&mut vm);
+    crate::host::bind_production_hosts(&mut vm).expect("bind ngx host registry");
     vm
 }
 

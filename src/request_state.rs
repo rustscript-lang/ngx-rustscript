@@ -24,8 +24,8 @@ use vm::{Program, Vm, VmError, VmStatus};
 
 use crate::async_bridge::NgxAsyncBridge;
 use crate::host::{
-    AllowedOps, NgxPhase, RequestDisposition, RequestLocalCtx, StandardHostPolicy, bind_ngx_hosts,
-    install_standard_runtime, is_control_stop, with_vm_request_scope_full,
+    AllowedOps, NgxPhase, RequestDisposition, RequestLocalCtx, StandardHostPolicy, is_control_stop,
+    with_vm_request_scope_full,
 };
 use crate::notify::{CompletionPermit, RequestIdentity};
 
@@ -324,17 +324,17 @@ impl<T> Default for IdentityRegistry<T> {
 
 /// Binds the production host surface for one program.
 ///
-/// A program importing `ngx::timer` hosts resolves them from the timer-host
-/// registry, because the owned `ngx::timer::{at,every}` entries have no
-/// name-binding API; every other program keeps the per-name bind path. The
-/// location's standard-host policy applies in both paths.
+/// Every request VM installs catalog adapters from [`crate::host::ngx_host_registry`].
+/// Programs that import `ngx::timer` hosts also receive the worker timer
+/// runtime. The location's standard-host policy is applied without per-name
+/// binds so the registry plan stays exact.
 pub(crate) fn bind_program_hosts(vm: &mut Vm, policy: &StandardHostPolicy) -> Result<(), String> {
+    crate::host::bind_production_hosts(vm)?;
+    crate::host::install_standard_policy(vm, policy)?;
     if crate::timer::program_uses_ngx_timer_hosts(vm.program()) {
-        crate::timer::install_timer_vm(vm, policy)
-    } else {
-        bind_ngx_hosts(vm);
-        install_standard_runtime(vm, policy)
+        crate::timer::install_timer_runtime_on_vm(vm);
     }
+    Ok(())
 }
 
 /// Wait-slot + waker factory used by [`AccessExec`].

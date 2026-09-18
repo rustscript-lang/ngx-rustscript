@@ -18,6 +18,7 @@ use nginx_sys::{
 };
 use ngx::http::Request;
 use pd_host_function::pd_host_function;
+use vm::HostModuleDescriptor;
 use vm::{Value, VmError};
 
 use super::super::VmResult;
@@ -254,7 +255,7 @@ fn map_wait_outcome(outcome: NginxOpOutcome) -> VmResult<()> {
 }
 
 /// Read the client request body. Yields on NGX_AGAIN; idempotent after completion.
-#[pd_host_function(name = "ngx::req::read_body")]
+#[pd_host_function(name = "ngx::req::read_body", contract = crate::host::catalog::ngx_req_read_body_contract)]
 pub async fn read_body() -> VmResult<()> {
     match start_read_body()? {
         ReadBodyStart::Done => Ok(()),
@@ -401,7 +402,7 @@ pub unsafe extern "C" fn ngx_rustscript_on_body_wait_closed(r: *mut ngx_http_req
 }
 
 /// Discard the client request body. Sync and idempotent per NGINX core.
-#[pd_host_function(name = "ngx::req::discard_body")]
+#[pd_host_function(name = "ngx::req::discard_body", contract = crate::host::catalog::ngx_req_discard_body_contract)]
 pub fn discard_body() -> VmResult<CallOutcome> {
     with_request_write(|request| {
         let raw = request.as_mut() as *mut ngx_http_request_t;
@@ -421,7 +422,7 @@ pub fn discard_body() -> VmResult<CallOutcome> {
 }
 
 /// In-memory request body as an owned string, or `null` when file-backed/unread.
-#[pd_host_function(name = "ngx::req::get_body_data")]
+#[pd_host_function(name = "ngx::req::get_body_data", contract = crate::host::catalog::ngx_req_get_body_data_contract)]
 pub fn get_body_data() -> VmResult<CallOutcome> {
     with_request(|request| {
         let raw = request.as_ref();
@@ -447,7 +448,7 @@ pub fn get_body_data() -> VmResult<CallOutcome> {
 }
 
 /// NGINX temp-file path as an owned string, or `null` when memory-backed.
-#[pd_host_function(name = "ngx::req::get_body_file")]
+#[pd_host_function(name = "ngx::req::get_body_file", contract = crate::host::catalog::ngx_req_get_body_file_contract)]
 pub fn get_body_file() -> VmResult<CallOutcome> {
     with_request(|request| {
         let raw = request.as_ref();
@@ -653,7 +654,7 @@ fn copy_to_private_temp(src: &std::fs::File) -> VmResult<(std::fs::File, PathBuf
 }
 
 /// Replace the in-memory request body transactionally.
-#[pd_host_function(name = "ngx::req::set_body_data")]
+#[pd_host_function(name = "ngx::req::set_body_data", contract = crate::host::catalog::ngx_req_set_body_data_contract)]
 pub fn set_body_data(data: String) -> VmResult<CallOutcome> {
     with_request_write(|request| {
         let raw = request.as_mut() as *mut ngx_http_request_t;
@@ -664,7 +665,7 @@ pub fn set_body_data(data: String) -> VmResult<CallOutcome> {
 
 /// Install a file-backed request body. `auto_clean=true` copies into a
 /// module-owned private temp file and never unlinks the caller source.
-#[pd_host_function(name = "ngx::req::set_body_file")]
+#[pd_host_function(name = "ngx::req::set_body_file", contract = crate::host::catalog::ngx_req_set_body_file_contract)]
 pub fn set_body_file(path: String, auto_clean: &Value) -> VmResult<CallOutcome> {
     let auto_clean = parse_optional_bool(auto_clean, false)?;
     if path.is_empty() || path.len() > MAX_PATH_BYTES || path.contains('\0') {
@@ -736,7 +737,7 @@ pub fn set_body_file(path: String, auto_clean: &Value) -> VmResult<CallOutcome> 
 }
 
 /// Create or reset the request-owned memory body builder.
-#[pd_host_function(name = "ngx::req::init_body")]
+#[pd_host_function(name = "ngx::req::init_body", contract = crate::host::catalog::ngx_req_init_body_contract)]
 pub fn init_body(buffer_size: &Value) -> VmResult<CallOutcome> {
     let cap = parse_optional_capacity(buffer_size)?;
     with_request_write(|request| {
@@ -753,7 +754,7 @@ pub fn init_body(buffer_size: &Value) -> VmResult<CallOutcome> {
 }
 
 /// Append bytes to the request-owned builder.
-#[pd_host_function(name = "ngx::req::append_body")]
+#[pd_host_function(name = "ngx::req::append_body", contract = crate::host::catalog::ngx_req_append_body_contract)]
 pub fn append_body(data: String) -> VmResult<CallOutcome> {
     with_request_write(|request| {
         let raw = request.as_mut() as *mut ngx_http_request_t;
@@ -775,7 +776,7 @@ pub fn append_body(data: String) -> VmResult<CallOutcome> {
 }
 
 /// Atomically install the builder contents as one memory body.
-#[pd_host_function(name = "ngx::req::finish_body")]
+#[pd_host_function(name = "ngx::req::finish_body", contract = crate::host::catalog::ngx_req_finish_body_contract)]
 pub fn finish_body() -> VmResult<CallOutcome> {
     with_request_write(|request| {
         let raw = request.as_mut() as *mut ngx_http_request_t;
@@ -800,4 +801,25 @@ pub fn finish_body() -> VmResult<CallOutcome> {
             }
         }
     })
+}
+
+
+const BODY_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+        read_body_descriptor,
+        discard_body_descriptor,
+        get_body_data_descriptor,
+        get_body_file_descriptor,
+        set_body_data_descriptor,
+        set_body_file_descriptor,
+        init_body_descriptor,
+        append_body_descriptor,
+        finish_body_descriptor,
+];
+
+pub fn body_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "ngx.body",
+        functions: BODY_HOST_MODULE_FUNCTIONS,
+        resources: &[],
+    }
 }

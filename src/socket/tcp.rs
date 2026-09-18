@@ -287,6 +287,11 @@ impl TcpCosocket {
     }
 }
 
+impl vm::HostResourceType for TcpCosocket {
+    const KEY: &'static str = NGX_SOCKET_TCP_RESOURCE_KEY;
+    const DESCRIPTION: &'static str = "OpenResty ngx.socket.tcp handle";
+}
+
 impl HostResource for TcpCosocket {
     fn resource_type_key() -> Option<ResourceTypeKey>
     where

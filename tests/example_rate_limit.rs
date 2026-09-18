@@ -226,17 +226,8 @@ impl Keepalive {
     }
 }
 
-fn wait_for_port(port: u16, timeout: Duration) {
-    let start = Instant::now();
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
-        if start.elapsed() >= timeout {
-            panic!("nginx did not listen on 127.0.0.1:{port} within {timeout:?}");
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+fn wait_for_port(port: u16, timeout: Duration, prefix: &Path) {
+    support::nginx::wait_for_workers_ready(port, timeout, Some(&prefix.join("logs/error.log")));
 }
 
 fn error_log(tmp: &OwnedTempDir) -> String {
@@ -357,7 +348,7 @@ fn setup(spec: HarnessSpec<'_>) -> (PathBuf, u16, OwnedTempDir, RunningNginx, Pa
     let out = nginx_test(&nginx, tmp.path());
     assert!(out.status.success(), "nginx -t failed: {}", combined(&out));
     let running = spawn_nginx(&nginx, tmp.path());
-    wait_for_port(port, Duration::from_secs(5));
+    wait_for_port(port, Duration::from_secs(5), tmp.path());
     (nginx, port, tmp, running, script)
 }
 
@@ -406,8 +397,6 @@ fn assert_documented_constants() {
         "allocating incr init must not create windows: {EXAMPLE_RSS}"
     );
     for required in [
-        "struct SharedSafeStoreResult",
-        "struct SharedIncrResult",
         "let added: SharedSafeStoreResult",
         "let counted: SharedIncrResult",
         "added.ok",
@@ -861,7 +850,7 @@ fn reload_preserves_window_count() {
         "reload failed: {}",
         combined(&reload)
     );
-    wait_for_port(port, Duration::from_secs(5));
+    wait_for_port(port, Duration::from_secs(5), tmp.path());
 
     let start = Instant::now();
     let mut remaining = None;

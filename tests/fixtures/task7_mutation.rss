@@ -1,8 +1,4 @@
 use ngx;
-struct RequestHeadersResult {
-    headers: map,
-    truncated: bool
-}
 ngx::req::set_method(ngx::http::post());
 ngx::req::set_uri("/mutated", false);
 ngx::req::set_uri_args("k=v");
