@@ -204,6 +204,50 @@ fn ctx_only_program_requires_request_owned_exec() {
 }
 
 #[test]
+fn synchronous_request_state_programs_are_reusable_but_waiting_programs_are_not() {
+    let key_auth =
+        compile_rss_source(include_str!("../examples/key-auth.rss")).expect("key auth example");
+    assert!(ngx_rustscript::config::program_requires_request_state(
+        &key_auth
+    ));
+    assert!(ngx_rustscript::config::program_can_reuse_request_vm(
+        &key_auth
+    ));
+
+    let ctx = compile_rss_source(include_str!("fixtures/ctx_sync.rss")).expect("ctx-only");
+    assert!(ngx_rustscript::config::program_can_reuse_request_vm(&ctx));
+
+    let sleep = compile_rss_source(include_str!("fixtures/ngx_sleep.rss")).expect("ngx::sleep");
+    assert!(!ngx_rustscript::config::program_can_reuse_request_vm(
+        &sleep
+    ));
+
+    let retained_or_async_cases = [
+        ("timer", "use ngx;\nngx::timer::pending_count();\n"),
+        ("cosocket", "use ngx;\nlet sock = ngx::socket::udp();\n"),
+        (
+            "standard io",
+            "use io;\nlet input = io::open(\"x\", \"r\");\nio::close(input);\n",
+        ),
+        (
+            "sqlite",
+            "use sqlite;\nlet db = sqlite::open({\"path\": \":memory:\", \"mode\": \"memory\"});\nsqlite::close(db);\n",
+        ),
+    ];
+    for (label, source) in retained_or_async_cases {
+        let program = compile_rss_source(source).unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert!(
+            ngx_rustscript::config::program_requires_request_state(&program),
+            "{label} requires request-owned execution"
+        );
+        assert!(
+            !ngx_rustscript::config::program_can_reuse_request_vm(&program),
+            "{label} must not enter the synchronous request VM pool"
+        );
+    }
+}
+
+#[test]
 fn import_free_and_codec_programs_stay_on_pool_fast_path() {
     let ok = compile_rss_source(include_str!("fixtures/ok.rss")).expect("ok.rss");
     assert!(
@@ -241,6 +285,10 @@ fn request_state_routing_uses_manifest_async_or_request_ctx() {
     assert!(
         access.contains("metadata.requires_request_state"),
         "access handler must consult cached request-state routing metadata"
+    );
+    assert!(
+        access.contains("bind_configured_phase_exec_with_policy"),
+        "request-owned access handler must route through the cached execution metadata selector"
     );
     assert!(
         !access.contains("disassemble_program"),

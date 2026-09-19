@@ -33,6 +33,7 @@ impl PhaseSlot {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScriptExecutionMetadata {
     pub requires_request_state: bool,
+    pub reuses_request_vm: bool,
     pub uses_sqlite: bool,
 }
 

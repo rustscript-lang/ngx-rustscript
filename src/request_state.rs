@@ -337,12 +337,29 @@ pub(crate) fn bind_program_hosts(vm: &mut Vm, policy: &StandardHostPolicy) -> Re
     Ok(())
 }
 
+pub(crate) struct ReusableVmKey {
+    pub program: std::sync::Arc<Program>,
+    pub phase: NgxPhase,
+    pub policy: StandardHostPolicy,
+}
+
+impl ReusableVmKey {
+    pub(crate) fn matches(&self, other: &Self) -> bool {
+        std::ptr::eq(self.program.as_ref(), other.program.as_ref())
+            && self.phase == other.phase
+            && self.policy == other.policy
+    }
+}
+
 /// Wait-slot + waker factory used by [`AccessExec`].
 pub trait AsyncWait {
     fn reserve(&self) -> Result<CompletionPermit, SubmitError>;
     fn waker(&self, identity: RequestIdentity) -> Waker;
     fn invalidate(&self, identity: RequestIdentity);
     fn forget_invalidated(&self, identity: RequestIdentity);
+    fn recycle_finished_exec(&self, _exec: &mut AccessExec) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -357,6 +374,7 @@ enum ExecState {
 /// Request-local VM plus generation-safe wait identity.
 pub struct AccessExec {
     vm: Option<Vm>,
+    reusable_key: Option<ReusableVmKey>,
     request_id: u64,
     identity: RequestIdentity,
     phase: NgxPhase,
@@ -413,6 +431,7 @@ impl AccessExec {
             .map_err(|err| err.to_string())?;
         Ok(Self {
             vm: Some(vm),
+            reusable_key: None,
             request_id,
             identity: RequestIdentity::new(generation, request_id),
             phase,
@@ -427,6 +446,40 @@ impl AccessExec {
             last_status: None,
             last_error: None,
         })
+    }
+
+    pub(crate) fn bind_reusable_vm(
+        vm: Vm,
+        key: ReusableVmKey,
+        request_id: u64,
+        generation: u64,
+    ) -> Self {
+        let phase = key.phase;
+        Self {
+            vm: Some(vm),
+            reusable_key: Some(key),
+            request_id,
+            identity: RequestIdentity::new(generation, request_id),
+            phase,
+            ctx: RequestLocalCtx::new(),
+            shared_ctx: None,
+            disposition: RequestDisposition::Continue,
+            final_status: None,
+            state: ExecState::New,
+            suspend_committed: false,
+            deferred: false,
+            permit: None,
+            last_status: None,
+            last_error: None,
+        }
+    }
+
+    pub(crate) fn take_reusable_vm(&mut self) -> Option<(ReusableVmKey, Vm)> {
+        let key = self.reusable_key.take()?;
+        let vm = self.vm.take()?;
+        self.release_owned_ctx();
+        self.permit = None;
+        Some((key, vm))
     }
 
     pub fn phase(&self) -> NgxPhase {
@@ -798,6 +851,12 @@ impl AccessExec {
     /// Tombstone, drop the VM/future, then forget the tombstone.
     pub fn cleanup_wait(&mut self, waiter: &impl AsyncWait) -> Option<RequestIdentity> {
         if self.is_finished() {
+            if self.state == ExecState::Halted
+                && self.reusable_key.is_some()
+                && waiter.recycle_finished_exec(self)
+            {
+                return None;
+            }
             return self.cleanup();
         }
         let identity = self.identity;

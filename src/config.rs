@@ -347,12 +347,28 @@ fn request_state_required_by_imports(program: &Program) -> bool {
     })
 }
 
+fn program_may_suspend_or_retain_state(program: &Program) -> bool {
+    let builtins = standard_builtin_usage(program);
+    builtins.io
+        || builtins.sqlite
+        || program.imports.iter().any(|import| {
+            crate::host::ngx_timer_host_names().contains(&import.name.as_str())
+                || is_standard_host_import(&import.name)
+                || ngx_host_manifest().iter().any(|entry| {
+                    entry.name == import.name.as_str()
+                        && (entry.sync == HostSyncKind::Async
+                            || entry.family == HostFamily::Cosocket)
+                })
+        })
+}
+
 fn script_execution_metadata(program: &Program) -> ScriptExecutionMetadata {
     let builtins = standard_builtin_usage(program);
+    let requires_request_state =
+        builtins.io || builtins.sqlite || request_state_required_by_imports(program);
     ScriptExecutionMetadata {
-        requires_request_state: builtins.io
-            || builtins.sqlite
-            || request_state_required_by_imports(program),
+        requires_request_state,
+        reuses_request_vm: requires_request_state && !program_may_suspend_or_retain_state(program),
         uses_sqlite: builtins.sqlite,
     }
 }
@@ -364,6 +380,12 @@ fn script_execution_metadata(program: &Program) -> ScriptExecutionMetadata {
 /// the pooled path.
 pub fn program_requires_request_state(program: &Program) -> bool {
     script_execution_metadata(program).requires_request_state
+}
+
+/// True when a request-owned program cannot suspend or retain worker callbacks
+/// and can therefore reuse a reset VM after terminal cleanup.
+pub fn program_can_reuse_request_vm(program: &Program) -> bool {
+    script_execution_metadata(program).reuses_request_vm
 }
 
 /// Compile with the ngx host catalog and reject unknown or phase-forbidden imports.

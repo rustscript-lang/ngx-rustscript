@@ -72,7 +72,7 @@ fn construct(program: &Arc<Program>) -> Vm {
 
 /// Reset through the supported pd-vm APIs. Pending host-IO close cannot be
 /// driven without an async runtime; those VMs are dropped rather than parked.
-fn reset_for_pool(vm: &mut Vm) -> bool {
+pub(crate) fn reset_for_pool(vm: &mut Vm) -> bool {
     if vm.reset_for_reuse().is_err() {
         return false;
     }
@@ -84,6 +84,10 @@ fn reset_for_pool(vm: &mut Vm) -> bool {
             Poll::Ready(Err(_)) | Poll::Pending => return false,
         }
     }
+    if vm.clear_async_bridge().is_err() {
+        return false;
+    }
+    vm.clear_runtime_print_sink();
     vm.is_reusable()
 }
 
