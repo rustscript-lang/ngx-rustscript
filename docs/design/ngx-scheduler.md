@@ -123,7 +123,7 @@ Root execution is `Vm::run` / `Vm::resume`. The module does not use
 `ScriptCallback`, `Store`, `Invocation`, or `Vm::invoke_callable` for
 production request handling.
 
-## Evidence matrix (pinned `pd-vm` f5f71eb)
+## Evidence matrix (pinned `pd-vm` 87d8c5d5cb42b3381aecadb383c0b7bf34ff204f)
 
 Legend: **P** = public (`src/lib.rs` re-export or `pub` item on a public
 type). **C** = crate-private / `pub(super)` / `pub(crate)`.
@@ -559,7 +559,7 @@ callable. Access + content only; Log fails configuration compile.
 
 Validation: `tests/ngx_scheduler_contract.rs` (catalog/manifest/phase/owned
 argument), `tests/ngx_timer.rs` (unit lifecycle), `tests/timer_nginx.rs`
-(real OpenResty 1.31.4.1 lifecycle). `docs/api/timer.md` carries the per-host table.
+(real NGINX 1.31.4 lifecycle). `docs/api/timer.md` carries the per-host table.
 
 Decision: **landed as the second worker-owned family.** The remaining
 callable families stay fail-closed.

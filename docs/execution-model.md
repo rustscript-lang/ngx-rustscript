@@ -37,22 +37,30 @@ and parked only when `Vm::is_reusable` is true. Idle pool size is 4.
 VM errors and unexpected `Waiting` on pooled programs fail the request
 with 500.
 
-**Request-state programs** bind a request-local execution state when the
-compiled script uses pd-vm I/O, HTTP client, SQLite,
-`ngx::sleep`, `ngx::sleep_ms`, UDP/TCP cosocket, `ngx.ctx`, an async
-`ngx::semaphore::wait`, or mutation/control capabilities
-(`RequestWrite`, `ResponseWrite`, `Control`). Pure-sync request-read and
-sync-only semaphore programs stay on the synchronous pool path.
+**Request-state programs** bind request-local execution state when the
+compiled script uses pd-vm I/O, HTTP client, SQLite, `ngx::sleep`,
+`ngx::sleep_ms`, UDP/TCP cosocket, `ngx.ctx`, an async
+`ngx::semaphore::wait`, or mutation/control capabilities (`RequestWrite`,
+`ResponseWrite`, `Control`). Pure-sync request-read and sync-only semaphore
+programs stay on the synchronous pool path.
 
-Buffered `http::client::request` is the request-state exception eligible for
-VM reuse. Successful `Halted` execution enters the reuse gate only after
-`reset_for_reuse`, a ready `poll_reset_for_reuse`, no pending scope reset,
-`clear_async_bridge`, `clear_runtime_print_sink`, and `Vm::is_reusable` all
-succeed. Every checkout installs a new `NgxAsyncBridge`, print sink, request
-identity, raw request pointer scope, `RequestLocalCtx`, and runtime policy.
-Failure, cancellation, timeout, pending cleanup, and capacity overflow drop the
-VM. Standard I/O, SQLite, SSE, timers, sleep, cosockets, resource-bearing host
-schemas, and unknown host schemas are never admitted.
+A request-state program is statically eligible for VM reuse when none of its
+imports or builtins may suspend or retain VM state. This admits buffered
+`http::client::request` and synchronous request-context programs, including
+key-auth/control flows and programs using `ngx.ctx`, `RequestWrite`, or
+`ResponseWrite`. Standard I/O, SQLite, SSE, timers, sleep, cosockets, every
+other standard host import, async ngx hosts, resource-bearing host schemas,
+and unknown host schemas are excluded. These checks are closed over the whole
+compiled program; adding any excluded import disables reuse.
+
+Static admission only selects the reusable request path. A successful
+`Halted` execution enters the runtime reuse gate after `reset_for_reuse`, a
+ready `poll_reset_for_reuse`, no pending scope reset, `clear_async_bridge`,
+`clear_runtime_print_sink`, and `Vm::is_reusable` all succeed. Failure,
+cancellation, timeout, pending cleanup, reset failure, and capacity overflow
+drop the VM. Every checkout installs a new `NgxAsyncBridge`, print sink,
+request identity, raw request pointer scope, empty `RequestLocalCtx`, and
+runtime policy.
 
 The reusable-request pool retains at most four idle VMs per worker. Its exact
 key is `(Arc<Program> identity, NGINX phase, complete StandardHostPolicy,

@@ -138,6 +138,7 @@ impl EventFdIo for LibcEventFdIo {
 
 pub(crate) struct Pending {
     pub(crate) queue: VecDeque<RequestIdentity>,
+    queued: HashSet<RequestIdentity>,
     in_flight: usize,
     cap: usize,
     cancelled: HashSet<RequestIdentity>,
@@ -194,9 +195,10 @@ impl CompletionSender {
             if pending.cancelled.contains(&identity) {
                 return Ok(());
             }
-            if !pending.queue.iter().any(|queued| *queued == identity) {
-                pending.queue.push_back(identity);
+            if !pending.queued.insert(identity) {
+                return Ok(());
             }
+            pending.queue.push_back(identity);
         }
         match self.write_eventfd() {
             Ok(()) => Ok(()),
@@ -294,6 +296,7 @@ impl NotifyBridge {
         let accepting = Arc::new(AtomicBool::new(true));
         let pending = Arc::new(Mutex::new(Pending {
             queue: VecDeque::new(),
+            queued: HashSet::new(),
             in_flight: 0,
             cap,
             cancelled: HashSet::new(),
@@ -337,10 +340,12 @@ impl NotifyBridge {
             FdState::Nginx { .. } | FdState::Closed => return Err(NotifyError::ShutDown),
         };
         {
-            let mut ready = self.lock_ready()?;
-            if !ready.iter().any(|queued| *queued == identity) {
-                ready.push_back(identity);
+            let mut pending = self.lock_pending()?;
+            if pending.cancelled.contains(&identity) || !pending.queued.insert(identity) {
+                return Ok(());
             }
+            let mut ready = self.lock_ready()?;
+            ready.push_back(identity);
         }
         if let Some(event) = event {
             if event.is_null() {
@@ -453,12 +458,22 @@ impl NotifyBridge {
 
     /// Take every ready identity. Capacity is owned by [`CompletionPermit`].
     pub fn take_ready(&self) -> Result<Vec<RequestIdentity>, NotifyError> {
+        let mut pending = self.lock_pending()?;
         let mut ready = self.lock_ready()?;
-        Ok(ready.drain(..).collect())
+        let taken: Vec<_> = ready.drain(..).collect();
+        for identity in &taken {
+            pending.queued.remove(identity);
+        }
+        Ok(taken)
     }
 
     pub fn pop_ready(&self) -> Result<Option<RequestIdentity>, NotifyError> {
-        Ok(self.lock_ready()?.pop_front())
+        let mut pending = self.lock_pending()?;
+        let identity = self.lock_ready()?.pop_front();
+        if let Some(identity) = identity {
+            pending.queued.remove(&identity);
+        }
+        Ok(identity)
     }
 
     pub fn harvest_and_take_ready(&self) -> Result<Vec<RequestIdentity>, NotifyError> {
@@ -585,6 +600,7 @@ impl NotifyBridge {
                 true
             }
         });
+        pending.queued.remove(&identity);
         Ok(found)
     }
 
@@ -601,6 +617,7 @@ impl NotifyBridge {
         let mut pending = self.lock_pending()?;
         let mut ready = self.lock_ready()?;
         pending.queue.clear();
+        pending.queued.clear();
         ready.clear();
         pending.in_flight = 0;
         pending.cancelled.clear();
@@ -827,6 +844,32 @@ mod tests {
             vec![identity(3)],
             "a cached waker must be able to wake again after harvest"
         );
+    }
+
+    #[test]
+    fn wake_between_harvest_and_owner_take_remains_coalesced() {
+        let bridge = NotifyBridge::new().unwrap();
+        let sender = bridge.sender();
+        sender.wake_identity(identity(3)).unwrap();
+        bridge.harvest().unwrap();
+
+        sender.wake_identity(identity(3)).unwrap();
+
+        assert_eq!(bridge.take_ready().unwrap(), vec![identity(3)]);
+        assert!(bridge.harvest_and_take_ready().unwrap().is_empty());
+    }
+
+    #[test]
+    fn same_identity_can_wake_after_owner_consumes_harvested_ready() {
+        let bridge = NotifyBridge::new().unwrap();
+        let sender = bridge.sender();
+        sender.wake_identity(identity(3)).unwrap();
+        bridge.harvest().unwrap();
+        assert_eq!(bridge.take_ready().unwrap(), vec![identity(3)]);
+
+        sender.wake_identity(identity(3)).unwrap();
+
+        assert_eq!(bridge.harvest_and_take_ready().unwrap(), vec![identity(3)]);
     }
 
     #[test]
@@ -1069,10 +1112,7 @@ mod tests {
             Err(NotifyError::Poisoned)
         );
         assert_eq!(bridge.harvest(), Err(NotifyError::Poisoned));
-        assert_eq!(
-            bridge.take_ready().expect("ready mutex is not poisoned"),
-            Vec::<RequestIdentity>::new()
-        );
+        assert_eq!(bridge.take_ready(), Err(NotifyError::Poisoned));
     }
 
     #[test]

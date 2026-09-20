@@ -10,6 +10,20 @@ CRATE_ROOT="${CRATE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 TMP_ROOT="${NGX_RUSTSCRIPT_TASK_TMP:-${TMPDIR:-/tmp}/ngx-rustscript-add-dynamic}"
 NGINX_SOURCE_DIR="${NGINX_SOURCE_DIR:-$TMP_ROOT/nginx-1.31.4}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CRATE_ROOT/target}"
+SERVER_VARIANT="${NGX_RUSTSCRIPT_SERVER_VARIANT:-nginx}"
+
+case "$SERVER_VARIANT" in
+  nginx)
+    EXPECTED_BANNER="nginx/1.31.4"
+    ;;
+  openresty)
+    EXPECTED_BANNER="openresty/1.31.4.1"
+    ;;
+  *)
+    echo "unsupported NGX_RUSTSCRIPT_SERVER_VARIANT: $SERVER_VARIANT" >&2
+    exit 1
+    ;;
+esac
 
 if [[ ! -x "$NGINX_SOURCE_DIR/configure" ]]; then
   echo "NGINX_SOURCE_DIR is not a configured 1.31.4 tree: $NGINX_SOURCE_DIR" >&2
@@ -59,8 +73,8 @@ if [[ ! -f "$MODULE_SO" ]]; then
 fi
 
 BANNER="$("$NGINX_BIN" -v 2>&1 || true)"
-if [[ "$BANNER" != *nginx/1.31.4* ]]; then
-  echo "emitted nginx is not 1.31.4: $BANNER" >&2
+if [[ "$BANNER" != *"$EXPECTED_BANNER"* ]]; then
+  echo "emitted server does not match $EXPECTED_BANNER: $BANNER" >&2
   exit 1
 fi
 REPORT="$("$NGINX_BIN" -V 2>&1 || true)"

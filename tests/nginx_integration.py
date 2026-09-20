@@ -18,7 +18,10 @@ import tempfile
 import threading
 import time
 
-PINNED_VERSION = "openresty/1.31.4.1"
+PINNED_VERSIONS = {
+    "nginx": "nginx/1.31.4",
+    "openresty": "openresty/1.31.4.1",
+}
 REQUIRED_CONFIGURE_ARGS = ("--with-http_ssl_module",)
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, "fixtures")
@@ -127,9 +130,10 @@ def parse_nginx_v(text):
     return version, args
 
 
-def validate_nginx_report(version, args):
-    if version != PINNED_VERSION:
-        raise CheckError(f"nginx version is {version}, expected {PINNED_VERSION}")
+def validate_nginx_report(version, args, server_variant="nginx"):
+    expected = PINNED_VERSIONS[server_variant]
+    if version != expected:
+        raise CheckError(f"nginx version is {version}, expected {expected}")
     for required in REQUIRED_CONFIGURE_ARGS:
         if required not in args:
             raise CheckError(f"nginx configure arguments missing {required}")
@@ -1039,8 +1043,8 @@ def run_acceptance(nginx, module):
                 f"tcp keepalive must reuse one connection, accepts={ka_accepts['n']}",
                 dump_owned(prefix, proc, error_text),
             )
-        summary["tcp-ka"] = "200/tcp-ok TCP_KA=ok reuse=1 openresty/1.31.4.1"
-        summary["tcp-tls"] = "rustls-cosocket cargo tests; openresty/1.31.4.1 marker"
+        summary["tcp-ka"] = "200/tcp-ok TCP_KA=ok reuse=1 configured-server"
+        summary["tcp-tls"] = "rustls-cosocket cargo tests; configured-server marker"
 
         # Concurrent mapping across two routes/durations/bodies.
         jobs = [("/alpha/", "alpha-body\n")] * 6 + [("/beta/", "beta-body\n")] * 6
@@ -1611,6 +1615,12 @@ def main(argv):
     )
     parser.add_argument("--nginx", required=True, help="absolute pinned nginx binary")
     parser.add_argument("--module", required=True, help="absolute module cdylib")
+    parser.add_argument(
+        "--server-variant",
+        choices=tuple(PINNED_VERSIONS),
+        default="nginx",
+        help="official nginx by default; openresty is an explicit local fixture",
+    )
     args = parser.parse_args(argv)
 
     nginx = require_absolute_file(args.nginx, "nginx", executable=True)
@@ -1626,7 +1636,7 @@ def main(argv):
     if version_proc.returncode != 0:
         raise CheckError("nginx -V failed", version_text)
     version, configure_args = parse_nginx_v(version_text)
-    validate_nginx_report(version, configure_args)
+    validate_nginx_report(version, configure_args, args.server_variant)
 
     summary = run_acceptance(nginx, module)
     print(format_summary(summary))

@@ -15,7 +15,7 @@ metadata on each directive. The prose is ngx-rustscript's own.
 
 | Page | Contents |
 | --- | --- |
-| [README](../README.md) | Requirements, OpenResty 1.31.4.1 ABI, build, release packages, tests |
+| [README](../README.md) | Requirements, NGINX 1.31.4 ABI, build, release packages, tests |
 | [Directives](directives.md) | `access_by_rss_file`, `content_by_rss_file`, `log_by_rss_file`, shared dict, I/O/HTTP/SQLite policy |
 | [API reference](api/index.md) | 199 ngx hosts, split by family, plus pd-vm async I/O/HTTP/SQLite |
 | [Execution model](execution-model.md) | Worker runtime, VM pool vs request-owned VM, Waiting/eventfd, log phase |
@@ -39,7 +39,9 @@ points yet. See [phase sets](api/index.md#phase-sets).
 
 ## Facts that apply everywhere
 
-- OpenResty **1.31.4.1** with NGINX core **1.31.4** (`nginx_version` 1031004).
+- Official NGINX **1.31.4** (`nginx_version` 1031004); an existing
+  OpenResty 1.31.4.1 build is supported only as an explicitly selected local
+  test fixture.
 - Production ngx host count is **199**: the 191 callable-family baseline
   plus `ngx::semaphore::{new,wait,post,count}` (worker-owned state, no
   script callables) and `ngx::timer::{at,every,pending_count,running_count}`

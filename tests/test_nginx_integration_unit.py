@@ -26,7 +26,17 @@ class QuoteTests(unittest.TestCase):
 
 
 class NginxVTests(unittest.TestCase):
-    def test_accepts_pinned_openresty_1_31_4_1(self):
+    def test_accepts_pinned_nginx_1_31_4_by_default(self):
+        text = (
+            "nginx version: nginx/1.31.4\n"
+            "built by gcc 13.3.0\n"
+            "configure arguments: --prefix=/tmp/nginx-prefix "
+            "--with-compat --with-http_ssl_module\n"
+        )
+        version, args = ni.parse_nginx_v(text)
+        ni.validate_nginx_report(version, args)
+
+    def test_accepts_openresty_only_as_explicit_local_fixture(self):
         text = (
             "nginx version: openresty/1.31.4.1\n"
             "built by gcc 13.3.0\n"
@@ -34,7 +44,9 @@ class NginxVTests(unittest.TestCase):
             "--with-http_ssl_module\n"
         )
         version, args = ni.parse_nginx_v(text)
-        ni.validate_nginx_report(version, args)
+        with self.assertRaises(ni.CheckError):
+            ni.validate_nginx_report(version, args)
+        ni.validate_nginx_report(version, args, server_variant="openresty")
 
     def test_rejects_wrong_version(self):
         text = (
@@ -48,7 +60,7 @@ class NginxVTests(unittest.TestCase):
 
     def test_rejects_missing_ssl(self):
         text = (
-            "nginx version: openresty/1.31.4.1\n"
+            "nginx version: nginx/1.31.4\n"
             "configure arguments: --prefix=/tmp/nginx-prefix --with-debug\n"
         )
         version, args = ni.parse_nginx_v(text)
@@ -57,7 +69,7 @@ class NginxVTests(unittest.TestCase):
 
     def test_quoted_prefix_with_spaces(self):
         text = (
-            "nginx version: openresty/1.31.4.1\n"
+            "nginx version: nginx/1.31.4\n"
             "configure arguments: --prefix='/tmp/pre fix' "
             "--with-debug --with-http_ssl_module\n"
         )

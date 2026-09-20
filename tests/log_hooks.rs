@@ -27,6 +27,7 @@ const PRODUCTION_SOURCE_FILES: &[&str] = &[
     "src/log.rs",
     "src/access.rs",
     "src/request_state.rs",
+    "src/runtime.rs",
     "src/host/body.rs",
 ];
 
@@ -55,6 +56,33 @@ fn log_proof_hooks_are_cfg_gated_in_source() {
                 "{rel} still mentions {ident} outside cfg(ngx_rustscript_integration_hooks):\n{stripped}"
             );
         }
+    }
+}
+
+#[test]
+fn production_source_inventory_covers_every_hook_marker() {
+    assert_eq!(
+        PRODUCTION_SOURCE_FILES,
+        [
+            "build.rs",
+            "src/lib.rs",
+            "src/log.rs",
+            "src/access.rs",
+            "src/request_state.rs",
+            "src/runtime.rs",
+            "src/host/body.rs",
+        ]
+    );
+    let sources = PRODUCTION_SOURCE_FILES
+        .iter()
+        .map(|rel| read_crate_file(rel))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for ident in HOOK_SOURCE_IDENTS {
+        assert!(
+            sources.contains(ident),
+            "hook marker {ident} is not covered by PRODUCTION_SOURCE_FILES"
+        );
     }
 }
 
@@ -387,6 +415,7 @@ fn hook_strings_are_the_documented_runtime_needles() {
             "BODY_COUNT_PROOF",
             "BODY_WAIT_ARMED",
             "NGX_RUSTSCRIPT_ASYNC_PROOF",
+            "ASYNC_STATUS_PROOF",
             "ASYNC_CALLBACK_PROOF",
             "NGX_RUSTSCRIPT_VM_REUSE_PROOF",
             "VM_REUSE_PROOF",

@@ -13,7 +13,7 @@ unsafe extern "C" {
     fn ngx_rustscript_stub_last_log() -> *const core::ffi::c_char;
     fn ngx_rustscript_test_request_new() -> *mut c_void;
     fn ngx_rustscript_test_request_free(r: *mut c_void);
-    fn ngx_rustscript_test_request_sizeof() -> c_uint;
+    fn ngx_rustscript_test_request_sizeof() -> usize;
     fn ngx_rustscript_test_request_set_internal(r: *mut c_void, val: c_uint);
     fn ngx_rustscript_test_request_set_filter_finalize(r: *mut c_void, val: c_uint);
     fn ngx_rustscript_test_request_set_error_page(r: *mut c_void, val: c_uint);
@@ -179,7 +179,7 @@ impl Drop for AbiRequest {
 }
 
 /// `sizeof(ngx_http_request_t)` from the configured NGINX C headers.
-pub fn request_sizeof() -> u32 {
+pub fn request_sizeof() -> usize {
     unsafe { ngx_rustscript_test_request_sizeof() }
 }
 

@@ -9,7 +9,6 @@ build = "build.rs"
 [package.metadata.ngx-rustscript]
 ngx-rust-git = "https://github.com/nginx/ngx-rust"
 ngx-rust-rev = "cda9d8372ccd2e139ef2b03e5806e019e7796187"
-openresty-version = "1.31.4.1"
 nginx-core-version = "1.31.4"
 nginx-core-tarball-sha256 = "ad304ae4de50dc073a93cdc083fe5ef44a601c58017435a486ef0f2df4feb58e"
 rustscript-git = "https://github.com/rustscript-lang/rustscript"

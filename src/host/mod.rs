@@ -487,6 +487,23 @@ mod layout {
                 Ok(7)
             }
 
+            /// Test-only host whose future is pending on its first poll and
+            /// immediately ready when the driver arms the production waker.
+            #[cfg(test)]
+            #[pd_host_function(name = "ngx::pending_ready")]
+            pub async fn pending_ready() -> VmResult<i64> {
+                let mut first = true;
+                std::future::poll_fn(move |_cx| {
+                    if first {
+                        first = false;
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(Ok(7))
+                    }
+                })
+                .await
+            }
+
             /// Test-only async host that fails after becoming ready.
             #[cfg(test)]
             #[pd_host_function(name = "ngx::fail")]
@@ -506,8 +523,12 @@ mod layout {
             }
 
             #[cfg(test)]
-            const TEST_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] =
-                &[probe_descriptor, ready_descriptor, fail_descriptor];
+            const TEST_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[
+                probe_descriptor,
+                ready_descriptor,
+                pending_ready_descriptor,
+                fail_descriptor,
+            ];
 
             #[cfg(test)]
             pub fn test_hosts_module() -> vm::HostModuleDescriptor {

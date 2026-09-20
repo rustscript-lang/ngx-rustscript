@@ -8,10 +8,11 @@ script once at configuration time.
 Import-free and pure synchronous scripts use a worker-local VM pool.
 Request-state scripts use a request-owned `AccessExec` and a fresh request
 context; generic host futures return `NGX_AGAIN` only when they are genuinely pending
-and resume through the worker eventfd callback. Quiescent VMs used by buffered
-`http::client::request` are reusable after successful `Halted` cleanup. Their
-pool key contains the exact compiled `Arc<Program>` identity, phase, complete
-standard-host policy, ngx catalog fingerprint, and standard catalog
+and resume through the worker eventfd callback. Statically quiescent
+request-state programs, including buffered `http::client::request`, key-auth
+control flows, and `ngx.ctx`, may reuse a VM after successful `Halted` cleanup.
+Their pool key contains the exact compiled `Arc<Program>` identity, phase,
+complete standard-host policy, ngx catalog fingerprint, and standard catalog
 fingerprint. SQLite, standard I/O, SSE, timers, sleep, cosockets, resource or
 unknown host schemas, failures, cancellation, timeouts, pending cleanup, and
 over-capacity returns are excluded. The worker retains at most four reusable
@@ -36,7 +37,7 @@ phase stays synchronous and fail-closed.
 | Component | Pin |
 | --- | --- |
 | [ngx-rust](https://github.com/nginx/ngx-rust) | `cda9d8372ccd2e139ef2b03e5806e019e7796187` (`ngx` / `nginx-sys` 0.5.0) |
-| OpenResty / NGINX core | OpenResty 1.31.4.1 with NGINX core 1.31.4 (`nginx_version` 1031004) |
+| NGINX | Official NGINX 1.31.4 (`nginx_version` 1031004), tarball SHA-256 `ad304ae4de50dc073a93cdc083fe5ef44a601c58017435a486ef0f2df4feb58e` |
 | RustScript / `pd-vm` | [`https://github.com/rustscript-lang/rustscript`](https://github.com/rustscript-lang/rustscript) at `87d8c5d5cb42b3381aecadb383c0b7bf34ff204f` (Cargo git dependency `package = "pd-vm"` on that immutable rev; no sibling path) |
 | Rust toolchain | 1.85.0 or later (ngx-rust MSRV). Verified with rustc 1.94.1 |
 
@@ -50,10 +51,9 @@ Required build tools on Linux:
 
 ## ABI matching
 
-`nginx-sys` generates bindings from the **configured** NGINX core inside the
-OpenResty source tree. The
+`nginx-sys` generates bindings from the **configured** NGINX source tree. The
 module `.so` must be built against the same source and `./configure` flags as
-the OpenResty binary that loads it. Do not mix another NGINX/OpenResty build
+the NGINX binary that loads it. Do not mix another NGINX/OpenResty build
 with this module.
 
 Official `nginx-sys` inputs (do not invent extra variables):
@@ -67,13 +67,13 @@ Only `./configure` is required for bindgen. The fixture below also runs `make`
 so `nginx -t` can load the module. An explicit `--builddir=` path is accepted
 and validated as a path-shaped configure argument.
 
-The selected build path is `nginx-sys` bindgen against the configured NGINX
-1.31.4 core inside OpenResty 1.31.4.1. Pre-generated or vendored bindings are
-not used: they cannot match ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`
-and the selected generated headers. Install clang and libclang so rust-bindgen
-can generate bindings at `cargo build`.
+The selected build path is `nginx-sys` bindgen against configured official
+NGINX 1.31.4. Pre-generated or vendored bindings are not used: they cannot
+match ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187` and the selected
+generated headers. Install clang and libclang so rust-bindgen can generate
+bindings at `cargo build`.
 
-Clear inherited `CFLAGS` / `BINDGEN_EXTRA_CLANG_ARGS` before OpenResty
+Clear inherited `CFLAGS` / `BINDGEN_EXTRA_CLANG_ARGS` before NGINX
 `./configure`. Set both to `-I$NGINX_BUILD_DIR` for Cargo so ngx-rust bindgen,
 the request shim, and the ABI probes select the same generated headers.
 
@@ -82,23 +82,25 @@ the request shim, and the ABI probes select the same generated headers.
 ```sh
 # Run from the crate root. Capture absolute paths before changing directories.
 CRATE_ROOT="$PWD"
-OPENRESTY_SOURCE_DIR="$CRATE_ROOT/openresty-1.31.4.1"
-NGINX_SOURCE_DIR="$OPENRESTY_SOURCE_DIR/build/nginx-1.31.4"
+NGINX_SOURCE_DIR="$CRATE_ROOT/nginx-1.31.4"
 NGINX_BUILD_DIR="$NGINX_SOURCE_DIR/objs"
 
-# 1. OpenResty 1.31.4.1 (NGINX core 1.31.4)
-curl -fL -o openresty-1.31.4.1.tar.gz https://openresty.org/download/openresty-1.31.4.1.tar.gz
-tar -xf openresty-1.31.4.1.tar.gz
-cd "$OPENRESTY_SOURCE_DIR"
+# 1. Official NGINX 1.31.4, verified before extraction.
+curl -fL -o nginx-1.31.4.tar.gz https://nginx.org/download/nginx-1.31.4.tar.gz
+printf '%s  %s\n' \
+  ad304ae4de50dc073a93cdc083fe5ef44a601c58017435a486ef0f2df4feb58e \
+  nginx-1.31.4.tar.gz | sha256sum --check --strict
+tar -xf nginx-1.31.4.tar.gz
+cd "$NGINX_SOURCE_DIR"
 unset CFLAGS CPPFLAGS BINDGEN_EXTRA_CLANG_ARGS
-./configure --prefix=/usr/local/openresty-1.31.4.1 --with-debug --with-http_ssl_module
+./configure --with-compat --with-http_ssl_module
 make -j"$(nproc)"
-make install
 
 # 2. return to the crate and build the cdylib against that exact tree
 cd "$CRATE_ROOT"
 export NGINX_SOURCE_DIR
 export NGINX_BUILD_DIR
+export NGX_RUSTSCRIPT_NGINX="$NGINX_BUILD_DIR/nginx"
 export CFLAGS="-I$NGINX_BUILD_DIR"
 export BINDGEN_EXTRA_CLANG_ARGS="-I$NGINX_BUILD_DIR"
 # Use the git CLI when GitHub HTTPS is rewritten to SSH (libgit2 cannot auth).
@@ -119,7 +121,7 @@ module object is named `ngx_http_rustscript_module` inside that table; it
 is not a dynamic symbol.
 
 Standalone `cargo test` validates the explicit `$NGX_RUSTSCRIPT_NGINX`
-binary, `openresty/1.31.4.1`, and `--with-http_ssl_module` in the
+binary, `nginx/1.31.4`, and `--with-http_ssl_module` in the
 module-load harness before `nginx -t`. Quoted configure paths, `--prefix`,
 `--builddir`, `--add-dynamic-module`, and other valid NGINX flags are
 accepted.
@@ -131,10 +133,17 @@ Tests resolve `${CARGO_TARGET_DIR:-<crate>/target}/debug/libngx_rustscript.so`
 stubs. `nginx -t`, real module load, and HTTP are the acceptance evidence.
 
 Tests require `$NGINX_BUILD_DIR` to provide the selected generated headers and
-`$NGX_RUSTSCRIPT_NGINX` to report `openresty/1.31.4.1` with
+`$NGX_RUSTSCRIPT_NGINX` to report `nginx/1.31.4` with
 `--with-http_ssl_module`. Fixture `nginx.conf.in` interpolates quoted paths;
 unsafe bytes (NUL, newline, non-UTF-8) are rejected fail-closed, and
 `nginx -t` receives `-p` / `-c` as `OsStr`.
+
+An already configured OpenResty 1.31.4.1 tree may be used as an explicit local
+fixture by pointing `NGINX_SOURCE_DIR`, `NGINX_BUILD_DIR`, and
+`NGX_RUSTSCRIPT_NGINX` at that same build and setting
+`NGX_RUSTSCRIPT_SERVER_VARIANT=openresty`. The Python acceptance runner uses
+the corresponding explicit `--server-variant openresty` option. CI and release
+artifacts always use the verified official NGINX source above.
 
 ### Optional: NGINX `--add-dynamic-module`
 
@@ -161,19 +170,19 @@ The Release workflow can also be started manually with an existing `v*` tag.
 Linux amd64 releases provide:
 
 - `ngx-rustscript-module-<version>-linux-amd64.tgz`
-- `ngx-rustscript-openresty-<version>-openresty-1.31.4.1-linux-amd64.tgz`
+- `ngx-rustscript-nginx-<version>-nginx-1.31.4-linux-amd64.tgz`
 - `nginx-module-rustscript_<version>_amd64.deb`
 - `SHA256SUMS`
 
 The module tgz contains `lib/ngx_http_rustscript_module.so`, the README, the
-complete documentation tree, and the deployment examples. The OpenResty bundle
-adds the pinned OpenResty 1.31.4.1 executable, a ready module-loading configuration,
+complete documentation tree, and the deployment examples. The NGINX bundle
+adds the pinned official NGINX 1.31.4 executable, a ready module-loading configuration,
 static pages, temporary directories, and `bin/nginx-rustscript`, which runs the
 included NGINX with the extracted directory as its prefix:
 
 ```sh
-tar -xzf ngx-rustscript-openresty-<version>-openresty-1.31.4.1-linux-amd64.tgz
-cd ngx-rustscript-openresty-<version>-openresty-1.31.4.1-linux-amd64
+tar -xzf ngx-rustscript-nginx-<version>-nginx-1.31.4-linux-amd64.tgz
+cd ngx-rustscript-nginx-<version>-nginx-1.31.4-linux-amd64
 bin/nginx-rustscript -t
 bin/nginx-rustscript
 ```
@@ -181,7 +190,7 @@ bin/nginx-rustscript
 The deb installs the module at
 `/usr/lib/nginx/modules/ngx_http_rustscript_module.so`. It does not edit NGINX
 configuration or restart NGINX. Add an explicit top-level directive after
-confirming that the target is OpenResty 1.31.4.1 with NGINX core 1.31.4 and
+confirming that the target is NGINX 1.31.4 with matching generated headers and
 matching build flags:
 
 ```nginx
@@ -233,7 +242,7 @@ Full syntax, inheritance, defaults, and error strings:
 Prove load with an isolated prefix:
 
 ```sh
-export NGX_RUSTSCRIPT_NGINX="/usr/local/openresty-1.31.4.1/nginx/sbin/nginx"
+export NGX_RUSTSCRIPT_NGINX="$NGINX_BUILD_DIR/nginx"
 : "${CARGO_TARGET_DIR:=$CRATE_ROOT/target}"
 export CARGO_TARGET_DIR
 cargo build --lib
@@ -263,7 +272,7 @@ python3 tests/nginx_integration.py --nginx <absolute pinned nginx> --module <abs
 ```
 
 It checks that the nginx binary and module paths are absolute, that nginx
-reports `openresty/1.31.4.1` with `--with-http_ssl_module`,
+reports `nginx/1.31.4` with `--with-http_ssl_module`,
 and that `nginx -t` accepts a valid sleep config while missing,
 syntax, unsupported-import, and wrong-arity fixtures fail with those
 causes. Against a live isolated master (`master_process on`,
@@ -289,8 +298,9 @@ python3 scripts/check_docs_links.py
 
 - `dlopen() ... failed` — the module path is wrong, not a regular file, or
   was built against a different NGINX ABI than the binary that loads it.
-- `nginx version is ..., expected openresty/1.31.4.1` — use the selected
-  OpenResty binary from `$NGX_RUSTSCRIPT_NGINX`.
+- `nginx version is ..., expected nginx/1.31.4` — use the selected official
+  NGINX binary from `$NGX_RUSTSCRIPT_NGINX`, or explicitly select the local
+  OpenResty fixture mode described above.
 - bindgen / include errors — install clang and libclang; point
   `NGINX_SOURCE_DIR` / `NGINX_BUILD_DIR` at the configured NGINX 1.31.4 core
   and set `CFLAGS` / `BINDGEN_EXTRA_CLANG_ARGS` to `-I$NGINX_BUILD_DIR`.

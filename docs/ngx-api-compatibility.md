@@ -7,7 +7,7 @@ documents only the hosts in the [API reference](api/index.md) (199 ngx names, pl
 pd-vm I/O/HTTP/SQLite). Host-by-host tables, phase sets, and hard caps
 live there; this page is the compatibility mapping.
 
-**Built and tested against OpenResty 1.31.4.1 with NGINX core 1.31.4**
+**Built and tested against official NGINX 1.31.4**
 (`nginx_version` 1031004), ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`, and the
 pinned `pd-vm` revision in the crate README. Executable directives are
 `access_by_rss_file`, `content_by_rss_file`, and `log_by_rss_file`.

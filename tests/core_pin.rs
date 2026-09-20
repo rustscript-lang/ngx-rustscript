@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 const FROZEN_REV: &str = "87d8c5d5cb42b3381aecadb383c0b7bf34ff204f";
+const STALE_PINS: &[&str] = &["f5f71eb", "f5f71ebc2f38e276c35f2aebaf63f4e2780efe99"];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -14,6 +15,9 @@ fn require_full_git_rev(rev: &str, label: &str) -> Result<(), String> {
         return Err(format!(
             "{label} must be a full 40-character git SHA, got {rev:?}"
         ));
+    }
+    if STALE_PINS.contains(&rev) {
+        return Err(format!("{label} still pins stale core revision {rev}"));
     }
     Ok(())
 }
@@ -57,4 +61,29 @@ fn rustscript_core_pin_is_frozen_full_sha() {
         "Cargo.lock must resolve pd-vm/pd-host-function to {expected_source}"
     );
     assert!(require_full_git_rev("b1d6cff", "abbreviated").is_err());
+    for stale in STALE_PINS {
+        assert!(require_full_git_rev(stale, "stale").is_err());
+        for (label, source) in [
+            ("Cargo.toml", cargo_toml.as_str()),
+            ("Cargo.lock", cargo_lock.as_str()),
+        ] {
+            assert!(
+                !source.contains(stale),
+                "{label} must not retain stale pin {stale}"
+            );
+        }
+    }
+    for public_pin in ["README.md", "docs/design/ngx-scheduler.md"] {
+        let source = fs::read_to_string(root.join(public_pin)).expect("read public pin source");
+        assert!(
+            source.contains(FROZEN_REV),
+            "{public_pin} must name {FROZEN_REV}"
+        );
+        for stale in STALE_PINS {
+            assert!(
+                !source.contains(stale),
+                "{public_pin} must not retain stale pin {stale}"
+            );
+        }
+    }
 }

@@ -23,12 +23,11 @@ concurrency:
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
-  OPENRESTY_VERSION: "1.31.4.1"
   NGINX_CORE_VERSION: "1.31.4"
-  OPENRESTY_SOURCE_DIR: ${{ github.workspace }}/.ci/openresty-1.31.4.1
-  NGINX_SOURCE_DIR: ${{ github.workspace }}/.ci/openresty-1.31.4.1/build/nginx-1.31.4
-  NGINX_BUILD_DIR: ${{ github.workspace }}/.ci/openresty-1.31.4.1/build/nginx-1.31.4/objs
-  NGX_RUSTSCRIPT_NGINX: ${{ github.workspace }}/.ci/openresty-prefix/nginx/sbin/nginx
+  NGINX_CORE_TARBALL_SHA256: "ad304ae4de50dc073a93cdc083fe5ef44a601c58017435a486ef0f2df4feb58e"
+  NGINX_SOURCE_DIR: ${{ github.workspace }}/.ci/nginx-1.31.4
+  NGINX_BUILD_DIR: ${{ github.workspace }}/.ci/nginx-1.31.4/objs
+  NGX_RUSTSCRIPT_NGINX: ${{ github.workspace }}/.ci/nginx-1.31.4/objs/nginx
   NGX_RUSTSCRIPT_TASK_TMP: ${{ github.workspace }}/.ci/tmp
   TMPDIR: ${{ github.workspace }}/.ci/tmp
 
@@ -69,26 +68,23 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Configure pinned OpenResty
+      - name: Configure pinned NGINX
         run: |
           mkdir -p .ci/download "$NGX_RUSTSCRIPT_TASK_TMP"
           curl --fail --location --retry 3 \
-            --output ".ci/download/openresty-${OPENRESTY_VERSION}.tar.gz" \
-            "https://openresty.org/download/openresty-${OPENRESTY_VERSION}.tar.gz"
-          tar -C .ci -xzf ".ci/download/openresty-${OPENRESTY_VERSION}.tar.gz"
+            --output ".ci/download/nginx-${NGINX_CORE_VERSION}.tar.gz" \
+            "https://nginx.org/download/nginx-${NGINX_CORE_VERSION}.tar.gz"
+          printf '%s  %s\n' "$NGINX_CORE_TARBALL_SHA256" ".ci/download/nginx-${NGINX_CORE_VERSION}.tar.gz" \
+            | sha256sum --check --strict
+          tar -C .ci -xzf ".ci/download/nginx-${NGINX_CORE_VERSION}.tar.gz"
           unset CFLAGS CPPFLAGS BINDGEN_EXTRA_CLANG_ARGS
-          cd "$OPENRESTY_SOURCE_DIR"
-          ./configure \
-            --prefix="${{ github.workspace }}/.ci/openresty-prefix" \
-            --with-debug \
-            --with-http_ssl_module
+          cd "$NGINX_SOURCE_DIR"
+          ./configure --with-compat --with-http_ssl_module
           make -j"$(nproc)"
-          make install
           REPORT="$("$NGX_RUSTSCRIPT_NGINX" -V 2>&1)"
-          [[ "$REPORT" == *"openresty/$OPENRESTY_VERSION"* ]]
+          [[ "$REPORT" == *"nginx/$NGINX_CORE_VERSION"* ]]
+          [[ "$REPORT" == *"--with-compat"* ]]
           [[ "$REPORT" == *"--with-http_ssl_module"* ]]
-          grep -F "#define NGINX_VERSION      \"$NGINX_CORE_VERSION\"" \
-            "$NGINX_SOURCE_DIR/src/core/nginx.h"
           test -f "$NGINX_BUILD_DIR/ngx_auto_config.h"
           printf 'CFLAGS=-I%s\n' "$NGINX_BUILD_DIR" >> "$GITHUB_ENV"
           printf 'BINDGEN_EXTRA_CLANG_ARGS=-I%s\n' "$NGINX_BUILD_DIR" >> "$GITHUB_ENV"
