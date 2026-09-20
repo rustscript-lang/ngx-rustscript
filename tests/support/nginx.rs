@@ -179,15 +179,7 @@ pub fn nginx_binary() -> PathBuf {
     });
     let nginx = resolve_nginx_binary(&build_dir, env_path("NGX_RUSTSCRIPT_NGINX").as_deref())
         .unwrap_or_else(|err| panic!("{err}"));
-    let output = Command::new(&nginx)
-        .arg("-V")
-        .output()
-        .unwrap_or_else(|err| panic!("failed to spawn nginx -V: {err}"));
-    let text = combined(&output);
-    if !output.status.success() {
-        panic!("nginx -V failed:\n{text}");
-    }
-    let report = parse_nginx_v_output(&text).unwrap_or_else(|err| panic!("{err}"));
+    let report = nginx_version_report(&nginx).unwrap_or_else(|err| panic!("{err}"));
     validate_nginx_version_report(&report).unwrap_or_else(|err| panic!("{err}"));
     nginx
 }
@@ -230,6 +222,24 @@ pub fn resolve_nginx_binary(
 pub struct NginxVersionReport {
     version: String,
     configure_args: Vec<String>,
+}
+
+impl NginxVersionReport {
+    pub fn debug_enabled(&self) -> bool {
+        self.configure_args.iter().any(|arg| arg == "--with-debug")
+    }
+}
+
+pub fn nginx_version_report(nginx: &Path) -> Result<NginxVersionReport, String> {
+    let output = Command::new(nginx)
+        .arg("-V")
+        .output()
+        .map_err(|err| format!("failed to spawn nginx -V: {err}"))?;
+    let text = combined(&output);
+    if !output.status.success() {
+        return Err(format!("nginx -V failed:\n{text}"));
+    }
+    parse_nginx_v_output(&text)
 }
 
 pub fn parse_nginx_v_output(text: &str) -> Result<NginxVersionReport, String> {
@@ -485,6 +495,24 @@ configure arguments: --prefix=/tmp/nginx-prefix --with-compat --with-http_ssl_mo
     let report = parse_nginx_v_output(text).expect("parse pinned nginx -V");
     validate_nginx_version_report_for_banner(&report, PINNED_NGINX_VERSION_BANNER)
         .expect("pinned ABI");
+}
+
+#[test]
+fn nginx_v_output_debug_mode_follows_configure_arguments() {
+    let without_debug = "\
+nginx version: nginx/1.31.4
+configure arguments: --prefix=/tmp/nginx-prefix --with-compat --with-http_ssl_module
+";
+    let with_debug = "\
+nginx version: openresty/1.31.4.1
+configure arguments: --prefix=/tmp/openresty-prefix --with-debug --with-http_ssl_module
+";
+
+    let report = parse_nginx_v_output(without_debug).expect("parse no-debug nginx -V");
+    assert!(!report.debug_enabled());
+
+    let report = parse_nginx_v_output(with_debug).expect("parse debug nginx -V");
+    assert!(report.debug_enabled());
 }
 
 #[test]

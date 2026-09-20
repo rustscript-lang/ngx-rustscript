@@ -12,7 +12,7 @@ use std::time::Duration;
 use support::artifact::module_cdylib;
 use support::nginx::{
     combined, nginx_binary, nginx_escape_quoted, nginx_process_group_command, nginx_quote_path,
-    nginx_test, terminate_process_group,
+    nginx_test, nginx_version_report, terminate_process_group,
 };
 use support::temp::{isolated_prefix, unique_temp_dir};
 
@@ -630,6 +630,9 @@ http {{
 #[test]
 fn access_phase_logs_worker_metadata_constants_and_request_log() {
     let nginx = nginx_binary();
+    let debug_enabled = nginx_version_report(&nginx)
+        .expect("parse selected nginx -V")
+        .debug_enabled();
     let module = module_cdylib();
     let port = free_port();
     let prefix = isolated_prefix("ngx-rustscript-meta");
@@ -729,7 +732,11 @@ if ngx::worker::exiting() {
     assert_eq!(fields.get("id").map(String::as_str), Some("0"));
     assert_eq!(fields.get("count").map(String::as_str), Some("1"));
     assert_eq!(fields.get("version").map(String::as_str), Some("1031004"));
-    assert_eq!(fields.get("debug").map(String::as_str), Some(""));
+    assert_eq!(
+        fields.get("debug").map(String::as_str),
+        debug_enabled.then_some(""),
+        "debug metadata must match the selected nginx --with-debug configuration"
+    );
     assert_eq!(fields.get("phase").map(String::as_str), Some("access"));
     assert_eq!(fields.get("ok").map(String::as_str), Some("0"));
     assert_eq!(fields.get("status_ok").map(String::as_str), Some("200"));
