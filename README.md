@@ -37,7 +37,7 @@ phase stays synchronous and fail-closed.
 | Component | Pin |
 | --- | --- |
 | [ngx-rust](https://github.com/nginx/ngx-rust) | `cda9d8372ccd2e139ef2b03e5806e019e7796187` (`ngx` / `nginx-sys` 0.5.0) |
-| NGINX | Official NGINX 1.31.4 (`nginx_version` 1031004), tarball SHA-256 `ad304ae4de50dc073a93cdc083fe5ef44a601c58017435a486ef0f2df4feb58e` |
+| NGINX | Official NGINX 1.31.4 (`nginx_version` 1031004), tarball SHA-256 `e6f20b644a17a643f059ae6467a1971fe2811587d025e071068753a1f1e3b3c3` |
 | RustScript / `pd-vm` | [`https://github.com/rustscript-lang/rustscript`](https://github.com/rustscript-lang/rustscript) at `87d8c5d5cb42b3381aecadb383c0b7bf34ff204f` (Cargo git dependency `package = "pd-vm"` on that immutable rev; no sibling path) |
 | Rust toolchain | 1.85.0 or later (ngx-rust MSRV). Verified with rustc 1.94.1 |
 
@@ -88,7 +88,7 @@ NGINX_BUILD_DIR="$NGINX_SOURCE_DIR/objs"
 # 1. Official NGINX 1.31.4, verified before extraction.
 curl -fL -o nginx-1.31.4.tar.gz https://nginx.org/download/nginx-1.31.4.tar.gz
 printf '%s  %s\n' \
-  ad304ae4de50dc073a93cdc083fe5ef44a601c58017435a486ef0f2df4feb58e \
+  e6f20b644a17a643f059ae6467a1971fe2811587d025e071068753a1f1e3b3c3 \
   nginx-1.31.4.tar.gz | sha256sum --check --strict
 tar -xf nginx-1.31.4.tar.gz
 cd "$NGINX_SOURCE_DIR"

@@ -24,7 +24,7 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
   NGINX_CORE_VERSION: "1.31.4"
-  NGINX_CORE_TARBALL_SHA256: "ad304ae4de50dc073a93cdc083fe5ef44a601c58017435a486ef0f2df4feb58e"
+  NGINX_CORE_TARBALL_SHA256: "e6f20b644a17a643f059ae6467a1971fe2811587d025e071068753a1f1e3b3c3"
   NGINX_SOURCE_DIR: ${{ github.workspace }}/.ci/nginx-1.31.4
   NGINX_BUILD_DIR: ${{ github.workspace }}/.ci/nginx-1.31.4/objs
   NGX_RUSTSCRIPT_NGINX: ${{ github.workspace }}/.ci/nginx-1.31.4/objs/nginx

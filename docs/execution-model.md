@@ -83,8 +83,12 @@ closure.
 The eventfd callback polls the waiting host op, resumes the same VM on
 the worker main thread, and continues `ngx_http_core_run_phases`
 exactly once so the phase handler can return `NGX_OK`. Only a successfully
-halted, fully quiescent buffered-HTTP VM may return to the reusable-request
-pool.
+halted VM admitted by the reusable-request classifier may return to the pool;
+eligible classes include buffered HTTP and synchronous key-auth/control,
+`ngx.ctx`, `RequestWrite`, and `ResponseWrite` request state. Every return is
+additionally gated by complete runtime quiescence and exact program, phase,
+policy, and catalog-key isolation. Async hosts, resource-bearing schemas,
+timers, SSE, SQLite, standard I/O, and cosockets remain excluded.
 
 Async wait capacity is `DEFAULT_MAX_IN_FLIGHT` (1024). Reserve is
 rejected when full. Host futures and wakers own only a queue sender and

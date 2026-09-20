@@ -95,7 +95,7 @@ STALE_RUSTSCRIPT_PINS = (
     "f5f71ebc2f38e276c35f2aebaf63f4e2780efe99",
 )
 NGINX_VERSION = "1.31.4"
-NGINX_SHA256 = "ad304ae4de50dc073a93cdc083fe5ef44a601c58017435a486ef0f2df4feb58e"
+OFFICIAL_NGINX_1_31_4_SHA256 = "e6f20b644a17a643f059ae6467a1971fe2811587d025e071068753a1f1e3b3c3"
 FULL_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -160,16 +160,19 @@ class ReleasePackagingTests(unittest.TestCase):
 
         metadata = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["metadata"]["ngx-rustscript"]
         self.assertEqual(metadata["nginx-core-version"], NGINX_VERSION)
-        self.assertEqual(metadata["nginx-core-tarball-sha256"], NGINX_SHA256)
-        self.assertEqual(ci["env"]["NGINX_CORE_VERSION"], metadata["nginx-core-version"])
+        self.assertEqual(
+            metadata["nginx-core-tarball-sha256"],
+            OFFICIAL_NGINX_1_31_4_SHA256,
+        )
+        self.assertEqual(ci["env"]["NGINX_CORE_VERSION"], NGINX_VERSION)
         self.assertEqual(
             ci["env"]["NGINX_CORE_TARBALL_SHA256"],
-            metadata["nginx-core-tarball-sha256"],
+            OFFICIAL_NGINX_1_31_4_SHA256,
         )
-        self.assertEqual(release["env"]["NGINX_CORE_VERSION"], metadata["nginx-core-version"])
+        self.assertEqual(release["env"]["NGINX_CORE_VERSION"], NGINX_VERSION)
         self.assertEqual(
             release["env"]["NGINX_CORE_TARBALL_SHA256"],
-            metadata["nginx-core-tarball-sha256"],
+            OFFICIAL_NGINX_1_31_4_SHA256,
         )
 
         ci_text = CI_WORKFLOW.read_text()
@@ -177,7 +180,7 @@ class ReleasePackagingTests(unittest.TestCase):
         for workflow_text in (ci_text, release_text):
             self.assertNotIn("openresty.org/download", workflow_text)
             self.assertNotIn("OPENRESTY_VERSION", workflow_text)
-            self.assertIn(NGINX_SHA256, workflow_text)
+            self.assertIn(OFFICIAL_NGINX_1_31_4_SHA256, workflow_text)
         for required in (
             "cargo fmt --all -- --check",
             "cargo check --locked",

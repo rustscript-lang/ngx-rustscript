@@ -10,7 +10,7 @@ build = "build.rs"
 ngx-rust-git = "https://github.com/nginx/ngx-rust"
 ngx-rust-rev = "cda9d8372ccd2e139ef2b03e5806e019e7796187"
 nginx-core-version = "1.31.4"
-nginx-core-tarball-sha256 = "ad304ae4de50dc073a93cdc083fe5ef44a601c58017435a486ef0f2df4feb58e"
+nginx-core-tarball-sha256 = "e6f20b644a17a643f059ae6467a1971fe2811587d025e071068753a1f1e3b3c3"
 rustscript-git = "https://github.com/rustscript-lang/rustscript"
 rustscript-rev = "87d8c5d5cb42b3381aecadb383c0b7bf34ff204f"
 
