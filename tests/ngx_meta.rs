@@ -64,6 +64,12 @@ fn expect_string(value: Value) -> String {
     }
 }
 
+fn configure_has_exact_arg(configure: &str, expected: &str) -> bool {
+    configure
+        .split_ascii_whitespace()
+        .any(|arg| arg == expected)
+}
+
 fn expect_pids(source: &str) -> Vec<i64> {
     match eval(source) {
         Value::Array(values) => values.iter().cloned().map(expect_int).collect(),
@@ -372,12 +378,24 @@ fn constant_manifest_uses_openresty_names_and_sync_metadata() {
 }
 
 #[test]
+fn configure_argument_matching_requires_an_exact_token() {
+    assert!(configure_has_exact_arg(
+        "--with-compat --with-debug --with-http_ssl_module",
+        "--with-debug"
+    ));
+    assert!(!configure_has_exact_arg(
+        "--with-compat --with-debug-log --with-http_ssl_module",
+        "--with-debug"
+    ));
+}
+
+#[test]
 fn compile_time_config_metadata_is_owned_and_truthful() {
     assert_eq!(
         expect_string(eval("use ngx;\nngx::config::subsystem();\n")),
         "http"
     );
-    assert!(expect_bool(eval("use ngx;\nngx::config::debug();\n")));
+    let debug = expect_bool(eval("use ngx;\nngx::config::debug();\n"));
     assert_eq!(
         expect_int(eval("use ngx;\nngx::config::nginx_version();\n")),
         1_031_004
@@ -387,8 +405,13 @@ fn compile_time_config_metadata_is_owned_and_truthful() {
         1_000
     );
     let configure = expect_string(eval("use ngx;\nngx::config::nginx_configure();\n"));
+    assert_eq!(
+        debug,
+        configure_has_exact_arg(&configure, "--with-debug"),
+        "debug metadata must match the owned NGX_CONFIGURE value: {configure}"
+    );
     assert!(
-        configure.contains("--with-debug") && configure.contains("--with-http_ssl_module"),
+        configure_has_exact_arg(&configure, "--with-http_ssl_module"),
         "nginx_configure must come from NGX_CONFIGURE, got {configure}"
     );
 
