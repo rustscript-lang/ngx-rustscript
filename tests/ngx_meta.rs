@@ -377,10 +377,10 @@ fn compile_time_config_metadata_is_owned_and_truthful() {
         expect_string(eval("use ngx;\nngx::config::subsystem();\n")),
         "http"
     );
-    assert!(!expect_bool(eval("use ngx;\nngx::config::debug();\n")));
+    assert!(expect_bool(eval("use ngx;\nngx::config::debug();\n")));
     assert_eq!(
         expect_int(eval("use ngx;\nngx::config::nginx_version();\n")),
-        1_030_004
+        1_031_004
     );
     assert_eq!(
         expect_int(eval("use ngx;\nngx::config::ngx_rustscript_version();\n")),
@@ -388,7 +388,7 @@ fn compile_time_config_metadata_is_owned_and_truthful() {
     );
     let configure = expect_string(eval("use ngx;\nngx::config::nginx_configure();\n"));
     assert!(
-        configure.contains("--with-compat") && configure.contains("--with-http_ssl_module"),
+        configure.contains("--with-debug") && configure.contains("--with-http_ssl_module"),
         "nginx_configure must come from NGX_CONFIGURE, got {configure}"
     );
 

@@ -209,6 +209,7 @@ typedef struct {
 } ngx_queue_t;
 
 ngx_queue_t ngx_posted_events;
+ngx_queue_t ngx_posted_next_events;
 
 typedef struct {
     size_t len;

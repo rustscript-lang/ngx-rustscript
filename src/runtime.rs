@@ -68,6 +68,11 @@ fn is_worker_or_single() -> bool {
 
 const MAX_IDLE_REUSABLE_REQUEST_VMS: usize = 4;
 
+fn request_vm_ngx_catalog_abi() -> vm::HostApiFingerprint {
+    static ABI: std::sync::OnceLock<vm::HostApiFingerprint> = std::sync::OnceLock::new();
+    *ABI.get_or_init(|| crate::host::compile_host_catalog().fingerprint())
+}
+
 struct ReusableRequestVm {
     key: ReusableVmKey,
     vm: Vm,
@@ -90,11 +95,11 @@ impl ReusableRequestVmPool {
         Ok(vm)
     }
 
-    fn recycle(&mut self, key: ReusableVmKey, mut vm: Vm) {
+    fn recycle(&mut self, key: ReusableVmKey, mut vm: Vm, runtime: &Handle) {
         if self.idle.len() >= MAX_IDLE_REUSABLE_REQUEST_VMS {
             return;
         }
-        if crate::vm_pool::reset_for_pool(&mut vm) {
+        if crate::vm_pool::reset_request_vm_for_pool(&mut vm, runtime) {
             self.idle.push(ReusableRequestVm { key, vm });
         }
     }
@@ -148,6 +153,10 @@ impl WorkerRuntime {
 
     pub fn in_flight(&self) -> Result<usize, NotifyError> {
         self.notify.in_flight()
+    }
+
+    pub fn post_continuation(&self, identity: RequestIdentity) -> Result<(), RuntimeError> {
+        self.notify.post_continuation(identity).map_err(Into::into)
     }
 
     pub fn handle(&self) -> Result<Handle, RuntimeError> {
@@ -229,11 +238,14 @@ impl WorkerRuntime {
             program,
             phase,
             policy,
+            ngx_catalog_abi: request_vm_ngx_catalog_abi(),
+            standard_catalog_abi: vm::standard_host_catalog_fingerprint(),
         };
         let handle = self.handle().map_err(|error| error.to_string())?;
         let mut vm = self.reusable_request_vms.borrow_mut().take(&key)?;
         vm.set_async_bridge(Box::new(crate::async_bridge::NgxAsyncBridge::new(handle)))
             .map_err(|error| error.to_string())?;
+        vm.set_runtime_print_sink(|_| {});
         Ok(AccessExec::bind_reusable_vm(
             vm, key, request_id, generation,
         ))
@@ -325,6 +337,10 @@ impl AsyncWait for WorkerRuntime {
         eventfd_waker(self.sender(), identity)
     }
 
+    fn post_continuation(&self, identity: RequestIdentity) -> Result<(), SubmitError> {
+        WorkerRuntime::post_continuation(self, identity).map_err(|_| SubmitError::Closed)
+    }
+
     fn invalidate(&self, identity: RequestIdentity) {
         WorkerRuntime::invalidate(self, identity);
     }
@@ -337,7 +353,12 @@ impl AsyncWait for WorkerRuntime {
         let Some((key, vm)) = exec.take_reusable_vm() else {
             return false;
         };
-        self.reusable_request_vms.borrow_mut().recycle(key, vm);
+        let Ok(handle) = self.handle() else {
+            return true;
+        };
+        self.reusable_request_vms
+            .borrow_mut()
+            .recycle(key, vm, &handle);
         true
     }
 }
@@ -473,7 +494,9 @@ mod tests {
     use super::*;
     use crate::config::compile_rss_source;
     use crate::notify::RequestIdentity;
-    use crate::request_state::{AccessStatus, IdentityRegistry};
+    use crate::request_state::{AccessExec, AccessStatus, IdentityRegistry, ReadyEffect};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::os::unix::io::RawFd;
     use std::time::{Duration, Instant};
     use vm::VmStatus;
@@ -496,6 +519,56 @@ mod tests {
 
     fn sleep_once(ms: i64) -> Arc<Program> {
         compile_rss_source(&format!("use ngx;\nngx::sleep_ms({ms});\n")).expect("compile")
+    }
+
+    fn run_async_exec_to_halt(worker: &mut WorkerRuntime, exec: &mut AccessExec) -> AccessStatus {
+        let mut registry = IdentityRegistry::with_capacity(8);
+        let initial = exec.handle_access(&mut registry, worker);
+        if initial != AccessStatus::Again {
+            return initial;
+        }
+        exec.commit_suspend();
+        loop {
+            let mut ready = worker.drain_ready().expect("drain ready");
+            if ready.is_empty() {
+                let fd = worker.raw_fd().expect("eventfd");
+                assert!(wait_readable(fd, Duration::from_secs(3)));
+                ready = worker.drain_ready().expect("drain ready after wake");
+            }
+            assert_eq!(ready, vec![exec.identity()]);
+            match exec.apply_ready(exec.identity(), &mut registry, worker) {
+                ReadyEffect::Halted => return exec.handle_access(&mut registry, worker),
+                ReadyEffect::WaitingAgain | ReadyEffect::Ignored => {}
+                effect => panic!("async request failed with {effect:?}"),
+            }
+        }
+    }
+
+    fn start_http_server(requests: usize) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP fixture");
+        let port = listener.local_addr().expect("fixture address").port();
+        let join = std::thread::spawn(move || {
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().expect("accept HTTP request");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("read timeout");
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).expect("read HTTP request");
+                assert!(
+                    request[..read]
+                        .windows(b"GET / HTTP/1.1".len())
+                        .any(|window| window == b"GET / HTTP/1.1")
+                );
+                std::thread::sleep(Duration::from_millis(20));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .expect("write HTTP response");
+            }
+        });
+        (port, join)
     }
 
     #[test]
@@ -537,6 +610,19 @@ mod tests {
         let effect = exec.apply_ready(exec.identity(), &mut registry, &worker);
         assert_eq!(effect, crate::request_state::ReadyEffect::Halted);
         assert_eq!(exec.handle_access(&mut registry, &worker), AccessStatus::Ok);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn posted_continuation_queues_without_consuming_wait_capacity() {
+        let mut worker = WorkerRuntime::start_with_capacity(1).unwrap();
+        let identity = RequestIdentity::new(7, 11);
+        worker
+            .post_continuation(identity)
+            .expect("post continuation");
+        assert_eq!(worker.in_flight().unwrap(), 0);
+        assert_eq!(worker.drain_ready().unwrap(), vec![identity]);
+        assert_eq!(worker.in_flight().unwrap(), 0);
         worker.shutdown();
     }
 
@@ -657,6 +743,97 @@ ngx::exit(ngx::core::ok());
 
         assert_eq!(worker.reusable_request_vm_created_count(), 1);
         assert_eq!(worker.reusable_request_vm_idle_count(), 1);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn buffered_http_vm_reuses_after_quiescence_with_fresh_context_and_exact_policy() {
+        let (port, server) = start_http_server(3);
+        let mut worker = WorkerRuntime::start().unwrap();
+        let program = compile_rss_source(&format!(
+            r#"
+use http;
+use ngx;
+if ngx::ctx::get("seen") != null {{ 1 / 0; }}
+ngx::ctx::set("seen", 1);
+let response: map = http::client::request({{
+    method: "GET",
+    url: "http://127.0.0.1:{port}/",
+    body: null
+}});
+if response["status"] != 204 {{ 1 / 0; }}
+"#
+        ))
+        .expect("compile buffered HTTP fixture");
+        assert!(crate::config::program_can_reuse_request_vm(&program));
+        let mut policy = crate::host::StandardHostPolicy::fail_closed();
+        policy.http_hosts.push("127.0.0.1".into());
+        policy.http_schemes.push("http".into());
+        policy.http_ports.push(port);
+        policy.http_allow_private = true;
+
+        let mut identities = Vec::new();
+        for request_id in 1..=2 {
+            let mut exec = worker
+                .bind_reusable_phase_exec_with_policy(
+                    Arc::clone(&program),
+                    request_id,
+                    crate::host::NgxPhase::Access,
+                    policy.clone(),
+                )
+                .expect("bind buffered HTTP VM");
+            identities.push(exec.identity());
+            assert_eq!(
+                run_async_exec_to_halt(&mut worker, &mut exec),
+                AccessStatus::Ok
+            );
+            assert!(exec.cleanup_wait(&worker).is_none());
+        }
+        assert_ne!(identities[0], identities[1]);
+        assert_eq!(worker.reusable_request_vm_created_count(), 1);
+
+        let mut isolated_policy = policy;
+        isolated_policy.http_hosts.push("localhost".into());
+        let mut isolated = worker
+            .bind_reusable_phase_exec_with_policy(
+                Arc::clone(&program),
+                3,
+                crate::host::NgxPhase::Access,
+                isolated_policy,
+            )
+            .expect("bind policy-isolated buffered HTTP VM");
+        assert_eq!(
+            run_async_exec_to_halt(&mut worker, &mut isolated),
+            AccessStatus::Ok
+        );
+        assert!(isolated.cleanup_wait(&worker).is_none());
+        assert_eq!(worker.reusable_request_vm_created_count(), 2);
+        assert_eq!(worker.reusable_request_vm_idle_count(), 2);
+
+        server.join().expect("HTTP fixture server");
+        worker.shutdown();
+    }
+
+    #[test]
+    fn identical_source_in_distinct_programs_does_not_share_request_vms() {
+        let mut worker = WorkerRuntime::start().unwrap();
+        let source = "use ngx;\nngx::ctx::set(\"k\", 1);\n";
+        let first = compile_rss_source(source).expect("first program");
+        let second = compile_rss_source(source).expect("second program");
+        for (request_id, program) in [(1, first), (2, second)] {
+            let mut exec = worker
+                .bind_reusable_phase_exec_with_policy(
+                    program,
+                    request_id,
+                    crate::host::NgxPhase::Access,
+                    crate::host::StandardHostPolicy::fail_closed(),
+                )
+                .expect("bind distinct program");
+            let mut registry = IdentityRegistry::with_capacity(8);
+            assert_eq!(exec.handle_access(&mut registry, &worker), AccessStatus::Ok);
+            assert!(exec.cleanup_wait(&worker).is_none());
+        }
+        assert_eq!(worker.reusable_request_vm_created_count(), 2);
         worker.shutdown();
     }
 

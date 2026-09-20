@@ -641,11 +641,8 @@ fn access_phase_logs_worker_metadata_constants_and_request_log() {
 use ngx;
 ngx::log(ngx::log_level::notice(), "TASK4_REQUEST_LOG");
 ngx::log(ngx::log_level::notice(), "TASK4_PREFIX=" + ngx::config::prefix());
-ngx::log(ngx::log_level::notice(), "TASK4_META=" + ngx::encode_args({ pid: ngx::worker::pid(), id: ngx::worker::id(), count: ngx::worker::count(), version: ngx::config::nginx_version(), phase: ngx::get_phase(), ok: ngx::core::ok(), status_ok: ngx::http::status_ok(), get: ngx::http::get(), err: ngx::log_level::error(), subsystem: ngx::config::subsystem() }));
+ngx::log(ngx::log_level::notice(), "TASK4_META=" + ngx::encode_args({ pid: ngx::worker::pid(), id: ngx::worker::id(), count: ngx::worker::count(), version: ngx::config::nginx_version(), debug: ngx::config::debug(), phase: ngx::get_phase(), ok: ngx::core::ok(), status_ok: ngx::http::status_ok(), get: ngx::http::get(), err: ngx::log_level::error(), subsystem: ngx::config::subsystem() }));
 ngx::log(ngx::log_level::notice(), "TASK4_PIDS=" + ngx::encode_args({ pid: ngx::worker::pids() }));
-if ngx::config::debug() {
-    ngx::log(-1, "unexpected-debug");
-}
 if ngx::worker::exiting() {
     ngx::log(-1, "unexpected-exiting");
 }
@@ -675,7 +672,12 @@ if ngx::worker::exiting() {
     let child = spawn_nginx(&nginx, &prefix);
     wait_for_port(port, Duration::from_secs(5));
     let (status, response) = http_get(port, "/meta/");
-    assert_eq!(status, 200, "{response}");
+    assert_eq!(
+        status,
+        200,
+        "{response}\nerror log:\n{}",
+        fs::read_to_string(prefix.join("logs/error.log")).unwrap_or_default()
+    );
     assert!(
         http_body(&response).contains("meta"),
         "content must run after metadata access script; got:\n{response}"
@@ -726,7 +728,8 @@ if ngx::worker::exiting() {
     );
     assert_eq!(fields.get("id").map(String::as_str), Some("0"));
     assert_eq!(fields.get("count").map(String::as_str), Some("1"));
-    assert_eq!(fields.get("version").map(String::as_str), Some("1030004"));
+    assert_eq!(fields.get("version").map(String::as_str), Some("1031004"));
+    assert_eq!(fields.get("debug").map(String::as_str), Some(""));
     assert_eq!(fields.get("phase").map(String::as_str), Some("access"));
     assert_eq!(fields.get("ok").map(String::as_str), Some("0"));
     assert_eq!(fields.get("status_ok").map(String::as_str), Some("200"));

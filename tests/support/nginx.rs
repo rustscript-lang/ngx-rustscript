@@ -18,8 +18,8 @@ use super::temp::{env_path, isolated_prefix};
 mod shell_words;
 use shell_words::split_shell_words;
 
-pub const PINNED_NGINX_VERSION_BANNER: &str = "nginx/1.30.4";
-pub const REQUIRED_NGINX_CONFIGURE_ARGS: &[&str] = &["--with-compat", "--with-http_ssl_module"];
+pub const PINNED_NGINX_VERSION_BANNER: &str = "openresty/1.31.4.1";
+pub const REQUIRED_NGINX_CONFIGURE_ARGS: &[&str] = &["--with-http_ssl_module"];
 
 pub fn configure_process_group(command: &mut Command) {
     command.process_group(0);
@@ -165,7 +165,9 @@ fn probe_worker_http(port: u16) -> Result<(), String> {
 
 pub fn nginx_binary() -> PathBuf {
     let source_dir = env_path("NGINX_SOURCE_DIR").unwrap_or_else(|| {
-        panic!("NGINX_SOURCE_DIR must be set to the pinned configured NGINX 1.30.4 source tree")
+        panic!(
+            "NGINX_SOURCE_DIR must be set to the pinned configured OpenResty 1.31.4.1 source tree"
+        )
     });
     if !source_dir.is_dir() {
         panic!(
@@ -174,7 +176,7 @@ pub fn nginx_binary() -> PathBuf {
         );
     }
     let build_dir = env_path("NGINX_BUILD_DIR").unwrap_or_else(|| {
-        panic!("NGINX_BUILD_DIR must be set to the pinned NGINX 1.30.4 build directory")
+        panic!("NGINX_BUILD_DIR must be set to the pinned OpenResty 1.31.4.1 build directory")
     });
     let nginx = resolve_nginx_binary(&build_dir, env_path("NGX_RUSTSCRIPT_NGINX").as_deref())
         .unwrap_or_else(|err| panic!("{err}"));
@@ -465,9 +467,9 @@ fn render_nginx_conf_rejects_newline_quote_injection_and_non_utf8() {
     assert!(err.contains("UTF-8"), "got {err}");
 }
 #[test]
-fn nginx_v_output_accepts_pinned_1_30_4_with_required_configure_args() {
+fn nginx_v_output_accepts_pinned_openresty_with_required_configure_args() {
     let text = "\
-nginx version: nginx/1.30.4
+nginx version: openresty/1.31.4.1
 built by gcc 13.3.0 (Ubuntu 13.3.0-6ubuntu2~24.04.1)
 configure arguments: --prefix=/tmp/nginx-prefix --with-compat --with-http_ssl_module
 ";
@@ -484,7 +486,7 @@ configure arguments: --prefix=/tmp/nginx-prefix --with-compat --with-http_ssl_mo
     let report = parse_nginx_v_output(text).expect("parse wrong version");
     let err = validate_nginx_version_report(&report).expect_err("1.24.0 must not pass");
     assert!(
-        err.contains("1.30.4") && err.contains("1.24.0"),
+        err.contains("1.31.4.1") && err.contains("1.24.0"),
         "error should name pinned vs actual version, got {err}"
     );
 }
@@ -492,7 +494,7 @@ configure arguments: --prefix=/tmp/nginx-prefix --with-compat --with-http_ssl_mo
 #[test]
 fn nginx_v_output_rejects_wrong_configure_args() {
     let text = "\
-nginx version: nginx/1.30.4
+nginx version: openresty/1.31.4.1
 configure arguments: --prefix=/tmp/nginx-prefix --with-compat
 ";
     let report = parse_nginx_v_output(text).expect("parse missing ssl");
@@ -506,7 +508,7 @@ configure arguments: --prefix=/tmp/nginx-prefix --with-compat
 #[test]
 fn nginx_v_output_accepts_explicit_path_shaped_builddir() {
     let text = "\
-nginx version: nginx/1.30.4
+nginx version: openresty/1.31.4.1
 configure arguments: --prefix=/tmp/nginx-prefix --builddir=/tmp/custom-objs --with-compat --with-http_ssl_module
 ";
     let report = parse_nginx_v_output(text).expect("parse custom builddir");
@@ -516,7 +518,7 @@ configure arguments: --prefix=/tmp/nginx-prefix --builddir=/tmp/custom-objs --wi
 #[test]
 fn nginx_v_output_accepts_relative_path_shaped_builddir() {
     let text = "\
-nginx version: nginx/1.30.4
+nginx version: openresty/1.31.4.1
 configure arguments: --prefix=/tmp/nginx-prefix --builddir=objs-custom --with-compat --with-http_ssl_module
 ";
     let report = parse_nginx_v_output(text).expect("parse relative builddir");
@@ -526,7 +528,7 @@ configure arguments: --prefix=/tmp/nginx-prefix --builddir=objs-custom --with-co
 #[test]
 fn nginx_v_output_rejects_empty_or_flag_shaped_builddir() {
     let empty = "\
-nginx version: nginx/1.30.4
+nginx version: openresty/1.31.4.1
 configure arguments: --prefix=/tmp/nginx-prefix --builddir= --with-compat --with-http_ssl_module
 ";
     let report = parse_nginx_v_output(empty).expect("parse empty builddir");
@@ -537,7 +539,7 @@ configure arguments: --prefix=/tmp/nginx-prefix --builddir= --with-compat --with
     );
 
     let flag_shaped = "\
-nginx version: nginx/1.30.4
+nginx version: openresty/1.31.4.1
 configure arguments: --prefix=/tmp/nginx-prefix --builddir=--with-evil --with-compat --with-http_ssl_module
 ";
     let report = parse_nginx_v_output(flag_shaped).expect("parse flag-shaped builddir");
@@ -552,7 +554,7 @@ configure arguments: --prefix=/tmp/nginx-prefix --builddir=--with-evil --with-co
 #[test]
 fn nginx_v_output_accepts_quoted_prefix_with_spaces() {
     let text = "\
-nginx version: nginx/1.30.4
+nginx version: openresty/1.31.4.1
 configure arguments: --prefix='/tmp/pre fix' --with-compat --with-http_ssl_module
 ";
     let report = parse_nginx_v_output(text).expect("parse quoted prefix");
@@ -570,7 +572,7 @@ configure arguments: --prefix='/tmp/pre fix' --with-compat --with-http_ssl_modul
 #[test]
 fn nginx_v_output_accepts_add_dynamic_module_and_other_valid_flags() {
     let text = "\
-nginx version: nginx/1.30.4
+nginx version: openresty/1.31.4.1
 configure arguments: --prefix=/tmp/nginx-prefix --with-compat --with-http_ssl_module --builddir=objs-custom --add-dynamic-module=/tmp/ngx-rustscript --with-http_v2
 ";
     let report = parse_nginx_v_output(text).expect("parse add-dynamic");
@@ -581,7 +583,7 @@ configure arguments: --prefix=/tmp/nginx-prefix --with-compat --with-http_ssl_mo
 #[test]
 fn nginx_v_output_rejects_malformed_quoting_and_control_bytes() {
     let unclosed = "\
-nginx version: nginx/1.30.4
+nginx version: openresty/1.31.4.1
 configure arguments: --prefix='/tmp/pre fix --with-compat --with-http_ssl_module
 ";
     let err = parse_nginx_v_output(unclosed).expect_err("unclosed quote");
@@ -591,7 +593,7 @@ configure arguments: --prefix='/tmp/pre fix --with-compat --with-http_ssl_module
     );
 
     let control = "\
-nginx version: nginx/1.30.4
+nginx version: openresty/1.31.4.1
 configure arguments: --prefix=/tmp/foo\u{01}bar --with-compat --with-http_ssl_module
 ";
     let err = parse_nginx_v_output(control).expect_err("control byte");

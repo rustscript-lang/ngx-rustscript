@@ -204,7 +204,7 @@ fn ctx_only_program_requires_request_owned_exec() {
 }
 
 #[test]
-fn synchronous_request_state_programs_are_reusable_but_waiting_programs_are_not() {
+fn request_state_reuse_admits_buffered_http_and_excludes_retained_families() {
     let key_auth =
         compile_rss_source(include_str!("../examples/key-auth.rss")).expect("key auth example");
     assert!(ngx_rustscript::config::program_requires_request_state(
@@ -222,9 +222,39 @@ fn synchronous_request_state_programs_are_reusable_but_waiting_programs_are_not(
         &sleep
     ));
 
+    let buffered_http = compile_rss_source(
+        r#"
+use http;
+let response = http::client::request({ method: "GET", url: "https://example.test/" });
+if response.status < 100 { 1 / 0; }
+"#,
+    )
+    .expect("buffered HTTP request");
+    assert!(
+        ngx_rustscript::config::program_can_reuse_request_vm(&buffered_http),
+        "resource-free buffered HTTP is eligible for quiescence-gated reuse"
+    );
+
+    let sse = compile_source(
+        r#"
+use http;
+fn on_event(item: SseEvent) -> SseCallbackAction { { action: "continue" } }
+http::client::sse({ method: "GET", url: "https://example.test/events" }, on_event);
+"#,
+    )
+    .expect("compile SSE");
+    assert!(
+        !ngx_rustscript::config::program_can_reuse_request_vm(&sse.program),
+        "SSE callback streams stay request-owned"
+    );
+
     let retained_or_async_cases = [
         ("timer", "use ngx;\nngx::timer::pending_count();\n"),
         ("cosocket", "use ngx;\nlet sock = ngx::socket::udp();\n"),
+        (
+            "resource handle",
+            "use ngx;\nngx::ctx::set(\"k\", 1);\nlet semaphore = ngx::semaphore::new(1);\n",
+        ),
         (
             "standard io",
             "use io;\nlet input = io::open(\"x\", \"r\");\nio::close(input);\n",
@@ -242,7 +272,7 @@ fn synchronous_request_state_programs_are_reusable_but_waiting_programs_are_not(
         );
         assert!(
             !ngx_rustscript::config::program_can_reuse_request_vm(&program),
-            "{label} must not enter the synchronous request VM pool"
+            "{label} must not enter the request VM reuse pool"
         );
     }
 }

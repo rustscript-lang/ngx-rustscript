@@ -9,10 +9,10 @@ build = "build.rs"
 [package.metadata.ngx-rustscript]
 ngx-rust-git = "https://github.com/nginx/ngx-rust"
 ngx-rust-rev = "cda9d8372ccd2e139ef2b03e5806e019e7796187"
-nginx-version = "1.30.4"
-nginx-tarball-sha256 = "4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b"
+nginx-version = "1.31.4"
+nginx-tarball-sha256 = "ad304ae4de50dc073a93cdc083fe5ef44a601c58017435a486ef0f2df4feb58e"
 rustscript-git = "https://github.com/rustscript-lang/rustscript"
-rustscript-rev = "b1d6cffede77f49410bf63525f30b9a46b02dc01"
+rustscript-rev = "87d8c5d5cb42b3381aecadb383c0b7bf34ff204f"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -27,7 +27,7 @@ sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 nginx-sys = { git = "https://github.com/nginx/ngx-rust", rev = "cda9d8372ccd2e139ef2b03e5806e019e7796187" }
 ngx = { git = "https://github.com/nginx/ngx-rust", rev = "cda9d8372ccd2e139ef2b03e5806e019e7796187", default-features = false, features = ["std"] }
-pd-host-function = { git = "https://github.com/rustscript-lang/rustscript", rev = "b1d6cffede77f49410bf63525f30b9a46b02dc01" }
+pd-host-function = { git = "https://github.com/rustscript-lang/rustscript", rev = "87d8c5d5cb42b3381aecadb383c0b7bf34ff204f" }
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "time", "net", "sync", "io-util"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
@@ -36,7 +36,7 @@ rustls-pemfile = { version = "2", default-features = false, features = ["std"] }
 rustls-native-certs = "0.8"
 webpki-roots = "0.26"
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
-vm = { package = "pd-vm", git = "https://github.com/rustscript-lang/rustscript", rev = "b1d6cffede77f49410bf63525f30b9a46b02dc01", default-features = false, features = ["runtime", "async", "http-client", "sqlite"] }
+vm = { package = "pd-vm", git = "https://github.com/rustscript-lang/rustscript", rev = "87d8c5d5cb42b3381aecadb383c0b7bf34ff204f", default-features = false, features = ["runtime", "async", "http-client", "sqlite"] }
 
 [features]
 default = ["export-modules"]

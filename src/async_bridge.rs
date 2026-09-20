@@ -12,7 +12,9 @@ use std::task::{Context, Poll};
 
 use tokio::runtime::Handle;
 use vm::operation::OperationCancelReason;
-use vm::{CallReturn, HostAsyncBridge, HostFuture, HostOpId, VmError, VmResult};
+use vm::{
+    CallReturn, HostAsyncBridge, HostAsyncOpTerminal, HostFuture, HostOpId, VmError, VmResult,
+};
 
 #[cfg(test)]
 thread_local! {
@@ -107,10 +109,6 @@ impl HostAsyncBridge for NgxAsyncBridge {
         }
     }
 
-    fn cancel_op(&mut self, op_id: HostOpId) {
-        self.futures.remove(&op_id);
-    }
-
     fn request_cancel_op(
         &mut self,
         op_id: HostOpId,
@@ -124,6 +122,11 @@ impl HostAsyncBridge for NgxAsyncBridge {
         self.futures.remove(&op_id);
         Poll::Ready(Ok(()))
     }
+
+    fn cleanup_op(&mut self, op_id: HostOpId, _terminal: HostAsyncOpTerminal) -> VmResult<()> {
+        self.futures.remove(&op_id);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -133,7 +136,7 @@ mod tests {
     use std::task::Waker;
     use std::time::Duration;
 
-    use vm::{CallReturn, HostFutureOutput, Vm, VmStatus};
+    use vm::{CallReturn, HostAsyncOpTerminal, HostFutureOutput, Vm, VmStatus};
 
     use crate::host::{bind_ngx_hosts, bind_test_hosts};
     use crate::notify::{NotifyBridge, RequestIdentity, eventfd_waker};
@@ -379,14 +382,16 @@ mod tests {
     }
 
     #[test]
-    fn cancel_and_reset_drop_futures() {
+    fn terminal_cleanup_cancel_and_reset_drop_futures() {
         let rt = runtime();
         let mut bridge = NgxAsyncBridge::new(rt.handle().clone());
         let pending: HostFuture = Box::pin(future::pending());
         bridge.submit_op(1, pending).unwrap();
         assert!(bridge.contains(1));
         assert_eq!(bridge.len(), 1);
-        bridge.cancel_op(1);
+        bridge
+            .cleanup_op(1, HostAsyncOpTerminal::Cancelled)
+            .expect("terminal cleanup");
         assert!(
             !bridge.contains(1),
             "cancel_op must drop the pending future"
@@ -402,6 +407,9 @@ mod tests {
             !bridge.contains(2),
             "request_cancel_op must drop the pending future"
         );
+        bridge
+            .cleanup_op(2, HostAsyncOpTerminal::Cancelled)
+            .expect("cancel cleanup is idempotent after acknowledgement");
 
         let mut vm = bind_vm(
             compile_with("use ngx;\nngx::sleep_ms(60000);\n", sleep_catalog()),

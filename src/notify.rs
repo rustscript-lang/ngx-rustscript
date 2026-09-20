@@ -15,7 +15,8 @@ use std::task::{Wake, Waker};
 
 use nginx_sys::{
     NGX_USE_EPOLL_EVENT, ngx_close_connection, ngx_connection_t, ngx_cycle_t, ngx_event_actions,
-    ngx_event_flags, ngx_free_connection, ngx_get_connection, ngx_int_t, ngx_uint_t,
+    ngx_event_flags, ngx_free_connection, ngx_get_connection, ngx_int_t, ngx_post_event,
+    ngx_posted_next_events, ngx_uint_t,
 };
 
 /// Maximum in-flight async host waits per worker.
@@ -319,6 +320,37 @@ impl NotifyBridge {
 
     pub fn sender(&self) -> CompletionSender {
         self.sender.clone()
+    }
+
+    /// Queue an owner-thread continuation without reserving async wait capacity.
+    ///
+    /// Under NGINX the registered read event is posted to the next-event queue,
+    /// preventing a budget-limited immediate-ready chain from re-entering the
+    /// current drain turn. Local/unit runtimes consume the ready queue directly.
+    pub fn post_continuation(&self, identity: RequestIdentity) -> Result<(), NotifyError> {
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(NotifyError::ShutDown);
+        }
+        let event = match self.fd_state {
+            FdState::Local => None,
+            FdState::Nginx { conn } if !conn.is_null() => Some(unsafe { (*conn).read }),
+            FdState::Nginx { .. } | FdState::Closed => return Err(NotifyError::ShutDown),
+        };
+        {
+            let mut ready = self.lock_ready()?;
+            if !ready.iter().any(|queued| *queued == identity) {
+                ready.push_back(identity);
+            }
+        }
+        if let Some(event) = event {
+            if event.is_null() {
+                return Err(NotifyError::ShutDown);
+            }
+            unsafe {
+                ngx_post_event(event, core::ptr::addr_of_mut!(ngx_posted_next_events));
+            }
+        }
+        Ok(())
     }
 
     pub fn raw_fd(&self) -> Option<RawFd> {

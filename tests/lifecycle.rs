@@ -15,7 +15,10 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use ngx::core::Status;
@@ -420,6 +423,39 @@ fn free_port() -> u16 {
         .port()
 }
 
+fn buffered_http_upstream() -> (u16, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind lifecycle upstream");
+    let port = listener.local_addr().expect("upstream address").port();
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking upstream");
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let join = std::thread::spawn(move || {
+        while !thread_stop.load(Ordering::Acquire) {
+            let (mut stream, _) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(error) => panic!("accept lifecycle request: {error}"),
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("upstream read timeout");
+            let mut request = [0u8; 4096];
+            let _read = stream.read(&mut request).expect("read lifecycle request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write lifecycle response");
+        }
+    });
+    (port, stop, join)
+}
+
 fn write_conf(prefix: &Path, body: &str) {
     fs::write(prefix.join("conf/nginx.conf"), body).unwrap();
 }
@@ -617,6 +653,89 @@ fn sleep_30ms_and_two_sleeps_remain_green() {
         "two-sleep route must still reach content:\n{response}"
     );
     assert!(started.elapsed() >= Duration::from_millis(15));
+}
+
+#[test]
+fn buffered_http_requests_reuse_quiescent_vms_with_fresh_request_context() {
+    const REQUESTS: usize = 8;
+    let nginx = nginx_binary();
+    let module = module_cdylib();
+    let prefix = isolated_prefix("life-http-reuse");
+    let port = free_port();
+    let (upstream_port, stop_upstream, upstream) = buffered_http_upstream();
+    let script_path = prefix.join("scripts/http_reuse.rss");
+    fs::create_dir_all(script_path.parent().expect("script parent")).unwrap();
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+use http;
+use ngx;
+if ngx::ctx::get("seen") != null {{ ngx::exit(500); }}
+ngx::ctx::set("seen", 1);
+let response: map = http::client::request({{
+    method: "GET",
+    url: "http://127.0.0.1:{upstream_port}/",
+    body: null
+}});
+if response["status"] != 204 {{ ngx::exit(502); }}
+"#
+        ),
+    )
+    .unwrap();
+    write_index(&prefix, "reuse/index.html", "reused\n");
+
+    let module = nginx_quote_path(&module).unwrap();
+    let pid = nginx_quote_path(&prefix.join("logs/nginx.pid")).unwrap();
+    let html = nginx_quote_path(&prefix.join("html")).unwrap();
+    let error_log = nginx_quote_path(&prefix.join("logs/error.log")).unwrap();
+    let script = nginx_quote_path(&script_path).unwrap();
+    write_conf(
+        &prefix,
+        &format!(
+            r#"
+worker_processes 1;
+error_log {error_log} info;
+pid {pid};
+daemon off;
+master_process on;
+load_module {module};
+events {{ worker_connections 32; }}
+http {{
+    access_log off;
+    default_type text/plain;
+    server {{
+        listen 127.0.0.1:{port};
+        root {html};
+        location /reuse/ {{
+            rss_http_scheme http;
+            rss_http_allow 127.0.0.1 {upstream_port};
+            rss_http_allow_private on;
+            access_by_rss_file {script};
+        }}
+    }}
+}}
+"#
+        ),
+    );
+
+    let out = nginx_test(&nginx, &prefix);
+    let text = combined(&out);
+    assert!(out.status.success(), "nginx -t failed:\n{text}");
+    let _running = spawn_nginx(&nginx, &prefix);
+    wait_for_port(port, Duration::from_secs(5));
+    for _ in 0..REQUESTS {
+        let (status, response) = http_get(port, "/reuse/");
+        assert_eq!(
+            status,
+            200,
+            "{response}\nerror log:\n{}",
+            fs::read_to_string(prefix.join("logs/error.log")).unwrap_or_default()
+        );
+        assert!(http_body(&response).contains("reused"), "{response}");
+    }
+    stop_upstream.store(true, Ordering::Release);
+    upstream.join().expect("lifecycle upstream");
 }
 
 #[test]

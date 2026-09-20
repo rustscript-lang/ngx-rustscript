@@ -166,15 +166,19 @@ pub const NGX_SHARED_GET_KEYS_NAME: &str = "ngx::shared::get_keys";
 /// Catalog schema version for fingerprint goldens. Bump together with
 /// [`NGX_HOST_CATALOG_FINGERPRINT`] when named structs, resource keys, or
 /// function shapes change.
-pub const NGX_HOST_CATALOG_SCHEMA_VERSION: u32 = 2;
+pub const NGX_HOST_CATALOG_SCHEMA_VERSION: u32 = 3;
 
 /// Fingerprint of schema version 1: named request/codec envelopes with
 /// `Unknown` shared-dict result carriers.
 pub const NGX_HOST_CATALOG_FINGERPRINT_V1: u64 = 0x5e37_8285_8fa0_b584;
 
+/// Fingerprint of schema version 2 under the preceding RustScript descriptor
+/// fingerprint contract.
+pub const NGX_HOST_CATALOG_FINGERPRINT_V2: u64 = 0x10c4_07b2_b827_eaff;
+
 /// Fingerprint of the current schema version. The host_catalog drift gate
 /// compares `ngx_host_catalog().fingerprint()` against this constant.
-pub const NGX_HOST_CATALOG_FINGERPRINT: u64 = 0x10c4_07b2_b827_eaff;
+pub const NGX_HOST_CATALOG_FINGERPRINT: u64 = 0xc54f_427f_8ef6_f5d4;
 
 pub const NGX_SEND_HEADERS_NAME: &str = "ngx::send_headers";
 pub const NGX_PRINT_NAME: &str = "ngx::print";

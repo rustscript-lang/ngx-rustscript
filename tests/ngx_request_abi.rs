@@ -56,9 +56,9 @@ fn install_unread_body(req: *mut ngx_http_request_t) -> Box<ngx_http_request_bod
 }
 
 #[test]
-fn c_request_sizeof_matches_official_nginx_1_30_4() {
+fn c_request_sizeof_matches_configured_openresty_1_31_4() {
     nginx_stubs::force_link();
-    assert_eq!(nginx_stubs::request_sizeof(), 1408);
+    assert_eq!(nginx_stubs::request_sizeof(), 1352);
 }
 
 #[test]

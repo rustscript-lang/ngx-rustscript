@@ -1,9 +1,10 @@
 //! Access-phase VM driver: `VmStatus::Waiting` suspend/resume.
 //!
-//! Before the initial poll the driver reserves bounded capacity and registers
-//! a generation-safe identity plus an eventfd-backed waker. A Ready poll
-//! unregisters, releases the slot, and resumes. Pending returns `NGX_AGAIN`.
-//! A wake during the initial poll only queues for a later NGINX event turn.
+//! Immediately-ready generic host futures resume in the same NGINX event turn
+//! up to a finite transition budget. The first real `Pending` reserves bounded
+//! capacity, registers a generation-safe identity, and installs an eventfd
+//! waker. Budget exhaustion posts a next-event continuation without consuming
+//! wait capacity.
 
 use std::collections::HashMap;
 use std::ptr::NonNull;
@@ -20,7 +21,7 @@ use ngx::http::Request;
 #[cfg(ngx_rustscript_integration_hooks)]
 use ngx::ngx_log_error;
 use tokio::runtime::Handle;
-use vm::{Program, Vm, VmError, VmStatus};
+use vm::{HostOpId, Program, Vm, VmError, VmResult, VmStatus};
 
 use crate::async_bridge::NgxAsyncBridge;
 use crate::host::{
@@ -38,6 +39,55 @@ static WAIT_TIMER_ARMS: AtomicU64 = AtomicU64::new(0);
 
 /// Exact fail-closed error when a log-phase VM returns `Waiting`.
 pub const LOG_CANNOT_WAIT: &str = "log handler cannot wait";
+
+/// Maximum immediately-ready host transitions driven in one NGINX event turn.
+pub const MAX_IMMEDIATE_TRANSITIONS: usize = 64;
+const MAX_BUDGET_CONTINUATIONS: usize = 16;
+
+enum ImmediateDrive {
+    Halted,
+    Pending(HostOpId),
+    Budget(HostOpId),
+    Yielded,
+    Failed(VmError),
+}
+
+fn drive_immediate_ready(
+    initial: VmResult<VmStatus>,
+    transition_budget: usize,
+    mut poll_waiting: impl FnMut(&mut Context<'_>) -> Poll<VmResult<()>>,
+    mut resume: impl FnMut() -> VmResult<VmStatus>,
+) -> ImmediateDrive {
+    let mut status = match initial {
+        Ok(status) => status,
+        Err(error) => return ImmediateDrive::Failed(error),
+    };
+    let mut transitions = 0usize;
+    loop {
+        match status {
+            VmStatus::Halted => return ImmediateDrive::Halted,
+            VmStatus::Yielded => return ImmediateDrive::Yielded,
+            VmStatus::Waiting(op_id) => {
+                if transitions >= transition_budget {
+                    return ImmediateDrive::Budget(op_id);
+                }
+                let waker = Waker::noop();
+                let mut cx = Context::from_waker(waker);
+                match poll_waiting(&mut cx) {
+                    Poll::Pending => return ImmediateDrive::Pending(op_id),
+                    Poll::Ready(Err(error)) => return ImmediateDrive::Failed(error),
+                    Poll::Ready(Ok(())) => {
+                        transitions = transitions.saturating_add(1);
+                        status = match resume() {
+                            Ok(status) => status,
+                            Err(error) => return ImmediateDrive::Failed(error),
+                        };
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Process-wide wait-arm counters: (eventfd, main-count, timer).
 #[cfg(ngx_rustscript_integration_hooks)]
@@ -341,6 +391,8 @@ pub(crate) struct ReusableVmKey {
     pub program: std::sync::Arc<Program>,
     pub phase: NgxPhase,
     pub policy: StandardHostPolicy,
+    pub ngx_catalog_abi: vm::HostApiFingerprint,
+    pub standard_catalog_abi: vm::HostApiFingerprint,
 }
 
 impl ReusableVmKey {
@@ -348,6 +400,8 @@ impl ReusableVmKey {
         std::ptr::eq(self.program.as_ref(), other.program.as_ref())
             && self.phase == other.phase
             && self.policy == other.policy
+            && self.ngx_catalog_abi == other.ngx_catalog_abi
+            && self.standard_catalog_abi == other.standard_catalog_abi
     }
 }
 
@@ -355,6 +409,7 @@ impl ReusableVmKey {
 pub trait AsyncWait {
     fn reserve(&self) -> Result<CompletionPermit, SubmitError>;
     fn waker(&self, identity: RequestIdentity) -> Waker;
+    fn post_continuation(&self, identity: RequestIdentity) -> Result<(), SubmitError>;
     fn invalidate(&self, identity: RequestIdentity);
     fn forget_invalidated(&self, identity: RequestIdentity);
     fn recycle_finished_exec(&self, _exec: &mut AccessExec) -> bool {
@@ -366,6 +421,7 @@ pub trait AsyncWait {
 enum ExecState {
     New,
     Suspended,
+    Posted,
     Halted,
     Failed,
     Cancelled,
@@ -385,6 +441,7 @@ pub struct AccessExec {
     state: ExecState,
     suspend_committed: bool,
     deferred: bool,
+    budget_continuations: usize,
     permit: Option<CompletionPermit>,
     last_status: Option<VmStatus>,
     last_error: Option<String>,
@@ -429,6 +486,7 @@ impl AccessExec {
         bind_program_hosts(&mut vm, &policy)?;
         vm.set_async_bridge(Box::new(NgxAsyncBridge::new(runtime)))
             .map_err(|err| err.to_string())?;
+        vm.set_runtime_print_sink(|_| {});
         Ok(Self {
             vm: Some(vm),
             reusable_key: None,
@@ -442,6 +500,7 @@ impl AccessExec {
             state: ExecState::New,
             suspend_committed: false,
             deferred: false,
+            budget_continuations: 0,
             permit: None,
             last_status: None,
             last_error: None,
@@ -468,6 +527,7 @@ impl AccessExec {
             state: ExecState::New,
             suspend_committed: false,
             deferred: false,
+            budget_continuations: 0,
             permit: None,
             last_status: None,
             last_error: None,
@@ -475,10 +535,22 @@ impl AccessExec {
     }
 
     pub(crate) fn take_reusable_vm(&mut self) -> Option<(ReusableVmKey, Vm)> {
+        if self.state != ExecState::Halted
+            || self.last_status != Some(VmStatus::Halted)
+            || self.last_error.is_some()
+            || self.permit.is_some()
+            || self.deferred
+        {
+            return None;
+        }
         let key = self.reusable_key.take()?;
         let vm = self.vm.take()?;
-        self.release_owned_ctx();
-        self.permit = None;
+        self.shared_ctx = None;
+        self.ctx.clear();
+        self.disposition = RequestDisposition::Continue;
+        self.final_status = None;
+        self.suspend_committed = false;
+        self.budget_continuations = 0;
         Some((key, vm))
     }
 
@@ -526,7 +598,7 @@ impl AccessExec {
 
     pub fn current_identity(&self) -> Option<RequestIdentity> {
         match self.state {
-            ExecState::Suspended => Some(self.identity),
+            ExecState::Suspended | ExecState::Posted => Some(self.identity),
             _ => None,
         }
     }
@@ -569,10 +641,11 @@ impl AccessExec {
     }
 
     fn finish_from_vm_error(&mut self, err: VmError) -> AccessStatus {
-        self.last_error = Some(err.to_string());
         if is_control_stop(&err) && self.disposition != RequestDisposition::Continue {
+            self.last_error = None;
             self.finish_from_disposition(false)
         } else {
+            self.last_error = Some(err.to_string());
             self.disposition = RequestDisposition::Continue;
             self.finish_from_disposition(true)
         }
@@ -598,7 +671,7 @@ impl AccessExec {
         match self.state {
             ExecState::Halted => self.final_status.unwrap_or(AccessStatus::Ok),
             ExecState::Failed => AccessStatus::Error500,
-            ExecState::Cancelled | ExecState::Suspended => AccessStatus::Again,
+            ExecState::Cancelled | ExecState::Suspended | ExecState::Posted => AccessStatus::Again,
             ExecState::New => self.run_and_arm(registry, waiter),
         }
     }
@@ -609,28 +682,90 @@ impl AccessExec {
         waiter: &impl AsyncWait,
     ) -> AccessStatus {
         let identity = self.identity;
+        let phase = self.phase;
         let ctx = self.ctx_ptr();
         let disp = std::ptr::addr_of_mut!(self.disposition);
-        let vm = match self.vm.as_mut() {
-            Some(vm) => vm,
+        let initial = match self.vm.as_mut() {
+            Some(vm) => with_vm_entry(identity, phase, ctx, disp, || vm.run()),
             None => {
                 self.state = ExecState::Failed;
                 return AccessStatus::Error500;
             }
         };
-        match with_vm_entry(identity, self.phase, ctx, disp, || vm.run()) {
-            Ok(VmStatus::Halted) => self.finish_from_disposition(false),
-            Ok(VmStatus::Waiting(op_id)) => {
+        self.drive_status(initial, registry, waiter)
+    }
+
+    fn drive_status(
+        &mut self,
+        initial: VmResult<VmStatus>,
+        registry: &mut IdentityRegistry<u64>,
+        waiter: &impl AsyncWait,
+    ) -> AccessStatus {
+        let identity = self.identity;
+        let phase = self.phase;
+        let ctx = self.ctx_ptr();
+        let disp = std::ptr::addr_of_mut!(self.disposition);
+        let outcome = {
+            let Some(vm) = self.vm.as_mut() else {
+                self.state = ExecState::Failed;
+                return AccessStatus::Error500;
+            };
+            let vm = std::cell::RefCell::new(vm);
+            drive_immediate_ready(
+                initial,
+                MAX_IMMEDIATE_TRANSITIONS,
+                |cx| {
+                    with_vm_entry(identity, phase, std::ptr::null_mut(), disp, || {
+                        vm.borrow_mut().poll_waiting_host_op(cx)
+                    })
+                },
+                || with_vm_entry(identity, phase, ctx, disp, || vm.borrow_mut().resume()),
+            )
+        };
+        match outcome {
+            ImmediateDrive::Halted => self.finish_from_disposition(false),
+            ImmediateDrive::Pending(op_id) => {
                 self.last_status = Some(VmStatus::Waiting(op_id));
                 self.arm_wait(registry, waiter)
-                    .unwrap_or_else(|status| status)
             }
-            Ok(VmStatus::Yielded) => {
+            ImmediateDrive::Budget(op_id) => {
+                self.last_status = Some(VmStatus::Waiting(op_id));
+                self.post_budget_continuation(registry, waiter)
+            }
+            ImmediateDrive::Yielded => {
+                self.last_error = Some("VM yielded while driving async host work".into());
                 self.state = ExecState::Failed;
                 AccessStatus::Error500
             }
-            Err(err) => self.finish_from_vm_error(err),
+            ImmediateDrive::Failed(error) => self.finish_from_vm_error(error),
         }
+    }
+
+    fn post_budget_continuation(
+        &mut self,
+        registry: &mut IdentityRegistry<u64>,
+        waiter: &impl AsyncWait,
+    ) -> AccessStatus {
+        self.budget_continuations = self.budget_continuations.saturating_add(1);
+        if self.budget_continuations > MAX_BUDGET_CONTINUATIONS {
+            self.last_error =
+                Some("async immediate-ready transition budget made no progress".into());
+            self.state = ExecState::Failed;
+            return AccessStatus::Error500;
+        }
+        if registry.insert_new(self.identity, self.request_id).is_err() {
+            self.last_error = Some("failed to register async budget continuation".into());
+            self.state = ExecState::Failed;
+            return AccessStatus::Error500;
+        }
+        self.state = ExecState::Posted;
+        if waiter.post_continuation(self.identity).is_err() {
+            registry.remove_exact(self.identity, &self.request_id);
+            self.last_error = Some("failed to post async budget continuation".into());
+            self.state = ExecState::Failed;
+            return AccessStatus::Error500;
+        }
+        AccessStatus::Again
     }
 
     /// Run once on the worker main thread. Waiting/yield fail closed without
@@ -679,37 +814,43 @@ impl AccessExec {
         &mut self,
         registry: &mut IdentityRegistry<u64>,
         waiter: &impl AsyncWait,
-    ) -> Result<AccessStatus, AccessStatus> {
+    ) -> AccessStatus {
         #[cfg(ngx_rustscript_integration_hooks)]
         if self.phase == NgxPhase::Log {
             WAIT_EVENTFD_ARMS.fetch_add(1, Ordering::Relaxed);
         }
-        let permit = waiter.reserve().map_err(|_| {
-            self.state = ExecState::Failed;
-            AccessStatus::Error500
-        })?;
-        if let Err(err) = registry.try_insert(self.identity, self.request_id) {
+        let permit = match waiter.reserve() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.last_error = Some("async host wait capacity unavailable".into());
+                self.state = ExecState::Failed;
+                return AccessStatus::Error500;
+            }
+        };
+        if registry.insert_new(self.identity, self.request_id).is_err() {
             drop(permit);
+            self.last_error = Some("failed to register async host wait".into());
             self.state = ExecState::Failed;
-            let _ = err;
-            return Err(AccessStatus::Error500);
+            return AccessStatus::Error500;
         }
         self.permit = Some(permit);
         let waker = waiter.waker(self.identity);
         let mut cx = Context::from_waker(&waker);
         let identity = self.identity;
         let disp = &mut self.disposition as *mut RequestDisposition;
-        let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
+        let Some(vm) = self.vm.as_mut() else {
+            registry.remove_exact(self.identity, &self.request_id);
+            self.permit = None;
+            self.state = ExecState::Failed;
+            return AccessStatus::Error500;
+        };
         match with_vm_entry(identity, self.phase, std::ptr::null_mut(), disp, || {
             vm.poll_waiting_host_op(&mut cx)
         }) {
             Poll::Pending => {
                 self.state = ExecState::Suspended;
-                self.last_status = match self.last_status {
-                    Some(VmStatus::Waiting(op_id)) => Some(VmStatus::Waiting(op_id)),
-                    other => other,
-                };
-                Ok(AccessStatus::Again)
+                self.budget_continuations = 0;
+                AccessStatus::Again
             }
             Poll::Ready(Ok(())) => {
                 registry.remove_exact(self.identity, &self.request_id);
@@ -721,7 +862,7 @@ impl AccessExec {
                 self.permit = None;
                 self.last_error = Some(err.to_string());
                 self.state = ExecState::Failed;
-                Err(AccessStatus::Error500)
+                AccessStatus::Error500
             }
         }
     }
@@ -730,30 +871,18 @@ impl AccessExec {
         &mut self,
         registry: &mut IdentityRegistry<u64>,
         waiter: &impl AsyncWait,
-    ) -> Result<AccessStatus, AccessStatus> {
+    ) -> AccessStatus {
         let identity = self.identity;
         let ctx = self.ctx_ptr();
         let disp = std::ptr::addr_of_mut!(self.disposition);
-        let vm = self.vm.as_mut().ok_or(AccessStatus::Error500)?;
-        match with_vm_entry(identity, self.phase, ctx, disp, || vm.resume()) {
-            Ok(VmStatus::Halted) => Ok(self.finish_from_disposition(false)),
-            Ok(VmStatus::Waiting(op_id)) => {
-                self.last_status = Some(VmStatus::Waiting(op_id));
-                self.arm_wait(registry, waiter)
-            }
-            Ok(VmStatus::Yielded) => {
+        let initial = match self.vm.as_mut() {
+            Some(vm) => with_vm_entry(identity, self.phase, ctx, disp, || vm.resume()),
+            None => {
                 self.state = ExecState::Failed;
-                Err(AccessStatus::Error500)
+                return AccessStatus::Error500;
             }
-            Err(err) => {
-                let status = self.finish_from_vm_error(err);
-                if matches!(status, AccessStatus::Error500) {
-                    Err(status)
-                } else {
-                    Ok(status)
-                }
-            }
-        }
+        };
+        self.drive_status(initial, registry, waiter)
     }
 
     pub fn apply_ready(
@@ -765,7 +894,7 @@ impl AccessExec {
         if identity != self.identity {
             return ReadyEffect::Ignored;
         }
-        if self.state == ExecState::Cancelled || self.state == ExecState::Halted {
+        if !matches!(self.state, ExecState::Suspended | ExecState::Posted) {
             return ReadyEffect::Ignored;
         }
         if !self.suspend_committed {
@@ -798,6 +927,24 @@ impl AccessExec {
         registry: &mut IdentityRegistry<u64>,
         waiter: &impl AsyncWait,
     ) -> ReadyEffect {
+        if self.state == ExecState::Posted {
+            registry.remove_exact(self.identity, &self.request_id);
+            self.state = ExecState::New;
+            let Some(VmStatus::Waiting(op_id)) = self.last_status else {
+                self.last_error =
+                    Some("posted async continuation lost its waiting operation".into());
+                self.state = ExecState::Failed;
+                return ReadyEffect::Failed;
+            };
+            return match self.drive_status(Ok(VmStatus::Waiting(op_id)), registry, waiter) {
+                AccessStatus::Ok | AccessStatus::Finalize(_) => ReadyEffect::Halted,
+                AccessStatus::Again => ReadyEffect::WaitingAgain,
+                AccessStatus::Error500 => ReadyEffect::Failed,
+            };
+        }
+        if self.state != ExecState::Suspended {
+            return ReadyEffect::Ignored;
+        }
         let identity = self.identity;
         let Some(vm) = self.vm.as_mut() else {
             return ReadyEffect::Ignored;
@@ -813,9 +960,9 @@ impl AccessExec {
                 registry.remove_exact(self.identity, &self.request_id);
                 self.permit = None;
                 match self.resume_after_ready(registry, waiter) {
-                    Ok(AccessStatus::Ok) | Ok(AccessStatus::Finalize(_)) => ReadyEffect::Halted,
-                    Ok(AccessStatus::Again) => ReadyEffect::WaitingAgain,
-                    _ => ReadyEffect::Failed,
+                    AccessStatus::Ok | AccessStatus::Finalize(_) => ReadyEffect::Halted,
+                    AccessStatus::Again => ReadyEffect::WaitingAgain,
+                    AccessStatus::Error500 => ReadyEffect::Failed,
                 }
             }
             Poll::Ready(Err(err)) => {
@@ -875,6 +1022,106 @@ mod tests {
     use crate::notify::DEFAULT_MAX_IN_FLIGHT;
     use crate::runtime::WorkerRuntime;
     use std::sync::Arc;
+
+    fn scripted_immediate_drive(
+        budget: usize,
+        polls: impl IntoIterator<Item = Poll<VmResult<()>>>,
+        resumes: impl IntoIterator<Item = VmResult<VmStatus>>,
+    ) -> (ImmediateDrive, usize, usize) {
+        let mut polls = polls.into_iter();
+        let mut resumes = resumes.into_iter();
+        let mut poll_count = 0;
+        let mut resume_count = 0;
+        let outcome = drive_immediate_ready(
+            Ok(VmStatus::Waiting(1)),
+            budget,
+            |_cx| {
+                poll_count += 1;
+                polls.next().expect("scripted poll")
+            },
+            || {
+                resume_count += 1;
+                resumes.next().expect("scripted resume")
+            },
+        );
+        (outcome, poll_count, resume_count)
+    }
+
+    #[test]
+    fn reusable_vm_key_includes_full_host_catalog_abi() {
+        let program = compile("use ngx;\nngx::ctx::get(\"k\");\n");
+        let base = ReusableVmKey {
+            program: Arc::clone(&program),
+            phase: NgxPhase::Access,
+            policy: StandardHostPolicy::fail_closed(),
+            ngx_catalog_abi: crate::host::compile_host_catalog().fingerprint(),
+            standard_catalog_abi: vm::standard_host_catalog_fingerprint(),
+        };
+        let different_abi = ReusableVmKey {
+            program,
+            phase: NgxPhase::Access,
+            policy: StandardHostPolicy::fail_closed(),
+            ngx_catalog_abi: crate::host::compile_host_catalog().fingerprint(),
+            standard_catalog_abi: vm::HostApiCatalog::default().fingerprint(),
+        };
+        assert!(!base.matches(&different_abi));
+    }
+
+    #[test]
+    fn immediate_ready_drive_coalesces_to_halt_without_pending_arm() {
+        let (outcome, polls, resumes) = scripted_immediate_drive(
+            MAX_IMMEDIATE_TRANSITIONS,
+            [Poll::Ready(Ok(()))],
+            [Ok(VmStatus::Halted)],
+        );
+        assert!(matches!(outcome, ImmediateDrive::Halted));
+        assert_eq!(polls, 1);
+        assert_eq!(resumes, 1);
+    }
+
+    #[test]
+    fn real_pending_stops_before_resume_or_another_poll() {
+        let (outcome, polls, resumes) = scripted_immediate_drive(
+            MAX_IMMEDIATE_TRANSITIONS,
+            [Poll::Pending],
+            std::iter::empty(),
+        );
+        assert!(matches!(outcome, ImmediateDrive::Pending(1)));
+        assert_eq!(polls, 1);
+        assert_eq!(resumes, 0);
+    }
+
+    #[test]
+    fn chained_immediate_futures_finish_in_one_drive() {
+        let (outcome, polls, resumes) = scripted_immediate_drive(
+            MAX_IMMEDIATE_TRANSITIONS,
+            [
+                Poll::Ready(Ok(())),
+                Poll::Ready(Ok(())),
+                Poll::Ready(Ok(())),
+            ],
+            [
+                Ok(VmStatus::Waiting(2)),
+                Ok(VmStatus::Waiting(3)),
+                Ok(VmStatus::Halted),
+            ],
+        );
+        assert!(matches!(outcome, ImmediateDrive::Halted));
+        assert_eq!(polls, 3);
+        assert_eq!(resumes, 3);
+    }
+
+    #[test]
+    fn transition_budget_posts_before_polling_the_next_future() {
+        let (outcome, polls, resumes) = scripted_immediate_drive(
+            2,
+            [Poll::Ready(Ok(())), Poll::Ready(Ok(()))],
+            [Ok(VmStatus::Waiting(2)), Ok(VmStatus::Waiting(3))],
+        );
+        assert!(matches!(outcome, ImmediateDrive::Budget(3)));
+        assert_eq!(polls, 2);
+        assert_eq!(resumes, 2);
+    }
 
     fn compile(source: &str) -> Arc<Program> {
         compile_rss_source(source).expect("compile with ngx catalog")

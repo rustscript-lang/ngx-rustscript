@@ -161,9 +161,9 @@ int main(void)
 {
     ngx_http_request_t r;
 
-    if (sizeof(r) != 1408) {
+    if (sizeof(r) != 1352) {
         fprintf(stderr, "sizeof(ngx_http_request_t)=%zu\n", sizeof(r));
-        fail("sizeof(ngx_http_request_t) != 1408");
+        fail("sizeof(ngx_http_request_t) != 1352");
     }
     if (ngx_rustscript_request_is_internal(NULL) != 0
         || ngx_rustscript_request_headers_sent(NULL) != 0

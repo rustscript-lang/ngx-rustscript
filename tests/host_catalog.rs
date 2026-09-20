@@ -16,12 +16,13 @@ use ngx_rustscript::host::{
     HostCapability, HostFamily, HostSyncKind, NGX_CRC32_LONG_NAME, NGX_CRC32_SHORT_NAME,
     NGX_DECODE_ARGS_NAME, NGX_DECODE_BASE64_NAME, NGX_DECODE_BASE64MIME_NAME, NGX_ENCODE_ARGS_NAME,
     NGX_ENCODE_BASE64_NAME, NGX_ESCAPE_URI_NAME, NGX_HEADER_GET_NAME, NGX_HMAC_SHA1_NAME,
-    NGX_HOST_CATALOG_FINGERPRINT, NGX_HOST_CATALOG_FINGERPRINT_V1, NGX_HOST_CATALOG_SCHEMA_VERSION,
-    NGX_MD5_BIN_NAME, NGX_MD5_NAME, NGX_NOW_NAME, NGX_QUOTE_SQL_STR_NAME, NGX_SHA1_BIN_NAME,
-    NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME, NGX_STATUS_GET_NAME, NGX_TIME_NAME, NGX_UNESCAPE_URI_NAME,
-    NGX_UPDATE_TIME_NAME, NgxPhase, StandardHostPolicy, bind_ngx_hosts, compile_host_catalog,
-    host_allowed_in_phase, install_standard_runtime, is_standard_host_import, ngx_host_catalog,
-    ngx_host_manifest, ngx_host_registry, production_runtime_host_names,
+    NGX_HOST_CATALOG_FINGERPRINT, NGX_HOST_CATALOG_FINGERPRINT_V1, NGX_HOST_CATALOG_FINGERPRINT_V2,
+    NGX_HOST_CATALOG_SCHEMA_VERSION, NGX_MD5_BIN_NAME, NGX_MD5_NAME, NGX_NOW_NAME,
+    NGX_QUOTE_SQL_STR_NAME, NGX_SHA1_BIN_NAME, NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME,
+    NGX_STATUS_GET_NAME, NGX_TIME_NAME, NGX_UNESCAPE_URI_NAME, NGX_UPDATE_TIME_NAME, NgxPhase,
+    StandardHostPolicy, bind_ngx_hosts, compile_host_catalog, host_allowed_in_phase,
+    install_standard_runtime, is_standard_host_import, ngx_host_catalog, ngx_host_manifest,
+    ngx_host_registry, production_runtime_host_names,
 };
 use vm::{HostTypeSchema, Program, Vm};
 
@@ -1182,8 +1183,9 @@ const ALLOWED_DYNAMIC_SLOTS: &[&str] = &[
 #[test]
 fn catalog_schema_version_and_fingerprint_goldens() {
     let catalog = ngx_host_catalog();
-    assert_eq!(NGX_HOST_CATALOG_SCHEMA_VERSION, 2);
+    assert_eq!(NGX_HOST_CATALOG_SCHEMA_VERSION, 3);
     assert_eq!(NGX_HOST_CATALOG_FINGERPRINT_V1, 0x5e37_8285_8fa0_b584);
+    assert_eq!(NGX_HOST_CATALOG_FINGERPRINT_V2, 0x10c4_07b2_b827_eaff);
     assert_eq!(
         catalog.fingerprint().as_u64(),
         NGX_HOST_CATALOG_FINGERPRINT,
@@ -1192,6 +1194,10 @@ fn catalog_schema_version_and_fingerprint_goldens() {
     assert_ne!(
         NGX_HOST_CATALOG_FINGERPRINT, NGX_HOST_CATALOG_FINGERPRINT_V1,
         "current fingerprint must differ from the v1 golden"
+    );
+    assert_ne!(
+        NGX_HOST_CATALOG_FINGERPRINT, NGX_HOST_CATALOG_FINGERPRINT_V2,
+        "current fingerprint must differ from the v2 golden"
     );
 }
 

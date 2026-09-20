@@ -1,6 +1,6 @@
 //! Worker-thread-local synchronous VM pool.
 //!
-//! pd-vm at `f5f71ebc2f38e276c35f2aebaf63f4e2780efe99` stores `Arc<Program>`
+//! pd-vm at `87d8c5d5cb42b3381aecadb383c0b7bf34ff204f` stores `Arc<Program>`
 //! internally and exposes:
 //!
 //! - [`Vm::new_shared`] — shared-program constructor (this pin has no
@@ -91,6 +91,31 @@ pub(crate) fn reset_for_pool(vm: &mut Vm) -> bool {
     vm.is_reusable()
 }
 
+/// Reset an async request VM while its worker Tokio runtime is current.
+///
+/// The mandatory poll and bridge removal are the core quiescence gate: they
+/// reject pending/failed scope cleanup and any remaining future, operation,
+/// resource, reset, or stream state before the VM can enter the idle pool.
+pub(crate) fn reset_request_vm_for_pool(vm: &mut Vm, runtime: &tokio::runtime::Handle) -> bool {
+    let _enter = runtime.enter();
+    if vm.reset_for_reuse().is_err() {
+        return false;
+    }
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    if !matches!(vm.poll_reset_for_reuse(&mut cx), Poll::Ready(Ok(()))) {
+        return false;
+    }
+    if vm.scope_reset_pending() || !vm.is_reusable() {
+        return false;
+    }
+    if vm.clear_async_bridge().is_err() {
+        return false;
+    }
+    vm.clear_runtime_print_sink();
+    vm.is_reusable()
+}
+
 /// Run `program` on a leased worker-local VM until the first status.
 pub fn run(program: &Arc<Program>) -> Result<VmStatus, VmError> {
     let mut vm = POOL.with(|pool| pool.borrow_mut().take(program));
@@ -125,7 +150,51 @@ pub(crate) fn idle_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vm::compile_source;
+    use std::collections::HashMap;
+    use vm::operation::OperationCancelReason;
+    use vm::{
+        CallReturn, HostAsyncBridge, HostAsyncOpTerminal, HostFuture, HostFutureOutput, HostOpId,
+        VmResult, compile_source,
+    };
+
+    struct CleanupFailBridge {
+        futures: HashMap<HostOpId, HostFuture>,
+    }
+
+    impl HostAsyncBridge for CleanupFailBridge {
+        fn submit_op(&mut self, op_id: HostOpId, future: HostFuture) -> VmResult<()> {
+            self.futures.insert(op_id, future);
+            Ok(())
+        }
+
+        fn poll_op(
+            &mut self,
+            _op_id: HostOpId,
+            _cx: &mut Context<'_>,
+        ) -> Poll<VmResult<CallReturn>> {
+            Poll::Pending
+        }
+
+        fn poll_submitted_op(
+            &mut self,
+            _op_id: HostOpId,
+            _cx: &mut Context<'_>,
+        ) -> Poll<VmResult<HostFutureOutput>> {
+            Poll::Pending
+        }
+
+        fn request_cancel_op(
+            &mut self,
+            _op_id: HostOpId,
+            _reason: OperationCancelReason,
+        ) -> VmResult<()> {
+            Err(VmError::HostError("injected cleanup failure".into()))
+        }
+
+        fn cleanup_op(&mut self, _op_id: HostOpId, _terminal: HostAsyncOpTerminal) -> VmResult<()> {
+            Ok(())
+        }
+    }
 
     fn compile(source: &str) -> Arc<Program> {
         Arc::new(compile_source(source).expect("compile").program)
@@ -186,6 +255,31 @@ mod tests {
         );
         assert_eq!(created_count(), 2);
         assert!(idle_count() <= MAX_IDLE_VMS);
+    }
+
+    #[test]
+    fn cleanup_failure_drops_async_request_vm() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let program = vm::compile_source_with_flavor_and_options(
+            "use ngx;\nngx::ready();\n",
+            vm::SourceFlavor::RustScript,
+            vm::CompileSourceFileOptions::default()
+                .with_host_api_catalog(Arc::new(crate::host::test_bind_catalog())),
+        )
+        .expect("compile immediate async host")
+        .program;
+        let mut vm = Vm::new(program);
+        crate::host::bind_test_hosts(&mut vm);
+        vm.set_async_bridge(Box::new(CleanupFailBridge {
+            futures: HashMap::new(),
+        }))
+        .expect("set failing cleanup bridge");
+        assert!(matches!(vm.run(), Ok(VmStatus::Waiting(_))));
+        assert!(!reset_request_vm_for_pool(&mut vm, runtime.handle()));
+        assert!(vm.scope_reset_pending() || !vm.is_reusable());
     }
 
     #[test]

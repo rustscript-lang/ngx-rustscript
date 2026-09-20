@@ -258,6 +258,7 @@ pub fn reject_program_imports(program: &Program) -> Result<(), ConfigError> {
 struct StandardBuiltinUsage {
     io: bool,
     sqlite: bool,
+    sse: bool,
 }
 
 fn standard_builtin_usage(program: &Program) -> StandardBuiltinUsage {
@@ -265,7 +266,30 @@ fn standard_builtin_usage(program: &Program) -> StandardBuiltinUsage {
     StandardBuiltinUsage {
         io: disassembly.contains("builtin io_"),
         sqlite: disassembly.contains("builtin sqlite_"),
+        sse: program
+            .imports
+            .iter()
+            .any(|import| import.name == "http::client::sse"),
     }
+}
+
+fn program_has_resource_or_unknown_host_schema(program: &Program) -> bool {
+    let schemas = program.host_import_schemas();
+    schemas.len() != program.imports.len()
+        || program
+            .imports
+            .iter()
+            .zip(schemas)
+            .any(|(import, schema)| match schema {
+                None => import.name != "http::client::request",
+                Some(schema) => {
+                    schema.return_type.contains_resource()
+                        || schema
+                            .params
+                            .iter()
+                            .any(|param| param.schema.contains_resource())
+                }
+            })
 }
 
 fn first_standard_builtin(program: &Program) -> Option<String> {
@@ -351,9 +375,11 @@ fn program_may_suspend_or_retain_state(program: &Program) -> bool {
     let builtins = standard_builtin_usage(program);
     builtins.io
         || builtins.sqlite
+        || builtins.sse
+        || program_has_resource_or_unknown_host_schema(program)
         || program.imports.iter().any(|import| {
             crate::host::ngx_timer_host_names().contains(&import.name.as_str())
-                || is_standard_host_import(&import.name)
+                || (is_standard_host_import(&import.name) && import.name != "http::client::request")
                 || ngx_host_manifest().iter().any(|entry| {
                     entry.name == import.name.as_str()
                         && (entry.sync == HostSyncKind::Async
@@ -382,8 +408,8 @@ pub fn program_requires_request_state(program: &Program) -> bool {
     script_execution_metadata(program).requires_request_state
 }
 
-/// True when a request-owned program cannot suspend or retain worker callbacks
-/// and can therefore reuse a reset VM after terminal cleanup.
+/// True when static metadata permits request-VM reuse after terminal cleanup.
+/// Buffered HTTP is admitted; streaming/resource/unknown families fail closed.
 pub fn program_can_reuse_request_vm(program: &Program) -> bool {
     script_execution_metadata(program).reuses_request_vm
 }
