@@ -82,11 +82,35 @@ struct ReusableRequestVm {
 struct ReusableRequestVmPool {
     idle: Vec<ReusableRequestVm>,
     created: usize,
+    #[cfg(ngx_rustscript_integration_hooks)]
+    checkouts: usize,
+    #[cfg(ngx_rustscript_integration_hooks)]
+    hits: usize,
+    #[cfg(ngx_rustscript_integration_hooks)]
+    returns: usize,
+}
+
+#[cfg(ngx_rustscript_integration_hooks)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReusableRequestVmPoolStats {
+    pub(crate) created: usize,
+    pub(crate) checkouts: usize,
+    pub(crate) hits: usize,
+    pub(crate) returns: usize,
+    pub(crate) idle: usize,
 }
 
 impl ReusableRequestVmPool {
     fn take(&mut self, key: &ReusableVmKey) -> Result<Vm, String> {
+        #[cfg(ngx_rustscript_integration_hooks)]
+        {
+            self.checkouts = self.checkouts.saturating_add(1);
+        }
         if let Some(index) = self.idle.iter().position(|entry| entry.key.matches(key)) {
+            #[cfg(ngx_rustscript_integration_hooks)]
+            {
+                self.hits = self.hits.saturating_add(1);
+            }
             return Ok(self.idle.swap_remove(index).vm);
         }
         let mut vm = Vm::new_shared(Arc::clone(&key.program));
@@ -101,6 +125,21 @@ impl ReusableRequestVmPool {
         }
         if crate::vm_pool::reset_request_vm_for_pool(&mut vm, runtime) {
             self.idle.push(ReusableRequestVm { key, vm });
+            #[cfg(ngx_rustscript_integration_hooks)]
+            {
+                self.returns = self.returns.saturating_add(1);
+            }
+        }
+    }
+
+    #[cfg(ngx_rustscript_integration_hooks)]
+    fn stats(&self) -> ReusableRequestVmPoolStats {
+        ReusableRequestVmPoolStats {
+            created: self.created,
+            checkouts: self.checkouts,
+            hits: self.hits,
+            returns: self.returns,
+            idle: self.idle.len(),
         }
     }
 }
@@ -153,6 +192,11 @@ impl WorkerRuntime {
 
     pub fn in_flight(&self) -> Result<usize, NotifyError> {
         self.notify.in_flight()
+    }
+
+    #[cfg(ngx_rustscript_integration_hooks)]
+    pub(crate) fn reusable_request_vm_pool_stats(&self) -> ReusableRequestVmPoolStats {
+        self.reusable_request_vms.borrow().stats()
     }
 
     pub fn post_continuation(&self, identity: RequestIdentity) -> Result<(), RuntimeError> {

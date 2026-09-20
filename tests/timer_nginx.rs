@@ -1,4 +1,4 @@
-//! Real pinned NGINX 1.30.4 lifecycle tests for `ngx::timer`.
+//! Real pinned OpenResty 1.31.4.1 lifecycle tests for `ngx::timer`.
 //!
 //! Covers detached lifetime, owned callback execution, shared-dict/log markers
 //! after the creating request finished, `premature=false`/`true`, `ngx::sleep`

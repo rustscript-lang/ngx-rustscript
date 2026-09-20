@@ -385,7 +385,7 @@ fn assert_content_delayed_counts(proofs: &[CountProof], token: &str) {
     let scoped = proofs_for_token(proofs, token);
     assert_no_underflow_or_leak(&scoped);
     // Isolated main request starts at count=1. ngx_http_read_client_request_body
-    // always does r->main->count++ (nginx 1.30.4 ngx_http_request_body.c), so
+    // always does r->main->count++ (NGINX 1.31.4 ngx_http_request_body.c), so
     // NGX_AGAIN is observed at 2. Manual undo returns 1. Content NGX_DONE takes
     // the extra lease (2); ngx_http_core_content_phase then
     // ngx_http_finalize_request(NGX_DONE) -> ngx_http_close_request count-- to 1

@@ -27,8 +27,8 @@ Pinned `pd-vm` evidence in this file is taken from:
 | Pin | Value |
 | --- | --- |
 | Crate metadata | `Cargo.toml` `rustscript-rev` / `vm` git `rev` |
-| `Cargo.lock` | `pd-vm` `source = "git+https://github.com/rustscript-lang/rustscript?rev=f5f71ebc2f38e276c35f2aebaf63f4e2780efe99#f5f71ebc2f38e276c35f2aebaf63f4e2780efe99"` (compatibility mainline carrying the standard timer host module) |
-| Local Cargo git checkout | `$CARGO_HOME/git/checkouts/rustscript-ab116a0775a56744/f5f71eb` |
+| `Cargo.lock` | `pd-vm` `source = "git+https://github.com/rustscript-lang/rustscript?rev=87d8c5d5cb42b3381aecadb383c0b7bf34ff204f#87d8c5d5cb42b3381aecadb383c0b7bf34ff204f"` |
+| Local Cargo git checkout | `$CARGO_HOME/git/checkouts/rustscript-ab116a0775a56744/87d8c5d` |
 
 Public versus crate-private is taken from that checkout's `src/lib.rs`
 re-exports and item visibility. Do not treat crate-private helpers as
@@ -559,7 +559,7 @@ callable. Access + content only; Log fails configuration compile.
 
 Validation: `tests/ngx_scheduler_contract.rs` (catalog/manifest/phase/owned
 argument), `tests/ngx_timer.rs` (unit lifecycle), `tests/timer_nginx.rs`
-(real NGINX 1.30.4 lifecycle). `docs/api/timer.md` carries the per-host table.
+(real OpenResty 1.31.4.1 lifecycle). `docs/api/timer.md` carries the per-host table.
 
 Decision: **landed as the second worker-owned family.** The remaining
 callable families stay fail-closed.
@@ -746,8 +746,10 @@ invocation.
 
 | Budget | Current | Scheduler implication |
 | --- | --- | --- |
-| In-flight HostFuture waits | 1024 / worker (`DEFAULT_MAX_IN_FLIGHT`) | Request-owned async waits (sleep, cosocket, a semaphore `wait` inside a request) reserve this permit exactly once through the `AccessExec` driver (`tests/ngx_semaphore.rs`). A timer callback that parks on async work uses the same `HostFuture` + identity-waker + worker-eventfd wake path, but its concurrency is bounded by the timer `max_running` cap rather than by that permit pool: do not claim that every timer work item is counted against `DEFAULT_MAX_IN_FLIGHT`. |
-| Idle VM pool | 4 VMs without request-state imports (`MAX_IDLE_VMS`) | Only sync-only request VMs are pooled. A callback VM is created by the owned dispatch and is never taken from (or returned to) the pool. |
+| Immediate-ready transitions | 64 per NGINX event turn (`MAX_IMMEDIATE_TRANSITIONS`) | A progress-making chain posts its identity to `ngx_posted_next_events` and continues across arbitrarily many turns. Posted continuations reserve no pending-wait permit. Zero-progress and reentrant continuations fail closed. |
+| In-flight HostFuture waits | 1024 / worker (`DEFAULT_MAX_IN_FLIGHT`) | A real `Pending` request wait reserves this permit exactly once through `AccessExec`. Immediately-ready rollover does not. Timer callback concurrency is bounded by `max_running`, independently of this request-wait permit pool. |
+| Synchronous idle VM pool | 4 (`MAX_IDLE_VMS`) | Import-free and pure synchronous programs are keyed by exact `Arc<Program>` identity. |
+| Reusable request VM pool | 4 (`MAX_IDLE_REUSABLE_REQUEST_VMS`) | Buffered HTTP only after successful halt and quiescent reset. The exact key is program identity + phase + complete standard-host policy + ngx catalog fingerprint + standard catalog fingerprint. Failure, cancel, timeout, pending cleanup, excluded host families, and excess returns are dropped. Fresh request context, bridge, and runtime policy are installed at checkout. Callback VMs never use either request pool. |
 | Resource table | pd-vm default 1024 | A callback VM gets its own **empty** table. A request handle cannot resolve in it (wrong table, fails closed); never insert a parent socket into it. |
 | `ngx.ctx` | keys/depth/bytes caps | Callables rejected. Detached timer rounds have no request ctx (no ctx pointer in the round's scope). |
 | Script call depth | `DEFAULT_MAX_SCRIPT_CALL_DEPTH` 1024 | A callback VM has its own depth; a timer round is not a recursive same-stack call. |

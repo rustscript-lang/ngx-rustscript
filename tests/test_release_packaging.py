@@ -89,16 +89,13 @@ def directory_payload(path: Path) -> dict[str, bytes]:
     }
 
 
-FROZEN_RUSTSCRIPT_REV = "b1d6cffede77f49410bf63525f30b9a46b02dc01"
-STALE_RUSTSCRIPT_REV = "f5f71ebc2f38e276c35f2aebaf63f4e2780efe99"
+FROZEN_RUSTSCRIPT_REV = "87d8c5d5cb42b3381aecadb383c0b7bf34ff204f"
 FULL_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 def require_full_git_rev(rev: str, label: str) -> str:
     if not FULL_GIT_SHA.fullmatch(rev):
         raise AssertionError(f"{label} must be a full 40-character git SHA, got {rev!r}")
-    if rev == STALE_RUSTSCRIPT_REV:
-        raise AssertionError(f"{label} still pins the stale core revision {rev}")
     if len(rev) != 40:
         raise AssertionError(f"{label} rejected a non-full pin: {rev!r}")
     return rev
@@ -126,13 +123,11 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertIn(f'name = "pd-vm"', lock)
         self.assertIn(f'name = "pd-host-function"', lock)
         self.assertGreaterEqual(lock.count(expected_source), 2)
-        self.assertNotIn(STALE_RUSTSCRIPT_REV, cargo_toml)
-        self.assertNotIn(STALE_RUSTSCRIPT_REV, lock)
-
         with self.assertRaises(AssertionError):
             require_full_git_rev("b1d6cff", "abbreviated")
-        with self.assertRaises(AssertionError):
-            require_full_git_rev(STALE_RUSTSCRIPT_REV, "stale")
+
+        for public_pin in (ROOT / "README.md", ROOT / "docs/design/ngx-scheduler.md"):
+            self.assertIn(FROZEN_RUSTSCRIPT_REV, public_pin.read_text(), public_pin)
 
     def test_workflows_parse_and_cover_ci_cd_contract(self) -> None:
         self.assertTrue(CI_WORKFLOW.is_file())
@@ -152,10 +147,10 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertIn("inputs.ref == ''", ci["concurrency"]["cancel-in-progress"])
 
         metadata = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["metadata"]["ngx-rustscript"]
-        self.assertEqual(ci["env"]["NGINX_VERSION"], metadata["nginx-version"])
-        self.assertEqual(ci["env"]["NGINX_SHA256"], metadata["nginx-tarball-sha256"])
-        self.assertEqual(release["env"]["NGINX_VERSION"], metadata["nginx-version"])
-        self.assertEqual(release["env"]["NGINX_SHA256"], metadata["nginx-tarball-sha256"])
+        self.assertEqual(ci["env"]["OPENRESTY_VERSION"], metadata["openresty-version"])
+        self.assertEqual(ci["env"]["NGINX_CORE_VERSION"], metadata["nginx-core-version"])
+        self.assertEqual(release["env"]["OPENRESTY_VERSION"], metadata["openresty-version"])
+        self.assertEqual(release["env"]["NGINX_CORE_VERSION"], metadata["nginx-core-version"])
 
         ci_text = CI_WORKFLOW.read_text()
         for required in (
@@ -163,10 +158,11 @@ class ReleasePackagingTests(unittest.TestCase):
             "cargo check --locked",
             "cargo clippy --locked --all-targets -- -D warnings",
             "--test-threads=1",
-            "tests/verify_add_dynamic.sh",
             "tests/nginx_integration.py",
             "tests/test_release_packaging.py",
-            "4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b",
+            "openresty-${OPENRESTY_VERSION}.tar.gz",
+            "CFLAGS=-I%s",
+            "BINDGEN_EXTRA_CLANG_ARGS=-I%s",
         ):
             self.assertIn(required, ci_text)
 
@@ -193,7 +189,7 @@ class ReleasePackagingTests(unittest.TestCase):
             "--clobber",
             "SHA256SUMS",
             "ngx-rustscript-module-${VERSION}-linux-amd64.tgz",
-            "ngx-rustscript-nginx-${VERSION}-nginx-${NGINX_VERSION}-linux-amd64.tgz",
+            "ngx-rustscript-openresty-${VERSION}-openresty-${OPENRESTY_VERSION}-linux-amd64.tgz",
             "nginx-module-rustscript_${VERSION}_amd64.deb",
         ):
             self.assertIn(required, release_text)
@@ -239,7 +235,7 @@ class ReleasePackagingTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout)
 
             module_tgz_name = "ngx-rustscript-module-0.1.0-linux-amd64.tgz"
-            bundle_tgz_name = "ngx-rustscript-nginx-0.1.0-nginx-1.30.4-linux-amd64.tgz"
+            bundle_tgz_name = "ngx-rustscript-openresty-0.1.0-openresty-1.31.4.1-linux-amd64.tgz"
             deb_name = "nginx-module-rustscript_0.1.0_amd64.deb"
             expected = {module_tgz_name, bundle_tgz_name, deb_name, "SHA256SUMS"}
             self.assertEqual({path.name for path in first.iterdir()}, expected)
@@ -271,7 +267,7 @@ class ReleasePackagingTests(unittest.TestCase):
                 [],
             )
 
-            bundle_top = "ngx-rustscript-nginx-0.1.0-nginx-1.30.4-linux-amd64"
+            bundle_top = "ngx-rustscript-openresty-0.1.0-openresty-1.31.4.1-linux-amd64"
             with tarfile.open(first / bundle_tgz_name, "r:gz") as archive:
                 bundle_member_list = archive.getmembers()
                 bundle_members = {member.name: member for member in bundle_member_list}
@@ -317,7 +313,7 @@ class ReleasePackagingTests(unittest.TestCase):
             self.assertEqual(run("dpkg-deb", "-f", str(deb), "Depends").stdout.strip(), "libc6, libgcc-s1")
             self.assertEqual(
                 run("dpkg-deb", "-f", str(deb), "X-Ngx-Rustscript-Nginx-Version").stdout.strip(),
-                "1.30.4",
+                "1.31.4.1 (nginx core 1.31.4)",
             )
             contents = run("dpkg-deb", "-c", str(deb)).stdout
             self.assertIn("./usr/lib/nginx/modules/ngx_http_rustscript_module.so", contents)

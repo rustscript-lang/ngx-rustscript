@@ -27,7 +27,7 @@ printf '%s' 'http://127.0.0.1:18080/source' \
   > /absolute/path/to/pipeline-data/upstream-url.txt
 ```
 
-Run a local HTTP upstream on `127.0.0.1:18080`, then validate and start the pinned NGINX 1.30.4 build:
+Run a local HTTP upstream on `127.0.0.1:18080`, then validate and start the pinned OpenResty 1.31.4.1 build:
 
 ```sh
 $NGX_RUSTSCRIPT_NGINX -t -p /absolute/path/to/prefix \

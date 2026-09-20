@@ -35,6 +35,7 @@ use ngx_rustscript::request_state::{
 };
 use ngx_rustscript::runtime::WorkerRuntime;
 use support::artifact::module_cdylib;
+use support::hooks::hook_enabled_debug_cdylib;
 use support::nginx::{
     combined, nginx_binary, nginx_process_group_command, nginx_quote_path, nginx_test,
     terminate_process_group,
@@ -456,6 +457,31 @@ fn buffered_http_upstream() -> (u16, Arc<AtomicBool>, std::thread::JoinHandle<()
     (port, stop, join)
 }
 
+fn delayed_first_http_upstream() -> (u16, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind delayed upstream");
+    let port = listener
+        .local_addr()
+        .expect("delayed upstream address")
+        .port();
+    let join = std::thread::spawn(move || {
+        for request_index in 0..2 {
+            let (mut stream, _) = listener.accept().expect("accept delayed upstream request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("delayed upstream read timeout");
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            if request_index == 0 {
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            let _ = stream.write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    (port, join)
+}
+
 fn write_conf(prefix: &Path, body: &str) {
     fs::write(prefix.join("conf/nginx.conf"), body).unwrap();
 }
@@ -469,16 +495,23 @@ fn write_index(prefix: &Path, rel: &str, body: &str) {
 }
 
 fn spawn_nginx(nginx: &Path, prefix: &Path) -> RunningNginx {
-    let child = nginx_process_group_command(nginx)
+    spawn_nginx_with_env(nginx, prefix, &[])
+}
+
+fn spawn_nginx_with_env(nginx: &Path, prefix: &Path, env: &[(&str, &str)]) -> RunningNginx {
+    let mut command = nginx_process_group_command(nginx);
+    command
         .arg("-p")
         .arg(prefix)
         .arg("-c")
         .arg("conf/nginx.conf")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn nginx");
+        .stderr(Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let child = command.spawn().expect("spawn nginx");
     RunningNginx { child }
 }
 
@@ -567,6 +600,36 @@ http {{
 
         location /plain/ {{
         }}
+    }}
+}}
+"#
+    )
+}
+
+fn proof_conf(module: &Path, prefix: &Path, port: u16, server_locations: &str) -> String {
+    let module = nginx_quote_path(module).unwrap();
+    let pid = nginx_quote_path(&prefix.join("logs/nginx.pid")).unwrap();
+    let error_log = nginx_quote_path(&prefix.join("logs/error.log")).unwrap();
+    format!(
+        r#"
+worker_processes 1;
+error_log {error_log} info;
+pid {pid};
+daemon off;
+master_process on;
+load_module {module};
+env NGX_RUSTSCRIPT_ASYNC_PROOF;
+env NGX_RUSTSCRIPT_VM_REUSE_PROOF;
+
+events {{ worker_connections 64; }}
+
+http {{
+    access_log off;
+    default_type text/plain;
+    server {{
+        listen 127.0.0.1:{port};
+        server_name localhost;
+        {server_locations}
     }}
 }}
 "#
@@ -835,6 +898,356 @@ fn graceful_quit_with_long_sleep_exits_within_bound() {
 }
 
 #[test]
+fn real_nginx_reuses_buffered_http_vm_and_isolates_runtime_policy() {
+    let nginx = nginx_binary();
+    let module = hook_enabled_debug_cdylib();
+    let prefix = isolated_prefix("lifecycle-http-reuse-proof");
+    let (upstream_port, stop_upstream, upstream) = buffered_http_upstream();
+    let script = prefix.join("conf/http-reuse-proof.rss");
+    fs::write(
+        &script,
+        format!(
+            r#"
+use http;
+use ngx;
+if ngx::ctx::get("seen") != null {{ ngx::exit(409); }}
+ngx::ctx::set("seen", 1);
+let response: map = http::client::request({{
+    method: "GET",
+    url: "http://127.0.0.1:{upstream_port}/",
+    body: null
+}});
+if response["status"] != 204 {{ ngx::exit(502); }}
+"#
+        ),
+    )
+    .unwrap();
+    write_index(&prefix, "reuse/value.txt", "parent\n");
+    write_index(&prefix, "reuse/isolated/value.txt", "isolated\n");
+
+    let html = nginx_quote_path(&prefix.join("html")).unwrap();
+    let script = nginx_quote_path(&script).unwrap();
+    let locations = format!(
+        r#"
+        root {html};
+        location /reuse/ {{
+            rss_http_scheme http;
+            rss_http_allow 127.0.0.1 {upstream_port};
+            rss_http_allow_private on;
+            access_by_rss_file {script};
+            location /reuse/isolated/ {{
+                rss_http_scheme http;
+                rss_http_allow 127.0.0.1 {upstream_port};
+                rss_http_allow_private on;
+                rss_io_root {html};
+            }}
+        }}
+"#
+    );
+    let port = free_port();
+    write_conf(&prefix, &proof_conf(module, &prefix, port, &locations));
+    let out = nginx_test(&nginx, &prefix);
+    assert!(out.status.success(), "nginx -t failed:\n{}", combined(&out));
+
+    let running = spawn_nginx_with_env(&nginx, &prefix, &[("NGX_RUSTSCRIPT_VM_REUSE_PROOF", "1")]);
+    wait_for_port(port, Duration::from_secs(5));
+    for (path, expected) in [
+        ("/reuse/value.txt?arg_id=parent-1", "parent\n"),
+        ("/reuse/isolated/value.txt?arg_id=isolated-1", "isolated\n"),
+        ("/reuse/value.txt?arg_id=parent-2", "parent\n"),
+        ("/reuse/isolated/value.txt?arg_id=isolated-2", "isolated\n"),
+    ] {
+        let (status, response) = http_get(port, path);
+        assert_eq!(status, 200, "{path}: {response}");
+        assert_eq!(http_body(&response), expected, "{path}: {response}");
+    }
+    drop(running);
+    stop_upstream.store(true, Ordering::Release);
+    TcpStream::connect(("127.0.0.1", upstream_port)).ok();
+    upstream.join().expect("join lifecycle upstream");
+
+    let log = fs::read_to_string(prefix.join("logs/error.log")).unwrap();
+    let proofs: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("VM_REUSE_PROOF phase=Access"))
+        .collect();
+    assert_eq!(proofs.len(), 4, "{log}");
+    for (line, expected) in proofs.iter().zip([
+        "created=1 checkouts=1 hits=0 returns=0 idle=0",
+        "created=2 checkouts=2 hits=0 returns=1 idle=1",
+        "created=2 checkouts=3 hits=1 returns=2 idle=1",
+        "created=2 checkouts=4 hits=2 returns=3 idle=1",
+    ]) {
+        assert!(line.contains(expected), "expected {expected} in {line}");
+    }
+}
+
+#[test]
+fn real_nginx_cancelled_buffered_http_vm_is_not_reused() {
+    let nginx = nginx_binary();
+    let module = hook_enabled_debug_cdylib();
+    let prefix = isolated_prefix("lifecycle-no-reuse-cancel");
+    let (upstream_port, upstream) = delayed_first_http_upstream();
+    let script = prefix.join("conf/http-cancel.rss");
+    fs::write(
+        &script,
+        format!(
+            r#"
+use http;
+let response: map = http::client::request({{
+    method: "GET",
+    url: "http://127.0.0.1:{upstream_port}/",
+    body: null
+}});
+"#
+        ),
+    )
+    .unwrap();
+    write_index(&prefix, "cancel.txt", "completed\n");
+    let html = nginx_quote_path(&prefix.join("html")).unwrap();
+    let script = nginx_quote_path(&script).unwrap();
+    let locations = format!(
+        r#"
+        root {html};
+        location = /cancel.txt {{
+            rss_http_scheme http;
+            rss_http_allow 127.0.0.1 {upstream_port};
+            rss_http_allow_private on;
+            access_by_rss_file {script};
+        }}
+"#
+    );
+    let port = free_port();
+    write_conf(&prefix, &proof_conf(module, &prefix, port, &locations));
+    let out = nginx_test(&nginx, &prefix);
+    assert!(out.status.success(), "nginx -t failed:\n{}", combined(&out));
+
+    let running = spawn_nginx_with_env(&nginx, &prefix, &[("NGX_RUSTSCRIPT_VM_REUSE_PROOF", "1")]);
+    wait_for_port(port, Duration::from_secs(5));
+    let mut cancelled = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        cancelled,
+        "GET /cancel.txt HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    cancelled.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    drop(cancelled);
+    std::thread::sleep(Duration::from_millis(150));
+
+    let (status, response) = http_get(port, "/cancel.txt");
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(http_body(&response), "completed\n");
+    drop(running);
+    upstream.join().expect("join delayed upstream");
+
+    let log = fs::read_to_string(prefix.join("logs/error.log")).unwrap();
+    let proofs: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("VM_REUSE_PROOF phase=Access") && line.contains("/cancel.txt"))
+        .collect();
+    assert_eq!(proofs.len(), 2, "{log}");
+    assert!(
+        proofs[0].contains("created=1 checkouts=1 hits=0 returns=0 idle=0"),
+        "{log}"
+    );
+    assert!(
+        proofs[1].contains("created=2 checkouts=2 hits=0 returns=0 idle=0"),
+        "{log}"
+    );
+}
+
+#[test]
+fn real_nginx_error_and_timeout_paths_never_enter_reuse_pool() {
+    let nginx = nginx_binary();
+    let module = hook_enabled_debug_cdylib();
+    let prefix = isolated_prefix("lifecycle-no-reuse-failure-timeout");
+    let (upstream_port, stop_upstream, upstream) = buffered_http_upstream();
+    let error_script = prefix.join("conf/http-error.rss");
+    let timeout_script = prefix.join("conf/semaphore-timeout.rss");
+    fs::write(
+        &error_script,
+        format!(
+            r#"
+use http;
+use ngx;
+let response: map = http::client::request({{
+    method: "GET",
+    url: "http://127.0.0.1:{upstream_port}/",
+    body: null
+}});
+if response["status"] != 204 {{ ngx::exit(502); }}
+let failure = 1 / 0;
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &timeout_script,
+        r#"
+use ngx;
+let sem = ngx::semaphore::new(0);
+let acquired = ngx::semaphore::wait(sem, 0.01);
+if acquired { ngx::exit(500); }
+"#,
+    )
+    .unwrap();
+    write_index(&prefix, "timeout.txt", "timeout\n");
+
+    let html = nginx_quote_path(&prefix.join("html")).unwrap();
+    let error_script = nginx_quote_path(&error_script).unwrap();
+    let timeout_script = nginx_quote_path(&timeout_script).unwrap();
+    let locations = format!(
+        r#"
+        root {html};
+        location = /error.txt {{
+            rss_http_scheme http;
+            rss_http_allow 127.0.0.1 {upstream_port};
+            rss_http_allow_private on;
+            access_by_rss_file {error_script};
+        }}
+        location = /timeout.txt {{ access_by_rss_file {timeout_script}; }}
+"#
+    );
+    let port = free_port();
+    write_conf(&prefix, &proof_conf(module, &prefix, port, &locations));
+    let out = nginx_test(&nginx, &prefix);
+    assert!(out.status.success(), "nginx -t failed:\n{}", combined(&out));
+
+    let running = spawn_nginx_with_env(&nginx, &prefix, &[("NGX_RUSTSCRIPT_VM_REUSE_PROOF", "1")]);
+    wait_for_port(port, Duration::from_secs(5));
+    for _ in 0..2 {
+        let (status, response) = http_get(port, "/error.txt");
+        assert_eq!(status, 500, "{response}");
+    }
+    for _ in 0..2 {
+        let (status, response) = http_get(port, "/timeout.txt");
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(http_body(&response), "timeout\n");
+    }
+    drop(running);
+    stop_upstream.store(true, Ordering::Release);
+    TcpStream::connect(("127.0.0.1", upstream_port)).ok();
+    upstream.join().expect("join lifecycle upstream");
+
+    let log = fs::read_to_string(prefix.join("logs/error.log")).unwrap();
+    let error_proofs: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("VM_REUSE_PROOF phase=Access") && line.contains("/error.txt"))
+        .collect();
+    assert_eq!(error_proofs.len(), 2, "{log}");
+    assert!(
+        error_proofs[0].contains("created=1 checkouts=1 hits=0 returns=0 idle=0"),
+        "{log}"
+    );
+    assert!(
+        error_proofs[1].contains("created=2 checkouts=2 hits=0 returns=0 idle=0"),
+        "{log}"
+    );
+    let timeout_proofs: Vec<_> = log
+        .lines()
+        .filter(|line| {
+            line.contains("VM_REUSE_PROOF phase=Access") && line.contains("/timeout.txt")
+        })
+        .collect();
+    assert_eq!(timeout_proofs.len(), 2, "{log}");
+    assert!(
+        timeout_proofs
+            .iter()
+            .all(|line| { line.contains("created=2 checkouts=2 hits=0 returns=0 idle=0") }),
+        "{log}"
+    );
+}
+
+#[test]
+fn real_nginx_callbacks_roll_budget_and_arm_only_real_pending_waits() {
+    const READY_TRANSITIONS: usize = 1_089;
+    const PER_TURN_BUDGET: usize = 64;
+
+    let nginx = nginx_binary();
+    let module = hook_enabled_debug_cdylib();
+    let prefix = isolated_prefix("lifecycle-callback-budget");
+    let chain = prefix.join("conf/ready-chain.rss");
+    let pending = prefix.join("conf/real-pending.rss");
+
+    let mut source = format!("use ngx;\nlet sem = ngx::semaphore::new({READY_TRANSITIONS});\n");
+    for _ in 0..READY_TRANSITIONS {
+        source.push_str("ngx::semaphore::wait(sem, 0);\n");
+    }
+    source.push_str("ngx::say(\"chain-ok\");\n");
+    fs::write(&chain, source).unwrap();
+    fs::write(
+        &pending,
+        "use ngx;\nngx::sleep_ms(25);\nngx::say(\"pending-ok\");\n",
+    )
+    .unwrap();
+
+    let chain = nginx_quote_path(&chain).unwrap();
+    let pending = nginx_quote_path(&pending).unwrap();
+    let locations = format!(
+        r#"
+        location = /chain {{ content_by_rss_file {chain}; }}
+        location = /pending {{ content_by_rss_file {pending}; }}
+"#
+    );
+    let port = free_port();
+    write_conf(&prefix, &proof_conf(module, &prefix, port, &locations));
+    let out = nginx_test(&nginx, &prefix);
+    assert!(out.status.success(), "nginx -t failed:\n{}", combined(&out));
+
+    let running = spawn_nginx_with_env(&nginx, &prefix, &[("NGX_RUSTSCRIPT_ASYNC_PROOF", "1")]);
+    wait_for_port(port, Duration::from_secs(5));
+    let (chain_status, chain_response) = http_get(port, "/chain");
+    assert_eq!(chain_status, 200, "{chain_response}");
+    assert_eq!(http_body(&chain_response), "chain-ok\n");
+    let (pending_status, pending_response) = http_get(port, "/pending");
+    assert_eq!(pending_status, 200, "{pending_response}");
+    assert_eq!(http_body(&pending_response), "pending-ok\n");
+    drop(running);
+
+    let log = fs::read_to_string(prefix.join("logs/error.log")).unwrap();
+    let chain_callbacks: Vec<_> = log
+        .lines()
+        .filter(|line| {
+            line.contains("ASYNC_CALLBACK_PROOF phase=Content") && line.contains("request_id=1 ")
+        })
+        .collect();
+    let expected_callbacks = (READY_TRANSITIONS - 1) / PER_TURN_BUDGET;
+    assert_eq!(chain_callbacks.len(), expected_callbacks, "{log}");
+    assert_eq!(
+        chain_callbacks
+            .iter()
+            .filter(|line| line.contains("effect=WaitingAgain"))
+            .count(),
+        expected_callbacks - 1,
+        "{log}"
+    );
+    assert_eq!(
+        chain_callbacks
+            .iter()
+            .filter(|line| line.contains("effect=Halted"))
+            .count(),
+        1,
+        "{log}"
+    );
+    assert!(
+        log.contains("ASYNC_STATUS_PROOF phase=Content status=Again real_wait=false"),
+        "{log}"
+    );
+    assert!(
+        log.contains("ASYNC_STATUS_PROOF phase=Content status=Again real_wait=true"),
+        "{log}"
+    );
+    let pending_callbacks = log
+        .lines()
+        .filter(|line| {
+            line.contains("ASYNC_CALLBACK_PROOF phase=Content") && line.contains("request_id=2 ")
+        })
+        .count();
+    assert_eq!(pending_callbacks, 1, "{log}");
+}
+
+#[test]
 fn nginx_op_cancel_and_stale_callback_are_exactly_once() {
     use std::future::Future;
     use std::pin::Pin;
@@ -873,7 +1286,7 @@ fn nginx_op_cancel_and_stale_callback_are_exactly_once() {
 
 /// Helper-only saturating arithmetic on a zeroed request.
 ///
-/// This is not the NGINX 1.30.4 body-read main-count lease. That contract is
+/// This is not the NGINX 1.31.4 body-read main-count lease. That contract is
 /// asserted by `tests/body_hooks.rs` against a pinned worker.
 #[test]
 fn request_main_count_c_helpers_are_saturating_and_not_the_body_lease() {

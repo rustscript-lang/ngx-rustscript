@@ -1,6 +1,6 @@
 //! Client-close detection for a suspended access request.
 //!
-//! Pinned NGINX 1.30.4 exports `ngx_http_test_reading` (`ngx_http.h`; nginx-sys
+//! Pinned NGINX 1.31.4 exports `ngx_http_test_reading` (`ngx_http.h`; nginx-sys
 //! `cda9d837` binds `pub fn ngx_http_test_reading`). That function is the
 //! stock read handler used by `ngx_http_set_write_handler`, auth delay, and
 //! `limit_req`. Returning `NGX_AGAIN` leaves `r->read_event_handler =
@@ -49,7 +49,7 @@ pub struct HandlerState {
     pub flags: EventFlags,
 }
 
-/// Linux/epoll subset of NGINX 1.30.4 `ngx_http_test_reading`.
+/// Linux/epoll subset of NGINX 1.31.4 `ngx_http_test_reading`.
 ///
 /// Pending EOF or a connection/event error is confirmed close. Otherwise
 /// `peek` is `recv(MSG_PEEK)`: EINTR retries, EAGAIN and readable bytes stay

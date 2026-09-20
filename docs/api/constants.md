@@ -6,7 +6,7 @@ Pinned `pd-host-function` has no host-constant form. Lua fields such as
 `ngx.OK` are zero-argument functions. All constant hosts are **adapted**,
 **sync**, and have no extra numeric caps.
 
-Integer constants match `nginx-sys` for official NGINX 1.30.4 except
+Integer constants match `nginx-sys` for OpenResty 1.31.4.1 / NGINX 1.31.4 except
 status codes that nginx-sys does not export, which are the HTTP values
 `402`, `406`, `410`, `426`, and `451`.
 

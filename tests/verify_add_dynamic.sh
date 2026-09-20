@@ -8,11 +8,11 @@ set -euo pipefail
 
 CRATE_ROOT="${CRATE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 TMP_ROOT="${NGX_RUSTSCRIPT_TASK_TMP:-${TMPDIR:-/tmp}/ngx-rustscript-add-dynamic}"
-NGINX_SOURCE_DIR="${NGINX_SOURCE_DIR:-$TMP_ROOT/nginx-1.30.4}"
+NGINX_SOURCE_DIR="${NGINX_SOURCE_DIR:-$TMP_ROOT/nginx-1.31.4}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CRATE_ROOT/target}"
 
 if [[ ! -x "$NGINX_SOURCE_DIR/configure" ]]; then
-  echo "NGINX_SOURCE_DIR is not a configured 1.30.4 tree: $NGINX_SOURCE_DIR" >&2
+  echo "NGINX_SOURCE_DIR is not a configured 1.31.4 tree: $NGINX_SOURCE_DIR" >&2
   exit 1
 fi
 
@@ -59,8 +59,8 @@ if [[ ! -f "$MODULE_SO" ]]; then
 fi
 
 BANNER="$("$NGINX_BIN" -v 2>&1 || true)"
-if [[ "$BANNER" != *nginx/1.30.4* ]]; then
-  echo "emitted nginx is not 1.30.4: $BANNER" >&2
+if [[ "$BANNER" != *nginx/1.31.4* ]]; then
+  echo "emitted nginx is not 1.31.4: $BANNER" >&2
   exit 1
 fi
 REPORT="$("$NGINX_BIN" -V 2>&1 || true)"

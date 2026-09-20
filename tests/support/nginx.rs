@@ -197,35 +197,32 @@ pub fn resolve_nginx_binary(
     build_dir: &Path,
     override_nginx: Option<&Path>,
 ) -> Result<PathBuf, String> {
-    let expected = build_dir.join("nginx");
-    let canonical = fs::canonicalize(&expected).map_err(|err| {
+    if !build_dir.is_dir() {
+        return Err(format!(
+            "NGINX_BUILD_DIR is not a directory: {}",
+            build_dir.display()
+        ));
+    }
+    let selected = override_nginx
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| build_dir.join("nginx"));
+    let canonical = fs::canonicalize(&selected).map_err(|err| {
         format!(
-            "canonical $NGINX_BUILD_DIR/nginx ({}): {err}",
-            expected.display()
+            "canonical selected nginx binary ({}): {err}",
+            selected.display()
         )
     })?;
     let meta = fs::metadata(&canonical).map_err(|err| {
         format!(
-            "stat canonical $NGINX_BUILD_DIR/nginx ({}): {err}",
+            "stat selected nginx binary ({}): {err}",
             canonical.display()
         )
     })?;
     if !meta.is_file() {
         return Err(format!(
-            "canonical $NGINX_BUILD_DIR/nginx is not a file: {}",
+            "selected nginx binary is not a file: {}",
             canonical.display()
         ));
-    }
-    if let Some(over) = override_nginx {
-        let got = fs::canonicalize(over)
-            .map_err(|err| format!("canonical NGX_RUSTSCRIPT_NGINX ({}): {err}", over.display()))?;
-        if got != canonical {
-            return Err(format!(
-                "nginx binary {} is not canonical $NGINX_BUILD_DIR/nginx ({})",
-                got.display(),
-                canonical.display()
-            ));
-        }
     }
     Ok(canonical)
 }
@@ -604,7 +601,7 @@ configure arguments: --prefix=/tmp/foo\u{01}bar --with-compat --with-http_ssl_mo
 }
 
 #[test]
-fn nginx_binary_must_be_canonical_build_dir_nginx() {
+fn nginx_binary_accepts_explicit_openresty_install() {
     let prefix = isolated_prefix("nginx-canon");
     let build_dir = prefix.join("objs");
     fs::create_dir_all(&build_dir).unwrap();
@@ -618,9 +615,14 @@ fn nginx_binary_must_be_canonical_build_dir_nginx() {
         canonical
     );
     let err = resolve_nginx_binary(&build_dir, Some(&other))
-        .expect_err("override outside build dir must not pass");
+        .expect("an explicit installed OpenResty binary is selected by the harness");
+    assert_eq!(err, fs::canonicalize(&other).unwrap());
+
+    let missing_build = prefix.join("missing-objs");
+    let err = resolve_nginx_binary(&missing_build, Some(&other))
+        .expect_err("generated-header build directory is mandatory");
     assert!(
-        err.contains("NGINX_BUILD_DIR") || err.contains("canonical"),
-        "error should require $NGINX_BUILD_DIR/nginx, got {err}"
+        err.contains("NGINX_BUILD_DIR"),
+        "error should require the generated-header directory, got {err}"
     );
 }

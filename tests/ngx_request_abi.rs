@@ -58,7 +58,11 @@ fn install_unread_body(req: *mut ngx_http_request_t) -> Box<ngx_http_request_bod
 #[test]
 fn c_request_sizeof_matches_configured_openresty_1_31_4() {
     nginx_stubs::force_link();
-    assert_eq!(nginx_stubs::request_sizeof(), 1352);
+    assert_eq!(
+        nginx_stubs::request_sizeof(),
+        std::mem::size_of::<ngx_http_request_t>() as u32,
+        "C helpers and nginx-sys bindgen must use the same selected generated headers"
+    );
 }
 
 #[test]

@@ -386,6 +386,10 @@ fn hook_strings_are_the_documented_runtime_needles() {
             "NGX_RUSTSCRIPT_BODY_COUNT_PROOF",
             "BODY_COUNT_PROOF",
             "BODY_WAIT_ARMED",
+            "NGX_RUSTSCRIPT_ASYNC_PROOF",
+            "ASYNC_CALLBACK_PROOF",
+            "NGX_RUSTSCRIPT_VM_REUSE_PROOF",
+            "VM_REUSE_PROOF",
         ]
     );
 }

@@ -185,7 +185,7 @@ until it is explicitly added.
 The handler runs when NGINX invokes the log phase for that request
 (current `r->loc_conf` after internal redirect / `error_page`).
 Subrequests require core `log_subrequest on` on the subrequest location
-(`ngx_http_finalize_request` in NGINX 1.30.4); otherwise NGINX skips
+(`ngx_http_finalize_request` in NGINX 1.31.4); otherwise NGINX skips
 the subrequest log phase.
 
 Synchronous and fail-closed: `Waiting` produces the exact

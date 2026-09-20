@@ -1,10 +1,9 @@
-//! Frozen core pin: full SHA only, no stale or abbreviated revisions.
+//! Frozen core pin: one exact full SHA in metadata, dependencies, and lockfile.
 
 use std::fs;
 use std::path::PathBuf;
 
 const FROZEN_REV: &str = "87d8c5d5cb42b3381aecadb383c0b7bf34ff204f";
-const STALE_REV: &str = "f5f71ebc2f38e276c35f2aebaf63f4e2780efe99";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -15,9 +14,6 @@ fn require_full_git_rev(rev: &str, label: &str) -> Result<(), String> {
         return Err(format!(
             "{label} must be a full 40-character git SHA, got {rev:?}"
         ));
-    }
-    if rev == STALE_REV {
-        return Err(format!("{label} still pins the stale core revision {rev}"));
     }
     Ok(())
 }
@@ -60,15 +56,5 @@ fn rustscript_core_pin_is_frozen_full_sha() {
         cargo_lock.contains(&expected_source),
         "Cargo.lock must resolve pd-vm/pd-host-function to {expected_source}"
     );
-    assert!(
-        !cargo_toml.contains(STALE_REV),
-        "Cargo.toml must not keep the stale pin"
-    );
-    assert!(
-        !cargo_lock.contains(STALE_REV),
-        "Cargo.lock must not keep the stale pin"
-    );
-
     assert!(require_full_git_rev("b1d6cff", "abbreviated").is_err());
-    assert!(require_full_git_rev(STALE_REV, "stale").is_err());
 }

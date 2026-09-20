@@ -2,14 +2,13 @@
 
 [Documentation](index.md) · [Directives](directives.md) · [API](api/index.md) · [Execution model](execution-model.md) · [Security](security.md) · [Examples](examples/index.md) · [Compatibility](ngx-api-compatibility.md)
 
-ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
-not run Lua, does not depend on an OpenResty binary, and documents only
-the hosts in the [API reference](api/index.md) (199 ngx names, plus
+This is an OpenResty-*oriented* RustScript API. It does not run Lua and
+documents only the hosts in the [API reference](api/index.md) (199 ngx names, plus
 pd-vm I/O/HTTP/SQLite). Host-by-host tables, phase sets, and hard caps
-live there; this page is the mapping and migration overview.
+live there; this page is the compatibility mapping.
 
-**Built and tested against official NGINX 1.30.4** (`nginx_version`
-1030004), ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`, and the
+**Built and tested against OpenResty 1.31.4.1 with NGINX core 1.31.4**
+(`nginx_version` 1031004), ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`, and the
 pinned `pd-vm` revision in the crate README. Executable directives are
 `access_by_rss_file`, `content_by_rss_file`, and `log_by_rss_file`.
 
@@ -201,7 +200,7 @@ OpenResty context tables; setters stay rejected. The handler runs when
 NGINX invokes the log phase for the current request (`r->loc_conf`
 after rewrite / `error_page`). Subrequests require core
 `log_subrequest on` on the subrequest location
-(`ngx_http_finalize_request` in NGINX 1.30.4). `Waiting` logs
+(`ngx_http_finalize_request` in NGINX 1.31.4). `Waiting` logs
 `log handler cannot wait`, drops the VM, and never arms eventfd, a
 timer, or `r->main->count`.
 

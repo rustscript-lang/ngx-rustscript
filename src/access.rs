@@ -305,7 +305,7 @@ pub(crate) fn ensure_shared_ngx_ctx(
 impl Drop for RequestPhaseCtx {
     fn drop(&mut self) {
         // `Pool::allocate` registers this Drop as `ngx_pool_cleanup_add`.
-        // NGINX 1.30.4 runs it from `ngx_destroy_pool` inside
+        // NGINX 1.31.4 runs it from `ngx_destroy_pool` inside
         // `ngx_http_free_request`, after `r->cleanup` handlers and after
         // `r->pool = NULL`. Cancel flush wait and restore the write handler
         // while `r` is still the request being freed, then drop the VM.
@@ -515,6 +515,8 @@ fn run_request_owned_phase(
                 return HTTPStatus::INTERNAL_SERVER_ERROR.into();
             }
         };
+        #[cfg(ngx_rustscript_integration_hooks)]
+        log_reuse_pool_proof(request, slot, request_id);
         if let Some(ctx) = request.get_module_ctx::<RequestPhaseCtx>(Module::module()) {
             exec.attach_request_ctx_ptr(ctx.ngx_ctx_ptr());
             *ctx.slot(slot).borrow_mut() = Some(exec);
@@ -590,6 +592,18 @@ fn finish_from_raw(raw: *mut ngx_http_request_t, slot: PhaseSlot) -> Status {
             .unwrap_or(AccessStatus::Error500)
         })
     };
+    #[cfg(ngx_rustscript_integration_hooks)]
+    if std::env::var_os("NGX_RUSTSCRIPT_ASYNC_PROOF").is_some() {
+        let real_wait = exec
+            .borrow()
+            .as_ref()
+            .is_some_and(AccessExec::wait_permit_armed);
+        ngx_log_error!(
+            NGX_LOG_ERR,
+            request.log(),
+            "ASYNC_STATUS_PROOF phase={slot:?} status={status:?} real_wait={real_wait}"
+        );
+    }
     if status == AccessStatus::Again {
         let identity = exec
             .borrow()
@@ -816,6 +830,15 @@ fn apply_on_request(
     })
     .unwrap_or(ReadyEffect::Ignored);
     #[cfg(ngx_rustscript_integration_hooks)]
+    if std::env::var_os("NGX_RUSTSCRIPT_ASYNC_PROOF").is_some() {
+        ngx_log_error!(
+            NGX_LOG_ERR,
+            request.log(),
+            "ASYNC_CALLBACK_PROOF phase={slot:?} request_id={request_id} generation={} effect={effect:?}",
+            identity.generation()
+        );
+    }
+    #[cfg(ngx_rustscript_integration_hooks)]
     if matches!(
         effect,
         ReadyEffect::Halted | ReadyEffect::Failed | ReadyEffect::WaitingAgain
@@ -827,6 +850,27 @@ fn apply_on_request(
         crate::request_state::proof_body_count(raw, stage, None);
     }
     effect
+}
+
+#[cfg(ngx_rustscript_integration_hooks)]
+fn log_reuse_pool_proof(request: &Request, slot: PhaseSlot, request_id: u64) {
+    if std::env::var_os("NGX_RUSTSCRIPT_VM_REUSE_PROOF").is_none() {
+        return;
+    }
+    let Some(stats) = crate::runtime::with_worker(|worker| worker.reusable_request_vm_pool_stats())
+    else {
+        return;
+    };
+    ngx_log_error!(
+        NGX_LOG_ERR,
+        request.log(),
+        "VM_REUSE_PROOF phase={slot:?} request_id={request_id} created={} checkouts={} hits={} returns={} idle={}",
+        stats.created,
+        stats.checkouts,
+        stats.hits,
+        stats.returns,
+        stats.idle
+    );
 }
 
 fn current_identity_on_request(raw: *mut ngx_http_request_t) -> Option<RequestIdentity> {

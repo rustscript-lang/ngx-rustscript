@@ -42,12 +42,11 @@ pub const LOG_CANNOT_WAIT: &str = "log handler cannot wait";
 
 /// Maximum immediately-ready host transitions driven in one NGINX event turn.
 pub const MAX_IMMEDIATE_TRANSITIONS: usize = 64;
-const MAX_BUDGET_CONTINUATIONS: usize = 16;
 
 enum ImmediateDrive {
     Halted,
     Pending(HostOpId),
-    Budget(HostOpId),
+    Budget { op_id: HostOpId, transitions: usize },
     Yielded,
     Failed(VmError),
 }
@@ -69,7 +68,7 @@ fn drive_immediate_ready(
             VmStatus::Yielded => return ImmediateDrive::Yielded,
             VmStatus::Waiting(op_id) => {
                 if transitions >= transition_budget {
-                    return ImmediateDrive::Budget(op_id);
+                    return ImmediateDrive::Budget { op_id, transitions };
                 }
                 let waker = Waker::noop();
                 let mut cx = Context::from_waker(waker);
@@ -441,7 +440,6 @@ pub struct AccessExec {
     state: ExecState,
     suspend_committed: bool,
     deferred: bool,
-    budget_continuations: usize,
     permit: Option<CompletionPermit>,
     last_status: Option<VmStatus>,
     last_error: Option<String>,
@@ -500,7 +498,6 @@ impl AccessExec {
             state: ExecState::New,
             suspend_committed: false,
             deferred: false,
-            budget_continuations: 0,
             permit: None,
             last_status: None,
             last_error: None,
@@ -527,7 +524,6 @@ impl AccessExec {
             state: ExecState::New,
             suspend_committed: false,
             deferred: false,
-            budget_continuations: 0,
             permit: None,
             last_status: None,
             last_error: None,
@@ -550,7 +546,6 @@ impl AccessExec {
         self.disposition = RequestDisposition::Continue;
         self.final_status = None;
         self.suspend_committed = false;
-        self.budget_continuations = 0;
         Some((key, vm))
     }
 
@@ -728,9 +723,9 @@ impl AccessExec {
                 self.last_status = Some(VmStatus::Waiting(op_id));
                 self.arm_wait(registry, waiter)
             }
-            ImmediateDrive::Budget(op_id) => {
+            ImmediateDrive::Budget { op_id, transitions } => {
                 self.last_status = Some(VmStatus::Waiting(op_id));
-                self.post_budget_continuation(registry, waiter)
+                self.post_budget_continuation(transitions, registry, waiter)
             }
             ImmediateDrive::Yielded => {
                 self.last_error = Some("VM yielded while driving async host work".into());
@@ -743,13 +738,13 @@ impl AccessExec {
 
     fn post_budget_continuation(
         &mut self,
+        transitions: usize,
         registry: &mut IdentityRegistry<u64>,
         waiter: &impl AsyncWait,
     ) -> AccessStatus {
-        self.budget_continuations = self.budget_continuations.saturating_add(1);
-        if self.budget_continuations > MAX_BUDGET_CONTINUATIONS {
+        if transitions == 0 || self.state != ExecState::New {
             self.last_error =
-                Some("async immediate-ready transition budget made no progress".into());
+                Some("async budget continuation made no progress or re-entered".into());
             self.state = ExecState::Failed;
             return AccessStatus::Error500;
         }
@@ -849,7 +844,6 @@ impl AccessExec {
         }) {
             Poll::Pending => {
                 self.state = ExecState::Suspended;
-                self.budget_continuations = 0;
                 AccessStatus::Again
             }
             Poll::Ready(Ok(())) => {
@@ -1023,6 +1017,77 @@ mod tests {
     use crate::runtime::WorkerRuntime;
     use std::sync::Arc;
 
+    fn ready_chain_exec(count: usize, worker: &WorkerRuntime) -> AccessExec {
+        let mut source = String::from("use ngx;\n");
+        for _ in 0..count {
+            source.push_str("ngx::ready();\n");
+        }
+        let program = vm::compile_source_with_flavor_and_options(
+            &source,
+            vm::SourceFlavor::RustScript,
+            vm::CompileSourceFileOptions::default()
+                .with_host_api_catalog(Arc::new(crate::host::test_bind_catalog())),
+        )
+        .expect("compile immediately-ready chain")
+        .program;
+        let mut vm = Vm::new(program);
+        crate::host::bind_test_hosts(&mut vm);
+        vm.set_async_bridge(Box::new(NgxAsyncBridge::new(
+            worker.handle().expect("worker handle"),
+        )))
+        .expect("install production async bridge");
+        AccessExec {
+            vm: Some(vm),
+            reusable_key: None,
+            request_id: 1,
+            identity: RequestIdentity::new(1, 1),
+            phase: NgxPhase::Access,
+            ctx: RequestLocalCtx::new(),
+            shared_ctx: None,
+            disposition: RequestDisposition::Continue,
+            final_status: None,
+            state: ExecState::New,
+            suspend_committed: false,
+            deferred: false,
+            permit: None,
+            last_status: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn more_than_1024_ready_transitions_complete_across_state_callbacks() {
+        let mut worker = WorkerRuntime::start().expect("worker runtime");
+        let mut exec = ready_chain_exec(1_089, &worker);
+        let mut registry = IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT);
+
+        assert_eq!(
+            exec.handle_access(&mut registry, &worker),
+            AccessStatus::Again
+        );
+        exec.commit_suspend();
+        let mut callback_turns = 0;
+        loop {
+            let ready = worker.drain_ready().expect("drain next-event continuation");
+            assert_eq!(ready, vec![exec.identity()]);
+            callback_turns += 1;
+            match exec.apply_ready(exec.identity(), &mut registry, &worker) {
+                ReadyEffect::WaitingAgain => continue,
+                ReadyEffect::Halted => break,
+                effect => panic!("ready chain failed after {callback_turns} turns: {effect:?}"),
+            }
+        }
+
+        assert!(
+            callback_turns > 16,
+            "chain must cross the former aggregate cap"
+        );
+        assert_eq!(exec.handle_access(&mut registry, &worker), AccessStatus::Ok);
+        assert_eq!(registry.len(), 0);
+        assert_eq!(worker.in_flight().expect("in-flight count"), 0);
+        worker.shutdown();
+    }
+
     fn scripted_immediate_drive(
         budget: usize,
         polls: impl IntoIterator<Item = Poll<VmResult<()>>>,
@@ -1118,7 +1183,13 @@ mod tests {
             [Poll::Ready(Ok(())), Poll::Ready(Ok(()))],
             [Ok(VmStatus::Waiting(2)), Ok(VmStatus::Waiting(3))],
         );
-        assert!(matches!(outcome, ImmediateDrive::Budget(3)));
+        assert!(matches!(
+            outcome,
+            ImmediateDrive::Budget {
+                op_id: 3,
+                transitions: 2
+            }
+        ));
         assert_eq!(polls, 2);
         assert_eq!(resumes, 2);
     }

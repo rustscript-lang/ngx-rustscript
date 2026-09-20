@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 /// Forward `nginx-sys` build metadata into this crate.
 ///
 /// `nginx-sys` must be a direct dependency so Cargo exports `DEP_NGINX_*`.
@@ -73,12 +75,16 @@ fn compile_request_shim() {
     println!("cargo::rerun-if-env-changed=DEP_NGINX_INCLUDE");
     println!("cargo::rerun-if-env-changed=DEP_NGINX_CFLAGS");
 
-    let include = std::env::var_os("DEP_NGINX_INCLUDE").unwrap_or_else(|| {
+    let dependency_include = std::env::var_os("DEP_NGINX_INCLUDE").unwrap_or_else(|| {
         panic!("DEP_NGINX_INCLUDE is required to compile src/nginx_request_shim.c")
     });
-    if let Ok(include) = std::env::var("DEP_NGINX_INCLUDE") {
-        println!("cargo::rustc-env=DEP_NGINX_INCLUDE={include}");
-    }
+    let includes = selected_nginx_include_paths(&dependency_include);
+    let encoded_includes = std::env::join_paths(&includes)
+        .expect("selected NGINX include paths must be representable as DEP_NGINX_INCLUDE");
+    println!(
+        "cargo::rustc-env=DEP_NGINX_INCLUDE={}",
+        encoded_includes.to_string_lossy()
+    );
     if let Ok(cflags) = std::env::var("DEP_NGINX_CFLAGS") {
         println!("cargo::rustc-env=DEP_NGINX_CFLAGS={cflags}");
     } else {
@@ -90,7 +96,7 @@ fn compile_request_shim() {
         .file("src/nginx_request_shim.c")
         .warnings(true)
         .define("NGX_RUSTSCRIPT_NO_C_PUBLIC_ALIAS", None);
-    for path in std::env::split_paths(&include) {
+    for path in &includes {
         build.include(path);
     }
     if let Ok(cflags) = std::env::var("DEP_NGINX_CFLAGS") {
@@ -99,4 +105,64 @@ fn compile_request_shim() {
         }
     }
     build.compile("ngx_rustscript_request_shim");
+}
+
+fn selected_nginx_include_paths(dependency_include: &std::ffi::OsStr) -> Vec<PathBuf> {
+    let source = std::env::var_os("NGINX_SOURCE_DIR").map(PathBuf::from);
+    let build = std::env::var_os("NGINX_BUILD_DIR").map(PathBuf::from);
+    match (source, build) {
+        (Some(source), Some(build)) => {
+            let makefile = build.join("Makefile");
+            println!("cargo::rerun-if-changed={}", makefile.display());
+            parse_makefile_includes(&makefile)
+                .into_iter()
+                .map(|path| {
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        source.join(path)
+                    }
+                })
+                .collect()
+        }
+        _ => std::env::split_paths(dependency_include).collect(),
+    }
+}
+
+fn parse_makefile_includes(makefile: &Path) -> Vec<PathBuf> {
+    let contents = std::fs::read_to_string(makefile).unwrap_or_else(|error| {
+        panic!(
+            "unable to read NGINX makefile {}: {error}",
+            makefile.display()
+        )
+    });
+    let mut includes = Vec::new();
+    let mut logical = String::new();
+    for raw in contents.lines() {
+        if let Some(part) = raw.strip_suffix('\\') {
+            logical.push_str(part);
+            continue;
+        }
+        logical.push_str(raw);
+        if let Some(fragment) = logical.strip_prefix("ALL_INCS") {
+            let mut words = fragment.split_whitespace();
+            while let Some(word) = words.next() {
+                if let Some(include) = word.strip_prefix("-I") {
+                    let include = if include.is_empty() {
+                        words.next().expect("-I argument in NGINX Makefile")
+                    } else {
+                        include
+                    };
+                    includes.push(PathBuf::from(include));
+                }
+            }
+        }
+        logical.clear();
+    }
+    assert!(
+        !includes.is_empty(),
+        "NGINX makefile {} did not contain ALL_INCS include paths",
+        makefile.display()
+    );
+    includes
 }

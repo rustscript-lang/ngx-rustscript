@@ -19,11 +19,11 @@ add them on top of the 191 callable baseline and the four semaphore entries
 [timer](timer.md).
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
-not run Lua, does not depend on an OpenResty binary, and documents only
-the hosts in this matrix (including UDP and TCP cosocket).
+does not run Lua and documents only the hosts in this matrix (including UDP
+and TCP cosocket).
 
-**Built and tested against official NGINX 1.30.4** (`nginx_version`
-1030004), ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`, and the
+**Built and tested against OpenResty 1.31.4.1 with NGINX core 1.31.4**
+(`nginx_version` 1031004), ngx-rust `cda9d8372ccd2e139ef2b03e5806e019e7796187`, and the
 pinned `pd-vm` revision in the crate README. Executable directives are
 `access_by_rss_file`, `content_by_rss_file`, and `log_by_rss_file`.
 

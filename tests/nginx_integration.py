@@ -18,8 +18,8 @@ import tempfile
 import threading
 import time
 
-PINNED_VERSION = "nginx/1.30.4"
-REQUIRED_CONFIGURE_ARGS = ("--with-compat", "--with-http_ssl_module")
+PINNED_VERSION = "openresty/1.31.4.1"
+REQUIRED_CONFIGURE_ARGS = ("--with-http_ssl_module",)
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, "fixtures")
 
@@ -1015,7 +1015,7 @@ def run_acceptance(nginx, module):
             )
         summary["tcp"] = "200/tcp-ok TCP_ECHO=ok"
 
-        # Task 18 keepalive/TLS marker against pinned NGINX 1.30.4.
+        # Task 18 keepalive/TLS marker against pinned OpenResty 1.31.4.1.
         ka_status, ka_body, ka_raw = http_get(port, "/tcp-ka/", timeout=5.0)
         if ka_status != 200 or ka_body != "tcp-ok\n":
             raise CheckError(
@@ -1039,8 +1039,8 @@ def run_acceptance(nginx, module):
                 f"tcp keepalive must reuse one connection, accepts={ka_accepts['n']}",
                 dump_owned(prefix, proc, error_text),
             )
-        summary["tcp-ka"] = "200/tcp-ok TCP_KA=ok reuse=1 nginx/1.30.4"
-        summary["tcp-tls"] = "rustls-cosocket cargo tests; nginx/1.30.4 marker"
+        summary["tcp-ka"] = "200/tcp-ok TCP_KA=ok reuse=1 openresty/1.31.4.1"
+        summary["tcp-tls"] = "rustls-cosocket cargo tests; openresty/1.31.4.1 marker"
 
         # Concurrent mapping across two routes/durations/bodies.
         jobs = [("/alpha/", "alpha-body\n")] * 6 + [("/beta/", "beta-body\n")] * 6

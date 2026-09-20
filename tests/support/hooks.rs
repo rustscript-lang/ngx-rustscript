@@ -23,6 +23,10 @@ pub const HOOK_STRINGS: &[&str] = &[
     "NGX_RUSTSCRIPT_BODY_COUNT_PROOF",
     "BODY_COUNT_PROOF",
     "BODY_WAIT_ARMED",
+    "NGX_RUSTSCRIPT_ASYNC_PROOF",
+    "ASYNC_CALLBACK_PROOF",
+    "NGX_RUSTSCRIPT_VM_REUSE_PROOF",
+    "VM_REUSE_PROOF",
 ];
 
 pub const HOOK_SOURCE_IDENTS: &[&str] = &[
@@ -42,6 +46,12 @@ pub const HOOK_SOURCE_IDENTS: &[&str] = &[
     "BODY_COUNT_PROOF",
     "BODY_WAIT_ARMED",
     "proof_body_count",
+    "NGX_RUSTSCRIPT_ASYNC_PROOF",
+    "ASYNC_CALLBACK_PROOF",
+    "NGX_RUSTSCRIPT_VM_REUSE_PROOF",
+    "VM_REUSE_PROOF",
+    "log_reuse_pool_proof",
+    "reusable_request_vm_pool_stats",
 ];
 
 const CARGO_BUILD_TIMEOUT: Duration = Duration::from_secs(1500);
@@ -74,7 +84,12 @@ pub fn production_target_dir() -> PathBuf {
 fn assert_isolated_from_production(target_dir: &Path) {
     let production =
         fs::canonicalize(production_target_dir()).unwrap_or_else(|_| production_target_dir());
-    fs::create_dir_all(target_dir).unwrap();
+    fs::create_dir_all(target_dir).unwrap_or_else(|error| {
+        panic!(
+            "create isolated hook target {}: {error}",
+            target_dir.display()
+        )
+    });
     let extra = fs::canonicalize(target_dir)
         .unwrap_or_else(|err| panic!("canonicalize {}: {err}", target_dir.display()));
     if extra == production || extra.starts_with(&production) {

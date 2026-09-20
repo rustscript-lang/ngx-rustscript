@@ -1,7 +1,7 @@
 //! NGINX shm/slab/rbtree backend for [`crate::shared_dict`].
 //!
 //! Layout and algorithms follow OpenResty `ngx_http_lua_shdict.c` against
-//! NGINX 1.30.4 `ngx_rbtree` / `ngx_queue` / `ngx_slab`. Compiled only in the
+//! NGINX 1.31.4 `ngx_rbtree` / `ngx_queue` / `ngx_slab`. Compiled only in the
 //! production cdylib (`not(ngx_features = "rustc-test")`).
 
 use super::{
@@ -28,7 +28,7 @@ const T_FLOAT: u8 = 3;
 const T_STRING: u8 = 4;
 const T_BYTES: u8 = 5;
 const T_LIST: u8 = 6;
-/// NGINX `NGX_ALIGNMENT` on this 1.30.4 x86_64 tree.
+/// NGINX `NGX_ALIGNMENT` on the supported 1.31.4 x86_64 tree.
 const SHDICT_ALIGNMENT: usize = 16;
 
 /// Conf-pool context stored in `ngx_shm_zone_t.data` (OpenResty `shdict_ctx`).

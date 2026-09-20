@@ -17,6 +17,25 @@ fn apply_nginx_headers(build: &mut cc::Build) {
 }
 
 fn nginx_include_paths() -> Vec<PathBuf> {
+    if let (Some(source_dir), Some(build_dir)) = (
+        std::env::var_os("NGINX_SOURCE_DIR"),
+        std::env::var_os("NGINX_BUILD_DIR"),
+    ) {
+        let source_dir = PathBuf::from(source_dir);
+        let build_dir = PathBuf::from(build_dir);
+        let makefile = build_dir.join("Makefile");
+        println!("cargo::rerun-if-changed={}", makefile.display());
+        return parse_makefile_includes(&makefile)
+            .into_iter()
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    source_dir.join(path)
+                }
+            })
+            .collect();
+    }
     if let Some(include) = std::env::var_os("DEP_NGINX_INCLUDE") {
         return std::env::split_paths(&include).collect();
     }

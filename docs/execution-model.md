@@ -23,7 +23,7 @@ cosockets and pd-vm async I/O/HTTP host futures. SQLite operations use
 pd-vm's scoped worker-backed operation path and resume through the same
 eventfd bridge.
 
-## Two execution paths
+## Execution paths
 
 On each request the access (or content) handler leases a
 worker-thread-local VM via `Vm::new_shared(Arc<Program>)`.
@@ -37,12 +37,30 @@ and parked only when `Vm::is_reusable` is true. Idle pool size is 4.
 VM errors and unexpected `Waiting` on pooled programs fail the request
 with 500.
 
-**Request-owned programs** bind a request-local VM instead of the pool
-when the compiled script uses pd-vm I/O, HTTP client, SQLite,
+**Request-state programs** bind a request-local execution state when the
+compiled script uses pd-vm I/O, HTTP client, SQLite,
 `ngx::sleep`, `ngx::sleep_ms`, UDP/TCP cosocket, `ngx.ctx`, an async
 `ngx::semaphore::wait`, or mutation/control capabilities
 (`RequestWrite`, `ResponseWrite`, `Control`). Pure-sync request-read and
-sync-only semaphore programs stay pooled.
+sync-only semaphore programs stay on the synchronous pool path.
+
+Buffered `http::client::request` is the request-state exception eligible for
+VM reuse. Successful `Halted` execution enters the reuse gate only after
+`reset_for_reuse`, a ready `poll_reset_for_reuse`, no pending scope reset,
+`clear_async_bridge`, `clear_runtime_print_sink`, and `Vm::is_reusable` all
+succeed. Every checkout installs a new `NgxAsyncBridge`, print sink, request
+identity, raw request pointer scope, `RequestLocalCtx`, and runtime policy.
+Failure, cancellation, timeout, pending cleanup, and capacity overflow drop the
+VM. Standard I/O, SQLite, SSE, timers, sleep, cosockets, resource-bearing host
+schemas, and unknown host schemas are never admitted.
+
+The reusable-request pool retains at most four idle VMs per worker. Its exact
+key is `(Arc<Program> identity, NGINX phase, complete StandardHostPolicy,
+ngx catalog fingerprint, standard catalog fingerprint)`. Equal source text in
+distinct compiled programs does not share a VM. Access/content phases and
+locations with different HTTP, I/O, or SQLite grants remain isolated. Policy
+is installed from the selected key on every newly created VM and remains part
+of every checkout match.
 
 `pd-vm` pin (see the crate README) provides `Vm::new_shared(Arc<Program>)`,
 `HostAsyncBridge`, `Vm::set_async_bridge`, `VmStatus::Waiting`,
@@ -56,8 +74,9 @@ closure.
 `Waiting` returns `NGX_AGAIN` without incrementing `r->main->count`.
 The eventfd callback polls the waiting host op, resumes the same VM on
 the worker main thread, and continues `ngx_http_core_run_phases`
-exactly once so the phase handler can return `NGX_OK`. Host-bound
-waiting VMs are never returned to the pool.
+exactly once so the phase handler can return `NGX_OK`. Only a successfully
+halted, fully quiescent buffered-HTTP VM may return to the reusable-request
+pool.
 
 Async wait capacity is `DEFAULT_MAX_IN_FLIGHT` (1024). Reserve is
 rejected when full. Host futures and wakers own only a queue sender and
@@ -68,6 +87,13 @@ Completions enqueue the request identity under a mutex, then write
 `eventfd(2)` created with `EFD_NONBLOCK|EFD_CLOEXEC`. The worker main
 thread registers the fd with `ngx_get_connection`. The pinned Linux
 epoll path uses `add` with `EPOLLIN`.
+
+One NGINX event turn drives at most 64 immediately-ready host transitions.
+Budget exhaustion posts the same generation-safe identity to
+`ngx_posted_next_events` without reserving the 1024-slot pending-wait capacity.
+Progress-making turns may continue without an aggregate cap until the VM
+halts, reaches a real `Pending`, or fails. The driver rejects a continuation
+that reports zero transitions or re-enters before the prior turn is retired.
 
 Client close while a wait is in flight is detected with a worker-thread
 wrapper around `ngx_http_test_reading`. Confirmed close finalizes once

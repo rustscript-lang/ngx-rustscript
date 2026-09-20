@@ -1,4 +1,4 @@
-//! Real NGINX 1.30.4 lifecycle tests for content-phase output hosts.
+//! Real OpenResty 1.31.4.1 lifecycle tests for content-phase output hosts.
 
 mod support;
 

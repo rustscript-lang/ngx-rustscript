@@ -128,7 +128,7 @@ MODULE="$(readlink -f "$MODULE")"
 NGINX="$(readlink -f "$NGINX")"
 NGINX_SOURCE="$(cd "$NGINX_SOURCE" && pwd)"
 MODULE_TOP="ngx-rustscript-module-${VERSION}-linux-${ARCH}"
-BUNDLE_TOP="ngx-rustscript-nginx-${VERSION}-nginx-1.30.4-linux-${ARCH}"
+BUNDLE_TOP="ngx-rustscript-openresty-${VERSION}-openresty-1.31.4.1-linux-${ARCH}"
 MODULE_TGZ="${MODULE_TOP}.tgz"
 BUNDLE_TGZ="${BUNDLE_TOP}.tgz"
 DEB="nginx-module-rustscript_${VERSION}_${ARCH}.deb"
@@ -254,11 +254,11 @@ Maintainer: fffonion <fffonion@gmail.com>
 Depends: libc6, libgcc-s1
 Homepage: https://github.com/rustscript-lang/ngx-rustscript
 Vcs-Git: https://github.com/rustscript-lang/ngx-rustscript.git
-X-Ngx-Rustscript-Nginx-Version: 1.30.4
-Description: RustScript HTTP module for NGINX 1.30.4
+X-Ngx-Rustscript-Nginx-Version: 1.31.4.1 (nginx core 1.31.4)
+Description: RustScript HTTP module for OpenResty 1.31.4.1
  Runs RustScript programs in NGINX access, content, and log phases.
- The module requires an ABI-compatible NGINX 1.30.4 build configured with
- --with-compat and --with-http_ssl_module.
+ The module requires OpenResty 1.31.4.1 with NGINX core 1.31.4 and
+ --with-http_ssl_module.
 EOF
 normalize_tree "$DEB_ROOT"
 dpkg-deb --root-owner-group --build "$DEB_ROOT" "$OUTPUT_DIR/$DEB" >/dev/null
