@@ -19,13 +19,13 @@ use ngx::core::Status;
 use ngx::ffi::{NGX_LOG_ERR, NGX_LOG_NOTICE, NGX_PROCESS_SINGLE, NGX_PROCESS_WORKER, ngx_process};
 use ngx::ngx_log_error;
 use tokio::runtime::{Handle, Runtime};
-use vm::Program;
+use vm::{Program, Vm};
 
 use crate::notify::{
     CompletionPermit, CompletionSender, DEFAULT_MAX_IN_FLIGHT, NotifyBridge, NotifyError,
     RequestIdentity, eventfd_waker,
 };
-use crate::request_state::{AccessExec, AsyncWait, SubmitError};
+use crate::request_state::{AccessExec, AsyncWait, ReusableVmKey, SubmitError};
 
 thread_local! {
     static WORKER: RefCell<Option<WorkerRuntime>> = const { RefCell::new(None) };
@@ -66,11 +66,46 @@ fn is_worker_or_single() -> bool {
     process == NGX_PROCESS_WORKER as ngx_uint_t || process == NGX_PROCESS_SINGLE as ngx_uint_t
 }
 
+const MAX_IDLE_REUSABLE_REQUEST_VMS: usize = 4;
+
+struct ReusableRequestVm {
+    key: ReusableVmKey,
+    vm: Vm,
+}
+
+#[derive(Default)]
+struct ReusableRequestVmPool {
+    idle: Vec<ReusableRequestVm>,
+    created: usize,
+}
+
+impl ReusableRequestVmPool {
+    fn take(&mut self, key: &ReusableVmKey) -> Result<Vm, String> {
+        if let Some(index) = self.idle.iter().position(|entry| entry.key.matches(key)) {
+            return Ok(self.idle.swap_remove(index).vm);
+        }
+        let mut vm = Vm::new_shared(Arc::clone(&key.program));
+        crate::request_state::bind_program_hosts(&mut vm, &key.policy)?;
+        self.created = self.created.saturating_add(1);
+        Ok(vm)
+    }
+
+    fn recycle(&mut self, key: ReusableVmKey, mut vm: Vm) {
+        if self.idle.len() >= MAX_IDLE_REUSABLE_REQUEST_VMS {
+            return;
+        }
+        if crate::vm_pool::reset_for_pool(&mut vm) {
+            self.idle.push(ReusableRequestVm { key, vm });
+        }
+    }
+}
+
 /// Per-worker Tokio runtime, eventfd bridge, and generation counter.
 pub struct WorkerRuntime {
     runtime: Option<Runtime>,
     notify: NotifyBridge,
     next_generation: u64,
+    reusable_request_vms: RefCell<ReusableRequestVmPool>,
     stopped: bool,
 }
 
@@ -94,6 +129,7 @@ impl WorkerRuntime {
             runtime: Some(runtime),
             notify,
             next_generation: 1,
+            reusable_request_vms: RefCell::new(ReusableRequestVmPool::default()),
             stopped: false,
         })
     }
@@ -174,6 +210,60 @@ impl WorkerRuntime {
         )
     }
 
+    pub(crate) fn bind_reusable_phase_exec_with_policy(
+        &mut self,
+        program: Arc<Program>,
+        request_id: u64,
+        phase: crate::host::NgxPhase,
+        policy: crate::host::StandardHostPolicy,
+    ) -> Result<AccessExec, String> {
+        if self.stopped || !self.notify.is_accepting() {
+            return Err(NotifyError::ShutDown.to_string());
+        }
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
+        if self.next_generation == 0 {
+            self.next_generation = 1;
+        }
+        let key = ReusableVmKey {
+            program,
+            phase,
+            policy,
+        };
+        let handle = self.handle().map_err(|error| error.to_string())?;
+        let mut vm = self.reusable_request_vms.borrow_mut().take(&key)?;
+        vm.set_async_bridge(Box::new(crate::async_bridge::NgxAsyncBridge::new(handle)))
+            .map_err(|error| error.to_string())?;
+        Ok(AccessExec::bind_reusable_vm(
+            vm, key, request_id, generation,
+        ))
+    }
+
+    #[cfg(test)]
+    fn reusable_request_vm_created_count(&self) -> usize {
+        self.reusable_request_vms.borrow().created
+    }
+
+    #[cfg(test)]
+    fn reusable_request_vm_idle_count(&self) -> usize {
+        self.reusable_request_vms.borrow().idle.len()
+    }
+
+    pub(crate) fn bind_configured_phase_exec_with_policy(
+        &mut self,
+        program: Arc<Program>,
+        request_id: u64,
+        phase: crate::host::NgxPhase,
+        policy: crate::host::StandardHostPolicy,
+        metadata: crate::phase::ScriptExecutionMetadata,
+    ) -> Result<AccessExec, String> {
+        if metadata.reuses_request_vm {
+            self.bind_reusable_phase_exec_with_policy(program, request_id, phase, policy)
+        } else {
+            self.bind_phase_exec_with_policy(program, request_id, phase, policy)
+        }
+    }
+
     pub fn drain_ready(&mut self) -> Result<Vec<RequestIdentity>, RuntimeError> {
         let (ready, err) = self.drain_ready_outcome();
         match err {
@@ -199,6 +289,7 @@ impl WorkerRuntime {
             return;
         }
         self.stopped = true;
+        self.reusable_request_vms.get_mut().idle.clear();
         crate::socket::pool::shutdown_current();
         crate::semaphore::shutdown_current();
         crate::timer::shutdown_current();
@@ -240,6 +331,14 @@ impl AsyncWait for WorkerRuntime {
 
     fn forget_invalidated(&self, identity: RequestIdentity) {
         WorkerRuntime::forget_invalidated(self, identity);
+    }
+
+    fn recycle_finished_exec(&self, exec: &mut AccessExec) -> bool {
+        let Some((key, vm)) = exec.take_reusable_vm() else {
+            return false;
+        };
+        self.reusable_request_vms.borrow_mut().recycle(key, vm);
+        true
     }
 }
 
@@ -519,6 +618,184 @@ mod tests {
         let a = worker.bind_access_exec(Arc::clone(&program), 1).expect("a");
         let b = worker.bind_access_exec(program, 2).expect("b");
         assert_ne!(a.identity(), b.identity());
+        worker.shutdown();
+    }
+
+    #[test]
+    fn sync_request_owned_exec_reuses_bound_vm_and_clears_ctx() {
+        let mut worker = WorkerRuntime::start().unwrap();
+        let program = compile_rss_source(
+            r#"
+use ngx;
+if ngx::ctx::get("seen") != null {
+    1 / 0;
+}
+ngx::ctx::set("seen", 1);
+ngx::exit(ngx::core::ok());
+"#,
+        )
+        .expect("compile");
+        let policy = crate::host::StandardHostPolicy::fail_closed();
+
+        for request_id in 1..=32 {
+            let mut exec = worker
+                .bind_reusable_phase_exec_with_policy(
+                    Arc::clone(&program),
+                    request_id,
+                    crate::host::NgxPhase::Access,
+                    policy.clone(),
+                )
+                .expect("bind reusable request VM");
+            let mut registry = IdentityRegistry::with_capacity(8);
+            assert_eq!(
+                exec.handle_access(&mut registry, &worker),
+                AccessStatus::Ok,
+                "request-local ctx must be empty after every pool checkout"
+            );
+            assert!(exec.cleanup_wait(&worker).is_none());
+        }
+
+        assert_eq!(worker.reusable_request_vm_created_count(), 1);
+        assert_eq!(worker.reusable_request_vm_idle_count(), 1);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn configured_exec_selects_reusable_pool_from_cached_metadata() {
+        let mut worker = WorkerRuntime::start().unwrap();
+        let program = compile_rss_source("use ngx;\nngx::ctx::set(\"k\", 1);\n").expect("compile");
+        let metadata = crate::phase::ScriptExecutionMetadata {
+            requires_request_state: true,
+            reuses_request_vm: true,
+            uses_sqlite: false,
+        };
+        for request_id in 1..=2 {
+            let mut exec = worker
+                .bind_configured_phase_exec_with_policy(
+                    Arc::clone(&program),
+                    request_id,
+                    crate::host::NgxPhase::Access,
+                    crate::host::StandardHostPolicy::fail_closed(),
+                    metadata,
+                )
+                .expect("bind configured exec");
+            let mut registry = IdentityRegistry::with_capacity(8);
+            assert_eq!(exec.handle_access(&mut registry, &worker), AccessStatus::Ok);
+            assert!(exec.cleanup_wait(&worker).is_none());
+        }
+        assert_eq!(worker.reusable_request_vm_created_count(), 1);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn reusable_request_vm_pool_separates_policy_and_phase() {
+        let mut worker = WorkerRuntime::start().unwrap();
+        let program = compile_rss_source("use ngx;\nngx::ctx::set(\"k\", 1);\n").expect("compile");
+        let first_policy = crate::host::StandardHostPolicy::fail_closed();
+        let mut second_policy = first_policy.clone();
+        second_policy.io_roots.push("/tmp/isolated".into());
+
+        for (request_id, phase, policy) in [
+            (1, crate::host::NgxPhase::Access, first_policy.clone()),
+            (2, crate::host::NgxPhase::Access, second_policy),
+            (3, crate::host::NgxPhase::Content, first_policy),
+        ] {
+            let mut exec = worker
+                .bind_reusable_phase_exec_with_policy(
+                    Arc::clone(&program),
+                    request_id,
+                    phase,
+                    policy,
+                )
+                .expect("bind reusable exec");
+            let mut registry = IdentityRegistry::with_capacity(8);
+            assert_eq!(exec.handle_access(&mut registry, &worker), AccessStatus::Ok);
+            assert!(exec.cleanup_wait(&worker).is_none());
+        }
+
+        assert_eq!(worker.reusable_request_vm_created_count(), 3);
+        assert_eq!(worker.reusable_request_vm_idle_count(), 3);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn configured_exec_keeps_non_reusable_metadata_out_of_request_vm_pool() {
+        let mut worker = WorkerRuntime::start().unwrap();
+        let program = compile_rss_source("use ngx;\nngx::ctx::set(\"k\", 1);\n").expect("compile");
+        let metadata = crate::phase::ScriptExecutionMetadata {
+            requires_request_state: true,
+            reuses_request_vm: false,
+            uses_sqlite: false,
+        };
+        for request_id in 1..=2 {
+            let mut exec = worker
+                .bind_configured_phase_exec_with_policy(
+                    Arc::clone(&program),
+                    request_id,
+                    crate::host::NgxPhase::Access,
+                    crate::host::StandardHostPolicy::fail_closed(),
+                    metadata,
+                )
+                .expect("bind configured exec");
+            let mut registry = IdentityRegistry::with_capacity(8);
+            assert_eq!(exec.handle_access(&mut registry, &worker), AccessStatus::Ok);
+            assert!(exec.cleanup_wait(&worker).is_none());
+        }
+
+        assert_eq!(worker.reusable_request_vm_created_count(), 0);
+        assert_eq!(worker.reusable_request_vm_idle_count(), 0);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn reusable_request_vm_replaces_and_clears_async_bridge_per_checkout() {
+        crate::async_bridge::reset_bridge_lifecycle_counts();
+        let mut worker = WorkerRuntime::start().unwrap();
+        let program = compile_rss_source("use ngx;\nngx::ctx::set(\"k\", 1);\n").expect("compile");
+
+        for request_id in 1..=2 {
+            let mut exec = worker
+                .bind_reusable_phase_exec_with_policy(
+                    Arc::clone(&program),
+                    request_id,
+                    crate::host::NgxPhase::Access,
+                    crate::host::StandardHostPolicy::fail_closed(),
+                )
+                .expect("bind reusable exec");
+            let mut registry = IdentityRegistry::with_capacity(8);
+            assert_eq!(exec.handle_access(&mut registry, &worker), AccessStatus::Ok);
+            assert!(exec.cleanup_wait(&worker).is_none());
+        }
+
+        assert_eq!(crate::async_bridge::bridge_lifecycle_counts(), (2, 2));
+        worker.shutdown();
+    }
+
+    #[test]
+    fn failed_request_vm_is_dropped_instead_of_reused() {
+        let mut worker = WorkerRuntime::start().unwrap();
+        let program = compile_rss_source("use ngx;\nngx::ctx::set(\"k\", 1);\nlet x = 1 / 0;\n")
+            .expect("compile");
+
+        for request_id in 1..=2 {
+            let mut exec = worker
+                .bind_reusable_phase_exec_with_policy(
+                    Arc::clone(&program),
+                    request_id,
+                    crate::host::NgxPhase::Access,
+                    crate::host::StandardHostPolicy::fail_closed(),
+                )
+                .expect("bind reusable exec");
+            let mut registry = IdentityRegistry::with_capacity(8);
+            assert_eq!(
+                exec.handle_access(&mut registry, &worker),
+                AccessStatus::Error500
+            );
+            assert!(exec.cleanup_wait(&worker).is_none());
+        }
+
+        assert_eq!(worker.reusable_request_vm_created_count(), 2);
+        assert_eq!(worker.reusable_request_vm_idle_count(), 0);
         worker.shutdown();
     }
 

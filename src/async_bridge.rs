@@ -5,12 +5,34 @@
 //! cancel. It is host-agnostic: `ngx::sleep` and any other macro async host
 //! share the same map.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::task::{Context, Poll};
 
 use tokio::runtime::Handle;
 use vm::operation::OperationCancelReason;
 use vm::{CallReturn, HostAsyncBridge, HostFuture, HostOpId, VmError, VmResult};
+
+#[cfg(test)]
+thread_local! {
+    static BRIDGES_CREATED: Cell<usize> = const { Cell::new(0) };
+    static BRIDGES_DROPPED: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_bridge_lifecycle_counts() {
+    BRIDGES_CREATED.with(|count| count.set(0));
+    BRIDGES_DROPPED.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn bridge_lifecycle_counts() -> (usize, usize) {
+    (
+        BRIDGES_CREATED.with(Cell::get),
+        BRIDGES_DROPPED.with(Cell::get),
+    )
+}
 
 /// Worker-owned async host future table.
 pub struct NgxAsyncBridge {
@@ -20,6 +42,8 @@ pub struct NgxAsyncBridge {
 
 impl NgxAsyncBridge {
     pub fn new(runtime: Handle) -> Self {
+        #[cfg(test)]
+        BRIDGES_CREATED.with(|count| count.set(count.get().saturating_add(1)));
         Self {
             runtime,
             futures: HashMap::new(),
@@ -36,6 +60,13 @@ impl NgxAsyncBridge {
 
     pub fn contains(&self, op_id: HostOpId) -> bool {
         self.futures.contains_key(&op_id)
+    }
+}
+
+#[cfg(test)]
+impl Drop for NgxAsyncBridge {
+    fn drop(&mut self) {
+        BRIDGES_DROPPED.with(|count| count.set(count.get().saturating_add(1)));
     }
 }
 

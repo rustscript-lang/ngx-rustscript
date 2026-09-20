@@ -464,7 +464,7 @@ fn run_configured_phase(request: &mut Request, conf: &LocationConf, slot: PhaseS
             })
         });
     }
-    run_request_owned_phase(request, program, slot, policy)
+    run_request_owned_phase(request, program, slot, policy, metadata)
 }
 
 fn complete_sync_ok(raw: *mut ngx_http_request_t, slot: PhaseSlot) -> Status {
@@ -483,6 +483,7 @@ fn run_request_owned_phase(
     program: &Arc<Program>,
     slot: PhaseSlot,
     policy: crate::host::StandardHostPolicy,
+    metadata: crate::phase::ScriptExecutionMetadata,
 ) -> Status {
     let raw = request.as_mut() as *mut ngx_http_request_t;
     let directive = slot.directive();
@@ -492,11 +493,12 @@ fn run_request_owned_phase(
     {
         let request_id = next_request_id();
         let mut exec = match crate::runtime::with_worker(|worker| {
-            worker.bind_phase_exec_with_policy(
+            worker.bind_configured_phase_exec_with_policy(
                 Arc::clone(program),
                 request_id,
                 slot.phase(),
                 policy,
+                metadata,
             )
         }) {
             Some(Ok(exec)) => exec,
