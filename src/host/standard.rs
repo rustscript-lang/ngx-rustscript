@@ -58,6 +58,11 @@ pub fn http_config_from_policy(policy: &StandardHostPolicy) -> HttpConfig {
     }
 }
 
+/// The historical HTTP admission boundary is local to each VM. Worker-owned
+/// resources use an effectively-unbounded shared cap so lease sharing cannot
+/// turn that local boundary into an aggregate worker cap.
+const VM_MAX_HTTP_IN_FLIGHT: usize = 64;
+
 /// Apply I/O, HTTP, and SQLite policies without per-name binds.
 ///
 /// Production VMs resolve standard imports through the descriptor registry
@@ -79,6 +84,7 @@ pub fn install_standard_policy(
     });
     vm.configure_http(http_config_from_policy(policy), http_client)
         .map_err(|err| err.to_string())?;
+    vm.set_http_max_in_flight(VM_MAX_HTTP_IN_FLIGHT);
     vm.configure_sqlite(SqlitePolicy {
         database_root: policy.sqlite_root.clone(),
         allow_unsafe_sql: false,

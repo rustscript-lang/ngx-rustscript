@@ -30,6 +30,13 @@ config share one Hyper client. VM pool eviction, reset, and drop release
 only that VM's lease clone; they do not destroy the worker client.
 Hyper and hyper-util remain the connection owners. There is no
 standalone per-VM HTTP client fallback on the production bind path.
+The worker resource is created with an explicit effectively-unbounded
+admission value (`usize::MAX`); this removes the upstream resource's default
+64-per-worker/per-config ceiling when leases share one client. The pd-vm
+standard policy still installs the historical VM-local limit of 64 through
+`HttpHostExt`, so the worker setting must not be mistaken for a new user-facing
+worker directive. Admission is fail-closed when worker shutdown begins; no
+implicit queue is created.
 
 ## Execution paths
 
@@ -127,7 +134,12 @@ admission, drops worker-owned Hyper clients through RustScript's owned
 shutdown future, unregisters/closes eventfd once, and shuts the Tokio
 runtime down. Active HTTP and SSE operations retire through the existing
 async bridge and runtime. Drop-reachable HTTP cleanup does not wait or
-start threads. Long sleeps do not delay graceful worker exit (SIGQUIT).
+start threads. The explicit exit path records the upstream
+`HttpWorkerShutdown` poll result; the current pinned contract is immediately
+`Ready`, while a future `Pending` result is surfaced and logged after
+admission closes. Drop is only a non-blocking fallback and uses Tokio's
+background disposal path. Long sleeps do not delay graceful worker exit
+(SIGQUIT).
 Graceful master shutdown cancels in-flight host futures instead of
 waiting them out. Reload starts a new worker with an independent HTTP
 resource owner; the previous worker's clients are not visible to it.

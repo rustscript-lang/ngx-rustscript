@@ -287,13 +287,24 @@ fn worker_http_clients_are_injected_leases_without_per_vm_fallback() {
     );
 
     let bridge = read("src/async_bridge.rs");
-    assert!(
-        !bridge.contains("HttpConfig")
-            && !bridge.contains("HttpClientLease")
-            && !bridge.contains("HttpWorkerResources")
-            && !bridge.contains("hyper::"),
-        "NgxAsyncBridge must stay host-agnostic with no HTTP types:\\n{bridge}"
-    );
+    let notify = read("src/notify.rs");
+    let runtime_eventfd = extract_fn(&runtime, "unsafe extern \"C\" fn eventfd_read_handler");
+    let runtime_waker = extract_fn(&runtime, "fn waker");
+    for (name, source) in [
+        ("NgxAsyncBridge", bridge),
+        ("notify", notify),
+        ("runtime eventfd handler", runtime_eventfd),
+        ("runtime eventfd waker", runtime_waker),
+    ] {
+        assert!(
+            !source.contains("HttpConfig")
+                && !source.contains("HttpClientLease")
+                && !source.contains("HttpWorkerResources")
+                && !source.contains("HttpWorkerShutdown")
+                && !source.contains("hyper::"),
+            "{name} must stay host-agnostic with no HTTP types:\\n{source}"
+        );
+    }
 }
 
 fn extract_fn(source: &str, signature: &str) -> String {

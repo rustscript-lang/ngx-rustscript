@@ -24,7 +24,7 @@ use ngx_rustscript::host::{
     http_config_from_policy, install_standard_runtime, is_standard_host_import, ngx_host_catalog,
     ngx_host_manifest, ngx_host_registry, production_runtime_host_names,
 };
-use vm::{HostTypeSchema, HttpWorkerResources, Program, Vm};
+use vm::{HostTypeSchema, HttpHostExt, HttpWorkerResources, Program, Vm};
 
 fn compile(source: &str) -> Arc<Program> {
     compile_rss_source(source).expect("source should compile against the ngx catalog")
@@ -363,6 +363,49 @@ fn standard_runtime_policy_defaults_fail_closed_and_installs_on_a_vm() {
         .client_for(&http_config_from_policy(&policy))
         .expect("fail-closed HTTP lease");
     install_standard_runtime(&mut vm, &policy, http_client).expect("valid fail-closed policy");
+}
+
+#[test]
+fn standard_runtime_policy_keeps_the_vm_local_http_admission_limit() {
+    let policy = StandardHostPolicy::fail_closed();
+    let program = compile("let value = 1;\n");
+    let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
+    let mut http = HttpWorkerResources::with_max_in_flight(usize::MAX);
+    let http_client = http
+        .client_for(&http_config_from_policy(&policy))
+        .expect("fail-closed HTTP lease");
+
+    install_standard_runtime(&mut vm, &policy, http_client).expect("install policy");
+
+    assert_eq!(
+        vm.http_max_in_flight(),
+        64,
+        "the VM-local HTTP admission limit must remain 64"
+    );
+}
+
+#[test]
+fn mismatched_http_lease_fails_closed_at_the_ngx_policy_boundary() {
+    let mut first = StandardHostPolicy::fail_closed();
+    first.http_hosts.push("first.example".into());
+    first.http_schemes.push("https".into());
+    first.http_ports.push(443);
+    let mut second = first.clone();
+    second.http_hosts[0] = "second.example".into();
+
+    let program = compile("let value = 1;\n");
+    let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
+    let mut http = HttpWorkerResources::with_max_in_flight(usize::MAX);
+    let mismatched_lease = http
+        .client_for(&http_config_from_policy(&second))
+        .expect("second HTTP lease");
+    let error = install_standard_runtime(&mut vm, &first, mismatched_lease)
+        .expect_err("a lease for another policy must be rejected");
+
+    assert!(
+        error.contains("does not match HTTP configuration"),
+        "mismatch must fail closed with the upstream diagnostic: {error}"
+    );
 }
 
 #[test]

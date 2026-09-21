@@ -225,6 +225,11 @@ fn build_ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
     registry.set_capability_profile(standard_capability_profile());
     registry.set_standard_composition(vm::standard_composition());
     registry
+        .install_named_struct_schemas(vm::catalog_named_struct_schemas(
+            vm::http_host_catalog().as_ref(),
+        ))
+        .map_err(|error| format!("install HTTP named schemas: {error}"))?;
+    registry
         .transactionally(|registry| {
             for module in ngx_host_modules() {
                 module
