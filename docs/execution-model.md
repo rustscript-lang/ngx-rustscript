@@ -26,16 +26,18 @@ eventfd bridge.
 Each worker runtime owns one RustScript `HttpWorkerResources` instance.
 Request and timer VMs receive an `HttpClientLease` keyed by the full
 HTTP config derived from the location policy. The same worker and full
-config share one Hyper client. VM pool eviction, reset, and drop release
-only that VM's lease clone; they do not destroy the worker client.
+config share one Hyper client and one worker-level admission gate. Each
+lease has an independent VM-local admission scope; cloning one lease
+preserves that scope, while leases issued for distinct VMs do not share
+local in-flight counts. VM pool eviction, reset, and drop release only
+that VM's lease clone; they do not destroy the worker client.
 Hyper and hyper-util remain the connection owners. There is no
 standalone per-VM HTTP client fallback on the production bind path.
 The worker resource is created with an explicit effectively-unbounded
-admission value (`usize::MAX`); this removes the upstream resource's default
-64-per-worker/per-config ceiling when leases share one client. The pd-vm
-standard policy still installs the historical VM-local limit of 64 through
-`HttpHostExt`, so the worker setting must not be mistaken for a new user-facing
-worker directive. Admission is fail-closed when worker shutdown begins; no
+aggregate admission value (`usize::MAX`); the standard policy installs
+the historical local limit of 64 in each VM lease scope. A single VM
+therefore retains its 64-operation boundary without imposing a worker
+aggregate cap. Admission is fail-closed when worker shutdown begins; no
 implicit queue is created.
 
 ## Execution paths

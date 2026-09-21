@@ -573,9 +573,8 @@ pub unsafe fn init_worker(cycle: *mut ngx_cycle_t) -> Result<(), RuntimeError> {
     // event loop for the entire install.
     crate::host::ngx_host_registry().map_err(RuntimeError::HostRegistry)?;
     let mut worker = WorkerRuntime::start()?;
-    if let Err(error) = unsafe { worker.register_nginx(cycle) } {
-        let _ = worker.shutdown();
-        return Err(error.into());
+    unsafe {
+        worker.register_nginx(cycle)?;
     }
     if !cycle.is_null() {
         let log = unsafe { (*cycle).log };
@@ -736,6 +735,15 @@ mod tests {
             }
         }
         false
+    }
+
+    fn eventfd_count() -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .expect("proc fd directory")
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+            .filter(|target| target.to_string_lossy() == "anon_inode:[eventfd]")
+            .count()
     }
 
     fn sleep_once(ms: i64) -> Arc<Program> {
@@ -1004,21 +1012,47 @@ mod tests {
     }
 
     #[test]
-    fn partial_worker_init_failure_rolls_back_runtime_and_http_resources() {
-        let mut worker = WorkerRuntime::start().unwrap();
-        worker.notify.shutdown_fd();
-        let error = unsafe { worker.register_nginx(std::ptr::null_mut()) }
-            .expect_err("closed eventfd state must reject partial registration");
-        assert_eq!(error, NotifyError::ShutDown);
+    fn partial_worker_init_failure_rolls_back_through_drop_and_allows_replacement() {
+        crate::host::ngx_host_registry().expect("warm host registry before timing rollback");
+        let mut warmup = WorkerRuntime::start().expect("warm worker runtime");
+        warmup.shutdown();
+        let before_eventfds = eventfd_count();
+        let mut cycle = unsafe { std::mem::zeroed::<nginx_sys::ngx_cycle_t>() };
+        let previous_process = unsafe { ngx::ffi::ngx_process };
+        unsafe {
+            std::ptr::addr_of_mut!(ngx::ffi::ngx_process).write(ngx::ffi::NGX_PROCESS_WORKER as _);
+        }
+        let started = Instant::now();
+        let result = unsafe { init_worker(std::ptr::addr_of_mut!(cycle)) };
+        unsafe {
+            std::ptr::addr_of_mut!(ngx::ffi::ngx_process).write(previous_process);
+        }
 
-        let outcome = worker.shutdown();
-        assert_eq!(outcome.http, HttpShutdownPoll::Ready);
-        assert!(
-            worker
-                .http_lease_for(&crate::host::StandardHostPolicy::fail_closed())
-                .is_err(),
-            "rollback must close later HTTP admission"
+        assert_eq!(
+            result,
+            Err(RuntimeError::Notify(NotifyError::GetConnection)),
+            "the real init_worker registration path must fail at the test NGINX stub"
         );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "partial init Drop rollback must not wait or enter a blocking shutdown"
+        );
+        assert!(!worker_is_active(), "failed init must not publish a worker");
+        assert_eq!(
+            eventfd_count(),
+            before_eventfds,
+            "Drop rollback must close the eventfd notifier"
+        );
+
+        let mut replacement = WorkerRuntime::start().expect("replacement worker runtime");
+        assert!(replacement.raw_fd().is_some());
+        let policy = crate::host::StandardHostPolicy::fail_closed();
+        replacement
+            .http_lease_for(&policy)
+            .expect("replacement worker HTTP owner must admit a lease");
+        assert_eq!(replacement.http_client_build_count(), 1);
+        let outcome = replacement.shutdown();
+        assert_eq!(outcome.http, HttpShutdownPoll::Ready);
     }
 
     #[test]
@@ -1532,7 +1566,9 @@ if summary["items"] != 4 {{ 1 / 0; }}
         (port, receiver, join)
     }
 
-    fn start_held_http_server() -> (
+    fn start_held_http_server(
+        requests: usize,
+    ) -> (
         u16,
         std::sync::mpsc::Receiver<usize>,
         std::sync::mpsc::Sender<()>,
@@ -1546,13 +1582,13 @@ if summary["items"] != 4 {{ 1 / 0; }}
         let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let join = std::thread::spawn(move || {
-            let mut streams = Vec::with_capacity(2);
+            let mut streams = Vec::with_capacity(requests);
             let deadline = Instant::now() + Duration::from_secs(8);
             let mut accepted_sockets = 0usize;
-            while streams.len() < 2 {
+            while streams.len() < requests {
                 assert!(
-                    accepted_sockets < 8 && Instant::now() < deadline,
-                    "held HTTP fixture did not receive two valid requests"
+                    accepted_sockets < requests.saturating_add(6) && Instant::now() < deadline,
+                    "held HTTP fixture did not receive {requests} valid requests"
                 );
                 let mut stream = loop {
                     match listener.accept() {
@@ -1651,6 +1687,102 @@ if summary["items"] != 4 {{ 1 / 0; }}
                 }
             }
         }
+    }
+
+    fn drive_held_http_execs_until_ready(
+        worker: &mut WorkerRuntime,
+        execs: &mut [AccessExec],
+        registry: &mut IdentityRegistry<u64>,
+        ready: &std::sync::mpsc::Receiver<usize>,
+    ) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match ready.try_recv() {
+                Ok(count) => return count,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("held HTTP fixture stopped before readiness")
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            assert!(Instant::now() < deadline, "held HTTP readiness timed out");
+            let Some(fd) = worker.raw_fd() else {
+                panic!("worker eventfd closed before held HTTP readiness");
+            };
+            if !wait_readable(fd, Duration::from_millis(25)) {
+                continue;
+            }
+            for identity in worker.drain_ready().expect("drain held HTTP readiness") {
+                let Some(index) = execs.iter().position(|exec| exec.identity() == identity) else {
+                    panic!("held HTTP fixture produced unknown request identity {identity:?}");
+                };
+                match execs[index].apply_ready(identity, registry, worker) {
+                    ReadyEffect::Ignored | ReadyEffect::Deferred | ReadyEffect::WaitingAgain => {}
+                    ReadyEffect::Halted | ReadyEffect::Failed => {
+                        panic!(
+                            "held HTTP operation completed before fixture release: {:?}",
+                            execs[index].last_error()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn complete_held_http_execs(
+        worker: &mut WorkerRuntime,
+        execs: &mut [AccessExec],
+        registry: &mut IdentityRegistry<u64>,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut finished = vec![false; execs.len()];
+        while finished.iter().any(|done| !done) {
+            assert!(
+                Instant::now() < deadline,
+                "held HTTP operations did not complete"
+            );
+            let mut ready = worker.drain_ready().expect("drain held HTTP completion");
+            if ready.is_empty() {
+                let Some(fd) = worker.raw_fd() else {
+                    panic!("worker eventfd closed before held HTTP completion");
+                };
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    wait_readable(fd, remaining.min(Duration::from_millis(25))),
+                    "held HTTP completion wake timed out"
+                );
+                ready = worker
+                    .drain_ready()
+                    .expect("drain held HTTP completion wake");
+            }
+            for identity in ready {
+                let Some(index) = execs.iter().position(|exec| exec.identity() == identity) else {
+                    panic!("held HTTP completion produced unknown request identity {identity:?}");
+                };
+                match execs[index].apply_ready(identity, registry, worker) {
+                    ReadyEffect::Halted => {
+                        assert_eq!(
+                            execs[index].handle_access(registry, worker),
+                            AccessStatus::Ok,
+                            "buffered HTTP operation failed: {:?}",
+                            execs[index].last_error()
+                        );
+                        finished[index] = true;
+                    }
+                    ReadyEffect::WaitingAgain => {}
+                    ReadyEffect::Failed => {
+                        panic!(
+                            "buffered HTTP operation failed: {:?}",
+                            execs[index].last_error()
+                        );
+                    }
+                    effect => panic!("held HTTP completion returned {effect:?}"),
+                }
+            }
+        }
+        for exec in execs {
+            assert!(exec.cleanup_wait(worker).is_none());
+        }
+        assert_eq!(worker.in_flight().expect("worker in-flight count"), 0);
     }
 
     fn run_reusable_http(
@@ -1786,33 +1918,50 @@ let boom = 1 / 0;
     }
 
     #[test]
-    fn worker_http_admission_allows_more_than_64_vm_leases() {
+    fn worker_http_admission_holds_more_than_64_distinct_vm_operations() {
         const VMS: usize = 65;
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind lease boundary address");
-        let port = listener
-            .local_addr()
-            .expect("lease boundary address")
-            .port();
-        drop(listener);
+        let (port, ready, release, server) = start_held_http_server(VMS);
         let mut worker = WorkerRuntime::start().unwrap();
         let policy = http_policy(port);
         let program = buffered_http_program(port, "admission");
+        let mut registry = IdentityRegistry::with_capacity(VMS * 2);
         let mut execs = Vec::with_capacity(VMS);
+
         for request_id in 1..=VMS as u64 {
-            execs.push(
-                worker
-                    .bind_phase_exec_with_policy(
-                        Arc::clone(&program),
-                        request_id,
-                        crate::host::NgxPhase::Access,
-                        policy.clone(),
-                    )
-                    .expect("bind HTTP VM lease"),
+            let mut exec = worker
+                .bind_phase_exec_with_policy(
+                    Arc::clone(&program),
+                    request_id,
+                    crate::host::NgxPhase::Access,
+                    policy.clone(),
+                )
+                .expect("bind HTTP VM");
+            assert_eq!(
+                exec.handle_access(&mut registry, &worker),
+                AccessStatus::Again,
+                "VM {request_id} must start a buffered HTTP operation"
             );
+            exec.commit_suspend();
+            execs.push(exec);
         }
-        assert_eq!(execs.len(), VMS);
+
         assert_eq!(worker.http_client_build_count(), 1);
-        drop(execs);
+        assert_eq!(
+            drive_held_http_execs_until_ready(&mut worker, &mut execs, &mut registry, &ready),
+            VMS,
+            "the bounded upstream must hold one operation from every VM"
+        );
+        assert_eq!(worker.in_flight().unwrap(), VMS);
+        assert!(
+            execs
+                .iter()
+                .all(|exec| matches!(exec.vm_status(), Some(VmStatus::Waiting(_)))),
+            "the 65th VM must reach Waiting with its HTTP operation active"
+        );
+
+        release.send(()).expect("release held HTTP fixture");
+        complete_held_http_execs(&mut worker, &mut execs, &mut registry);
+        server.join().expect("held HTTP fixture");
         worker.shutdown();
     }
 
@@ -1852,7 +2001,7 @@ let boom = 1 / 0;
 
     #[test]
     fn worker_http_shutdown_rejects_new_work_and_active_ops_retire() {
-        let (port, ready, release, server) = start_held_http_server();
+        let (port, ready, release, server) = start_held_http_server(2);
         let mut worker = WorkerRuntime::start().unwrap();
         let policy = http_policy(port);
         let mut buffered = worker
@@ -1943,7 +2092,7 @@ let boom = 1 / 0;
 
     #[test]
     fn worker_drop_is_nonblocking_with_active_http_and_sse() {
-        let (port, ready, release, server) = start_held_http_server();
+        let (port, ready, release, server) = start_held_http_server(2);
         let mut worker = WorkerRuntime::start().unwrap();
         let policy = http_policy(port);
         let mut buffered = worker
