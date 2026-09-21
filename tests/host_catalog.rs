@@ -21,10 +21,10 @@ use ngx_rustscript::host::{
     NGX_QUOTE_SQL_STR_NAME, NGX_SHA1_BIN_NAME, NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME,
     NGX_STATUS_GET_NAME, NGX_TIME_NAME, NGX_UNESCAPE_URI_NAME, NGX_UPDATE_TIME_NAME, NgxPhase,
     StandardHostPolicy, bind_ngx_hosts, compile_host_catalog, host_allowed_in_phase,
-    install_standard_runtime, is_standard_host_import, ngx_host_catalog, ngx_host_manifest,
-    ngx_host_registry, production_runtime_host_names,
+    http_config_from_policy, install_standard_runtime, is_standard_host_import, ngx_host_catalog,
+    ngx_host_manifest, ngx_host_registry, production_runtime_host_names,
 };
-use vm::{HostTypeSchema, Program, Vm};
+use vm::{HostTypeSchema, HttpWorkerResources, Program, Vm};
 
 fn compile(source: &str) -> Arc<Program> {
     compile_rss_source(source).expect("source should compile against the ngx catalog")
@@ -358,7 +358,11 @@ fn standard_runtime_policy_defaults_fail_closed_and_installs_on_a_vm() {
 
     let program = compile("let value = 1;\n");
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    install_standard_runtime(&mut vm, &policy).expect("valid fail-closed policy");
+    let mut http = HttpWorkerResources::new();
+    let http_client = http
+        .client_for(&http_config_from_policy(&policy))
+        .expect("fail-closed HTTP lease");
+    install_standard_runtime(&mut vm, &policy, http_client).expect("valid fail-closed policy");
 }
 
 #[test]

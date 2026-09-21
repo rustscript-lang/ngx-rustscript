@@ -64,8 +64,8 @@ use std::time::Duration;
 
 use tokio::runtime::Handle;
 use vm::{
-    OwnedTimerCallback, TimerBackend, TimerCallbackError, TimerCallbackState, TimerConfig,
-    TimerHostExt, TimerRegistration, Vm, VmError, VmResult,
+    HttpClientLease, OwnedTimerCallback, TimerBackend, TimerCallbackError, TimerCallbackState,
+    TimerConfig, TimerHostExt, TimerRegistration, Vm, VmError, VmResult,
 };
 
 use crate::async_bridge::NgxAsyncBridge;
@@ -321,9 +321,13 @@ fn with_timer_scope<R>(identity: RequestIdentity, f: impl FnOnce() -> R) -> R {
 ///
 /// Hosts are bound through [`crate::host::ngx_host_registry`]; this only
 /// attaches the worker timer runtime after that bind.
-pub fn install_timer_vm(vm: &mut Vm, policy: &StandardHostPolicy) -> Result<(), String> {
+pub fn install_timer_vm(
+    vm: &mut Vm,
+    policy: &StandardHostPolicy,
+    http_client: HttpClientLease,
+) -> Result<(), String> {
     crate::host::bind_production_hosts(vm)?;
-    crate::host::install_standard_policy(vm, policy)?;
+    crate::host::install_standard_policy(vm, policy, http_client)?;
     install_timer_runtime_on_vm(vm);
     Ok(())
 }
@@ -755,7 +759,11 @@ mod tests {
         )
         .expect("compile timer script");
         let mut vm = Vm::new_shared(program);
-        install_timer_vm(&mut vm, &StandardHostPolicy::fail_closed()).expect("install timer vm");
+        let policy = StandardHostPolicy::fail_closed();
+        let http_client = worker
+            .http_lease_for(&policy)
+            .expect("fail-closed HTTP lease");
+        install_timer_vm(&mut vm, &policy, http_client).expect("install timer vm");
         vm.set_async_bridge(Box::new(NgxAsyncBridge::new(
             worker.handle().expect("worker handle"),
         )))
@@ -818,7 +826,11 @@ mod tests {
             crate::config::compile_rss_source("use ngx;\nngx::timer::at(30, |premature| null);\n")
                 .expect("compile timer script");
         let mut vm = Vm::new_shared(program);
-        install_timer_vm(&mut vm, &StandardHostPolicy::fail_closed()).expect("install timer vm");
+        let policy = StandardHostPolicy::fail_closed();
+        let http_client = worker
+            .http_lease_for(&policy)
+            .expect("fail-closed HTTP lease");
+        install_timer_vm(&mut vm, &policy, http_client).expect("install timer vm");
         vm.set_async_bridge(Box::new(NgxAsyncBridge::new(
             worker.handle().expect("worker handle"),
         )))

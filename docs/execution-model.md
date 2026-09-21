@@ -23,6 +23,14 @@ cosockets and pd-vm async I/O/HTTP host futures. SQLite operations use
 pd-vm's scoped worker-backed operation path and resume through the same
 eventfd bridge.
 
+Each worker runtime owns one RustScript `HttpWorkerResources` instance.
+Request and timer VMs receive an `HttpClientLease` keyed by the full
+HTTP config derived from the location policy. The same worker and full
+config share one Hyper client. VM pool eviction, reset, and drop release
+only that VM's lease clone; they do not destroy the worker client.
+Hyper and hyper-util remain the connection owners. There is no
+standalone per-VM HTTP client fallback on the production bind path.
+
 ## Execution paths
 
 On each request the access (or content) handler leases a
@@ -113,11 +121,16 @@ with `NGX_HTTP_CLIENT_CLOSED_REQUEST` (access log 499), then
 request-pool cleanup invalidates the identity and drops the host
 future.
 
-Worker `exit_process` rejects new work, invalidates senders/wakers,
-cancels/drops host futures, unregisters/closes eventfd once, and clears
-worker registries without touching request pointers. Long sleeps do not
-delay graceful worker exit (SIGQUIT). Graceful master shutdown cancels
-in-flight host futures instead of waiting them out.
+Worker `exit_process` rejects new work fail-closed, invalidates
+senders/wakers, cancels/drops host futures, closes HTTP resource
+admission, drops worker-owned Hyper clients through RustScript's owned
+shutdown future, unregisters/closes eventfd once, and shuts the Tokio
+runtime down. Active HTTP and SSE operations retire through the existing
+async bridge and runtime. Drop-reachable HTTP cleanup does not wait or
+start threads. Long sleeps do not delay graceful worker exit (SIGQUIT).
+Graceful master shutdown cancels in-flight host futures instead of
+waiting them out. Reload starts a new worker with an independent HTTP
+resource owner; the previous worker's clients are not visible to it.
 
 ## Content output
 

@@ -38,7 +38,7 @@ phase stays synchronous and fail-closed.
 | --- | --- |
 | [ngx-rust](https://github.com/nginx/ngx-rust) | `cda9d8372ccd2e139ef2b03e5806e019e7796187` (`ngx` / `nginx-sys` 0.5.0) |
 | NGINX | Official NGINX 1.31.4 (`nginx_version` 1031004), tarball SHA-256 `e6f20b644a17a643f059ae6467a1971fe2811587d025e071068753a1f1e3b3c3` |
-| RustScript / `pd-vm` | [`https://github.com/rustscript-lang/rustscript`](https://github.com/rustscript-lang/rustscript) at `87d8c5d5cb42b3381aecadb383c0b7bf34ff204f` (Cargo git dependency `package = "pd-vm"` on that immutable rev; no sibling path) |
+| RustScript / `pd-vm` | [`https://github.com/rustscript-lang/rustscript`](https://github.com/rustscript-lang/rustscript) at `de3ae01383fed344ee19c4b4ff765a307cdc422c` (Cargo git dependency `package = "pd-vm"` on that immutable rev; no sibling path) |
 | Rust toolchain | 1.85.0 or later (ngx-rust MSRV). Verified with rustc 1.94.1 |
 
 Required build tools on Linux:

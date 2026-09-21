@@ -1,7 +1,7 @@
 //! pd-vm standard async hosts for request-owned VMs.
 
 use vm::{
-    HttpConfig, HttpHostExt, IoHostExt, IoPolicy, SqliteHostExt, SqlitePolicy, Vm,
+    HttpClientLease, HttpConfig, HttpHostExt, IoHostExt, IoPolicy, SqliteHostExt, SqlitePolicy, Vm,
     standard_composition,
 };
 
@@ -43,11 +43,33 @@ impl Default for StandardHostPolicy {
     }
 }
 
+/// Full HTTP config identity for one [`StandardHostPolicy`].
+///
+/// Worker HTTP clients are keyed by this complete config, not by host list
+/// alone. Callers must obtain a matching [`HttpClientLease`] from the worker
+/// resource owner before installing the policy.
+pub fn http_config_from_policy(policy: &StandardHostPolicy) -> HttpConfig {
+    HttpConfig {
+        allowed_schemes: policy.http_schemes.clone(),
+        allowed_hosts: policy.http_hosts.clone(),
+        allowed_ports: policy.http_ports.clone(),
+        allow_private_ips: policy.http_allow_private,
+        ..HttpConfig::default()
+    }
+}
+
 /// Apply I/O, HTTP, and SQLite policies without per-name binds.
 ///
 /// Production VMs resolve standard imports through the descriptor registry
 /// plan. A later name bind would flip them back to name resolution.
-pub fn install_standard_policy(vm: &mut Vm, policy: &StandardHostPolicy) -> Result<(), String> {
+///
+/// `http_client` is an embedding-owned lease for `policy`'s full HTTP config.
+/// This function never constructs [`vm::HttpWorkerResources`].
+pub fn install_standard_policy(
+    vm: &mut Vm,
+    policy: &StandardHostPolicy,
+    http_client: HttpClientLease,
+) -> Result<(), String> {
     vm.configure_io(IoPolicy {
         allowed_roots: policy.io_roots.clone(),
         allow_write: policy.io_write,
@@ -55,14 +77,8 @@ pub fn install_standard_policy(vm: &mut Vm, policy: &StandardHostPolicy) -> Resu
         max_read_bytes: policy.io_max_read,
         max_write_bytes: policy.io_max_write,
     });
-    vm.configure_http(HttpConfig {
-        allowed_schemes: policy.http_schemes.clone(),
-        allowed_hosts: policy.http_hosts.clone(),
-        allowed_ports: policy.http_ports.clone(),
-        allow_private_ips: policy.http_allow_private,
-        ..HttpConfig::default()
-    })
-    .map_err(|err| err.to_string())?;
+    vm.configure_http(http_config_from_policy(policy), http_client)
+        .map_err(|err| err.to_string())?;
     vm.configure_sqlite(SqlitePolicy {
         database_root: policy.sqlite_root.clone(),
         allow_unsafe_sql: false,
@@ -75,7 +91,11 @@ pub fn install_standard_policy(vm: &mut Vm, policy: &StandardHostPolicy) -> Resu
 ///
 /// Production VMs already resolve standard imports through
 /// [`crate::host::ngx_host_registry`]; this only applies the location policy.
-pub fn install_standard_runtime(vm: &mut Vm, policy: &StandardHostPolicy) -> Result<(), String> {
+pub fn install_standard_runtime(
+    vm: &mut Vm,
+    policy: &StandardHostPolicy,
+    http_client: HttpClientLease,
+) -> Result<(), String> {
     vm.set_standard_composition(standard_composition());
-    install_standard_policy(vm, policy)
+    install_standard_policy(vm, policy, http_client)
 }

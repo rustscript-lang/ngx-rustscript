@@ -746,7 +746,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 [[package]]
 name = "pd-host-function"
 version = "0.1.0"
-source = "git+https://github.com/rustscript-lang/rustscript?rev=87d8c5d5cb42b3381aecadb383c0b7bf34ff204f#87d8c5d5cb42b3381aecadb383c0b7bf34ff204f"
+source = "git+https://github.com/rustscript-lang/rustscript?rev=de3ae01383fed344ee19c4b4ff765a307cdc422c#de3ae01383fed344ee19c4b4ff765a307cdc422c"
 dependencies = [
  "pd-host-schema",
  "proc-macro2",
@@ -757,7 +757,7 @@ dependencies = [
 [[package]]
 name = "pd-host-schema"
 version = "0.1.0"
-source = "git+https://github.com/rustscript-lang/rustscript?rev=87d8c5d5cb42b3381aecadb383c0b7bf34ff204f#87d8c5d5cb42b3381aecadb383c0b7bf34ff204f"
+source = "git+https://github.com/rustscript-lang/rustscript?rev=de3ae01383fed344ee19c4b4ff765a307cdc422c#de3ae01383fed344ee19c4b4ff765a307cdc422c"
 dependencies = [
  "proc-macro2",
  "syn 2.0.119",
@@ -766,7 +766,7 @@ dependencies = [
 [[package]]
 name = "pd-vm"
 version = "0.1.0"
-source = "git+https://github.com/rustscript-lang/rustscript?rev=87d8c5d5cb42b3381aecadb383c0b7bf34ff204f#87d8c5d5cb42b3381aecadb383c0b7bf34ff204f"
+source = "git+https://github.com/rustscript-lang/rustscript?rev=de3ae01383fed344ee19c4b4ff765a307cdc422c#de3ae01383fed344ee19c4b4ff765a307cdc422c"
 dependencies = [
  "base64",
  "futures-channel",

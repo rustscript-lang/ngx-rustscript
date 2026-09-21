@@ -255,6 +255,47 @@ fn production_has_one_descriptor_binding_authority() {
     );
 }
 
+#[test]
+fn worker_http_clients_are_injected_leases_without_per_vm_fallback() {
+    let standard = read("src/host/standard.rs");
+    let install_policy = extract_fn(&standard, "fn install_standard_policy");
+    assert!(
+        install_policy.contains("HttpClientLease") && install_policy.contains("configure_http"),
+        "standard policy must inject an embedding-owned HTTP lease:\\n{install_policy}"
+    );
+    assert!(
+        !install_policy.contains("HttpWorkerResources::new"),
+        "standard policy must not construct a per-VM HTTP resource owner:\\n{install_policy}"
+    );
+
+    let runtime = read("src/runtime.rs");
+    assert!(
+        runtime.contains("HttpWorkerResources") && runtime.contains("http_lease_for"),
+        "the worker runtime must own HTTP resources and issue leases"
+    );
+    let take = extract_fn(&runtime, "fn take");
+    assert!(
+        !take.contains("HttpWorkerResources::new"),
+        "VM pool construction must not create a standalone HTTP client:\\n{take}"
+    );
+
+    let request_state = read("src/request_state.rs");
+    let bind_program = extract_fn(&request_state, "fn bind_program_hosts");
+    assert!(
+        bind_program.contains("HttpClientLease"),
+        "request VM host bind must receive a worker HTTP lease:\\n{bind_program}"
+    );
+
+    let bridge = read("src/async_bridge.rs");
+    assert!(
+        !bridge.contains("HttpConfig")
+            && !bridge.contains("HttpClientLease")
+            && !bridge.contains("HttpWorkerResources")
+            && !bridge.contains("hyper::"),
+        "NgxAsyncBridge must stay host-agnostic with no HTTP types:\\n{bridge}"
+    );
+}
+
 fn extract_fn(source: &str, signature: &str) -> String {
     let start = source
         .find(signature)

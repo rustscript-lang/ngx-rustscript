@@ -7,11 +7,14 @@
 //! [`crate::notify::RequestIdentity`]. They never hold NGINX request/pool/VM
 //! pointers and never call `ngx_post_event`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::fmt;
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::pin::pin;
 use std::sync::Arc;
-use std::task::Waker;
+use std::task::{Context, Waker};
 use std::time::Duration;
 
 use nginx_sys::{ngx_cycle_t, ngx_event_t, ngx_int_t, ngx_uint_t};
@@ -19,7 +22,7 @@ use ngx::core::Status;
 use ngx::ffi::{NGX_LOG_ERR, NGX_LOG_NOTICE, NGX_PROCESS_SINGLE, NGX_PROCESS_WORKER, ngx_process};
 use ngx::ngx_log_error;
 use tokio::runtime::{Handle, Runtime};
-use vm::{Program, Vm};
+use vm::{HttpClientLease, HttpConfig, HttpWorkerResources, HttpWorkerShutdown, Program, Vm};
 
 use crate::notify::{
     CompletionPermit, CompletionSender, DEFAULT_MAX_IN_FLIGHT, NotifyBridge, NotifyError,
@@ -101,7 +104,7 @@ pub(crate) struct ReusableRequestVmPoolStats {
 }
 
 impl ReusableRequestVmPool {
-    fn take(&mut self, key: &ReusableVmKey) -> Result<Vm, String> {
+    fn take(&mut self, key: &ReusableVmKey, http_client: HttpClientLease) -> Result<Vm, String> {
         #[cfg(ngx_rustscript_integration_hooks)]
         {
             self.checkouts = self.checkouts.saturating_add(1);
@@ -114,7 +117,7 @@ impl ReusableRequestVmPool {
             return Ok(self.idle.swap_remove(index).vm);
         }
         let mut vm = Vm::new_shared(Arc::clone(&key.program));
-        crate::request_state::bind_program_hosts(&mut vm, &key.policy)?;
+        crate::request_state::bind_program_hosts(&mut vm, &key.policy, http_client)?;
         self.created = self.created.saturating_add(1);
         Ok(vm)
     }
@@ -144,12 +147,16 @@ impl ReusableRequestVmPool {
     }
 }
 
-/// Per-worker Tokio runtime, eventfd bridge, and generation counter.
+/// Per-worker Tokio runtime, eventfd bridge, generation counter, and HTTP
+/// client resource owner.
 pub struct WorkerRuntime {
     runtime: Option<Runtime>,
     notify: NotifyBridge,
     next_generation: u64,
     reusable_request_vms: RefCell<ReusableRequestVmPool>,
+    http: RefCell<Option<HttpWorkerResources>>,
+    http_configs: RefCell<HashSet<HttpConfig>>,
+    http_client_builds: Cell<usize>,
     stopped: bool,
 }
 
@@ -174,6 +181,9 @@ impl WorkerRuntime {
             notify,
             next_generation: 1,
             reusable_request_vms: RefCell::new(ReusableRequestVmPool::default()),
+            http: RefCell::new(Some(HttpWorkerResources::new())),
+            http_configs: RefCell::new(HashSet::new()),
+            http_client_builds: Cell::new(0),
             stopped: false,
         })
     }
@@ -258,8 +268,15 @@ impl WorkerRuntime {
             self.next_generation = 1;
         }
         let handle = self.handle().map_err(|err| err.to_string())?;
+        let http_client = self.http_lease_for(&policy)?;
         AccessExec::bind_program_in_phase_with_policy(
-            program, request_id, generation, handle, phase, policy,
+            program,
+            request_id,
+            generation,
+            handle,
+            phase,
+            policy,
+            http_client,
         )
     }
 
@@ -286,7 +303,11 @@ impl WorkerRuntime {
             standard_catalog_abi: vm::standard_host_catalog_fingerprint(),
         };
         let handle = self.handle().map_err(|error| error.to_string())?;
-        let mut vm = self.reusable_request_vms.borrow_mut().take(&key)?;
+        let http_client = self.http_lease_for(&key.policy)?;
+        let mut vm = self
+            .reusable_request_vms
+            .borrow_mut()
+            .take(&key, http_client)?;
         vm.set_async_bridge(Box::new(crate::async_bridge::NgxAsyncBridge::new(handle)))
             .map_err(|error| error.to_string())?;
         vm.set_runtime_print_sink(|_| {});
@@ -303,6 +324,40 @@ impl WorkerRuntime {
     #[cfg(test)]
     fn reusable_request_vm_idle_count(&self) -> usize {
         self.reusable_request_vms.borrow().idle.len()
+    }
+
+    /// Obtain a worker-owned HTTP client lease for `policy`'s full config.
+    ///
+    /// One [`HttpWorkerResources`] owner lives for the worker runtime. Same
+    /// full config reuses the same Hyper client; VM create/reset/eviction only
+    /// clones this lease.
+    pub fn http_lease_for(
+        &self,
+        policy: &crate::host::StandardHostPolicy,
+    ) -> Result<HttpClientLease, String> {
+        if self.stopped || !self.notify.is_accepting() {
+            return Err(NotifyError::ShutDown.to_string());
+        }
+        let config = crate::host::http_config_from_policy(policy);
+        let lease = {
+            let mut http = self.http.borrow_mut();
+            let resources = http
+                .as_mut()
+                .ok_or_else(|| NotifyError::ShutDown.to_string())?;
+            resources
+                .client_for(&config)
+                .map_err(|err| err.to_string())?
+        };
+        if self.http_configs.borrow_mut().insert(config) {
+            self.http_client_builds
+                .set(self.http_client_builds.get().saturating_add(1));
+        }
+        Ok(lease)
+    }
+
+    #[cfg(test)]
+    fn http_client_build_count(&self) -> usize {
+        self.http_client_builds.get()
     }
 
     pub(crate) fn bind_configured_phase_exec_with_policy(
@@ -333,13 +388,16 @@ impl WorkerRuntime {
         (ready, err.map(RuntimeError::from))
     }
 
-    /// Reject new work, invalidate senders, drop the runtime (cancels timers
-    /// and in-flight futures), then close eventfd with the existing fd gate.
+    /// Reject new work, invalidate senders, drop request/timer state, close
+    /// HTTP resource admission, drop worker-owned Hyper clients through the
+    /// owned shutdown future, then drop the Tokio runtime and close eventfd.
     ///
     /// Live semaphores are closed and their waiters woken **before** the
     /// runtime is dropped so a parked wait never resumes silently. Pending
     /// timer callbacks run once with `premature=true`, live callbacks are
     /// cancelled, and every callback VM is released in the same step.
+    /// Drop-reachable HTTP cleanup does not wait, poll request futures, or
+    /// start threads.
     pub fn shutdown(&mut self) {
         if self.stopped {
             return;
@@ -351,6 +409,11 @@ impl WorkerRuntime {
         crate::timer::shutdown_current();
         self.notify.reject_new();
         let _ = self.notify.reclaim_all();
+        if let Some(mut http) = self.http.get_mut().take() {
+            http.close_admission();
+            poll_http_worker_shutdown(http.into_shutdown());
+        }
+        self.http_configs.get_mut().clear();
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_timeout(Duration::from_secs(5));
         }
@@ -405,6 +468,13 @@ impl AsyncWait for WorkerRuntime {
             .recycle(key, vm, &handle);
         true
     }
+}
+
+fn poll_http_worker_shutdown(shutdown: HttpWorkerShutdown) {
+    let mut shutdown = pin!(shutdown);
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let _ = shutdown.as_mut().poll(&mut cx);
 }
 
 impl Drop for WorkerRuntime {
@@ -581,7 +651,9 @@ mod tests {
             }
             assert_eq!(ready, vec![exec.identity()]);
             match exec.apply_ready(exec.identity(), &mut registry, worker) {
-                ReadyEffect::Halted => return exec.handle_access(&mut registry, worker),
+                ReadyEffect::Halted | ReadyEffect::Failed => {
+                    return exec.handle_access(&mut registry, worker);
+                }
                 ReadyEffect::WaitingAgain | ReadyEffect::Ignored => {}
                 effect => panic!("async request failed with {effect:?}"),
             }
@@ -601,8 +673,10 @@ mod tests {
                 let read = stream.read(&mut request).expect("read HTTP request");
                 assert!(
                     request[..read]
-                        .windows(b"GET / HTTP/1.1".len())
-                        .any(|window| window == b"GET / HTTP/1.1")
+                        .windows(b"GET /".len())
+                        .any(|window| window == b"GET /"),
+                    "HTTP fixture expected a GET request, got {:?}",
+                    String::from_utf8_lossy(&request[..read])
                 );
                 std::thread::sleep(Duration::from_millis(20));
                 stream
@@ -1067,5 +1141,351 @@ if response["status"] != 204 {{ 1 / 0; }}
         expected.sort_by_key(|identity| identity.request_id());
         assert_eq!(ready, expected, "every concurrent sleep must drain");
         worker.shutdown();
+    }
+
+    fn http_policy(port: u16) -> crate::host::StandardHostPolicy {
+        let mut policy = crate::host::StandardHostPolicy::fail_closed();
+        policy.http_hosts.push("127.0.0.1".into());
+        policy.http_schemes.push("http".into());
+        policy.http_ports.push(port);
+        policy.http_allow_private = true;
+        policy
+    }
+
+    fn buffered_http_program(port: u16, marker: &str) -> Arc<Program> {
+        compile_rss_source(&format!(
+            r#"
+use http;
+use ngx;
+if ngx::ctx::get("seen") != null {{ 1 / 0; }}
+ngx::ctx::set("seen", 1);
+let response: map = http::client::request({{
+    method: "GET",
+    url: "http://127.0.0.1:{port}/{marker}",
+    body: null
+}});
+if response["status"] != 204 {{ 1 / 0; }}
+"#
+        ))
+        .expect("compile buffered HTTP program")
+    }
+
+    fn sse_http_program(port: u16) -> Arc<Program> {
+        compile_rss_source(&format!(
+            r#"
+use http;
+fn on_sse_event(item: map) -> map {{
+    {{ action: "continue" }}
+}}
+http::client::sse({{
+    method: "GET",
+    url: "http://127.0.0.1:{port}/events",
+    body: null
+}}, on_sse_event);
+"#
+        ))
+        .expect("compile SSE program")
+    }
+
+    fn start_keep_alive_server(
+        requests: usize,
+    ) -> (
+        u16,
+        std::sync::mpsc::Receiver<usize>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind keep-alive fixture");
+        let port = listener.local_addr().expect("keep-alive address").port();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking keep-alive listener");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let join = std::thread::spawn(move || {
+            let mut accepted = 0usize;
+            let mut stream: Option<std::net::TcpStream> = None;
+            for _ in 0..requests {
+                let mut request = Vec::new();
+                loop {
+                    if stream.is_none() {
+                        let deadline = Instant::now() + Duration::from_secs(3);
+                        let next = loop {
+                            match listener.accept() {
+                                Ok((next, _)) => break next,
+                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                    assert!(
+                                        Instant::now() < deadline,
+                                        "keep-alive accept timed out"
+                                    );
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
+                                Err(error) => panic!("keep-alive accept: {error}"),
+                            }
+                        };
+                        next.set_nonblocking(false).expect("blocking stream");
+                        next.set_read_timeout(Some(Duration::from_secs(3)))
+                            .expect("read timeout");
+                        next.set_write_timeout(Some(Duration::from_secs(3)))
+                            .expect("write timeout");
+                        stream = Some(next);
+                        accepted += 1;
+                    }
+                    let socket = stream.as_mut().expect("connection");
+                    let mut byte = [0u8; 1];
+                    match socket.read(&mut byte) {
+                        Ok(0) if request.is_empty() => {
+                            stream = None;
+                        }
+                        Ok(0) => panic!("keep-alive request ended before headers"),
+                        Ok(_) => {
+                            request.push(byte[0]);
+                            if request.ends_with(b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(error) => panic!("keep-alive read: {error}"),
+                    }
+                }
+                stream
+                    .as_mut()
+                    .expect("connection")
+                    .write_all(
+                        b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n",
+                    )
+                    .expect("keep-alive response");
+            }
+            sender.send(accepted).expect("send accept count");
+        });
+        (port, receiver, join)
+    }
+
+    fn run_reusable_http(
+        worker: &mut WorkerRuntime,
+        program: Arc<Program>,
+        request_id: u64,
+        policy: crate::host::StandardHostPolicy,
+    ) {
+        let mut exec = worker
+            .bind_reusable_phase_exec_with_policy(
+                program,
+                request_id,
+                crate::host::NgxPhase::Access,
+                policy,
+            )
+            .expect("bind reusable HTTP VM");
+        assert_eq!(run_async_exec_to_halt(worker, &mut exec), AccessStatus::Ok);
+        assert!(exec.cleanup_wait(worker).is_none());
+    }
+
+    #[test]
+    fn one_worker_http_config_shares_client_across_vm_reuse_and_eviction() {
+        let (port, accepted, server) = start_keep_alive_server(10);
+        let mut worker = WorkerRuntime::start().unwrap();
+        let policy = http_policy(port);
+        let program = buffered_http_program(port, "reuse");
+        assert!(crate::config::program_can_reuse_request_vm(&program));
+
+        for request_id in 1..=5 {
+            run_reusable_http(
+                &mut worker,
+                Arc::clone(&program),
+                request_id,
+                policy.clone(),
+            );
+        }
+        assert_eq!(worker.reusable_request_vm_created_count(), 1);
+        assert_eq!(worker.http_client_build_count(), 1);
+
+        for (offset, marker) in ["a", "b", "c", "d", "e"].into_iter().enumerate() {
+            run_reusable_http(
+                &mut worker,
+                buffered_http_program(port, marker),
+                10 + offset as u64,
+                policy.clone(),
+            );
+        }
+        assert!(worker.reusable_request_vm_created_count() >= 5);
+        assert_eq!(
+            worker.reusable_request_vm_idle_count(),
+            super::MAX_IDLE_REUSABLE_REQUEST_VMS
+        );
+        assert_eq!(
+            worker.http_client_build_count(),
+            1,
+            "VM pool cap/eviction must not build another HTTP client"
+        );
+
+        worker.shutdown();
+        assert_eq!(accepted.recv_timeout(Duration::from_secs(3)).unwrap(), 1);
+        server.join().expect("keep-alive server");
+    }
+
+    #[test]
+    fn different_http_configs_stay_isolated() {
+        let (port, server) = start_http_server(2);
+        let mut worker = WorkerRuntime::start().unwrap();
+        let first = http_policy(port);
+        let mut second = first.clone();
+        second.http_hosts.push("localhost".into());
+        let program = buffered_http_program(port, "isolated");
+
+        run_reusable_http(&mut worker, Arc::clone(&program), 1, first);
+        run_reusable_http(&mut worker, program, 2, second);
+        assert_eq!(worker.http_client_build_count(), 2);
+        assert_eq!(worker.reusable_request_vm_created_count(), 2);
+
+        worker.shutdown();
+        server.join().expect("isolated HTTP fixture");
+    }
+
+    #[test]
+    fn vm_reset_and_drop_retain_worker_http_client_ownership() {
+        let (port, server) = start_http_server(8);
+        let mut worker = WorkerRuntime::start().unwrap();
+        let policy = http_policy(port);
+        let ok = buffered_http_program(port, "ok");
+        let failed = compile_rss_source(&format!(
+            r#"
+use http;
+let response: map = http::client::request({{
+    method: "GET",
+    url: "http://127.0.0.1:{port}/fail",
+    body: null
+}});
+let boom = 1 / 0;
+"#
+        ))
+        .expect("compile failing HTTP program");
+
+        for request_id in 1..=2 {
+            run_reusable_http(&mut worker, Arc::clone(&ok), request_id, policy.clone());
+        }
+        assert_eq!(worker.reusable_request_vm_created_count(), 1);
+        assert_eq!(worker.http_client_build_count(), 1);
+
+        for request_id in 3..=8 {
+            let mut exec = worker
+                .bind_reusable_phase_exec_with_policy(
+                    Arc::clone(&failed),
+                    request_id,
+                    crate::host::NgxPhase::Access,
+                    policy.clone(),
+                )
+                .expect("bind dropped HTTP VM");
+            assert_eq!(
+                run_async_exec_to_halt(&mut worker, &mut exec),
+                AccessStatus::Error500
+            );
+            assert!(exec.cleanup_wait(&worker).is_none());
+        }
+        assert_eq!(worker.http_client_build_count(), 1);
+        assert_eq!(worker.reusable_request_vm_idle_count(), 1);
+
+        worker.shutdown();
+        server.join().expect("HTTP fixture server");
+    }
+
+    #[test]
+    fn http_and_sse_share_one_worker_lease_and_no_per_vm_fallback() {
+        let (http_port, http_server) = start_http_server(1);
+        let mut worker = WorkerRuntime::start().unwrap();
+        let policy = http_policy(http_port);
+
+        run_reusable_http(
+            &mut worker,
+            buffered_http_program(http_port, "shared"),
+            1,
+            policy.clone(),
+        );
+        assert_eq!(worker.http_client_build_count(), 1);
+
+        let sse = sse_http_program(http_port);
+        assert!(!crate::config::program_can_reuse_request_vm(&sse));
+        let mut exec = worker
+            .bind_phase_exec_with_policy(sse, 2, crate::host::NgxPhase::Access, policy)
+            .expect("bind SSE VM");
+        let _ = run_async_exec_to_halt(&mut worker, &mut exec);
+        assert!(exec.cleanup_wait(&worker).is_none());
+        assert_eq!(worker.http_client_build_count(), 1);
+        assert_eq!(worker.reusable_request_vm_created_count(), 1);
+
+        worker.shutdown();
+        http_server.join().expect("HTTP fixture");
+    }
+
+    #[test]
+    fn worker_http_shutdown_rejects_new_work_and_active_ops_retire() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind pending HTTP");
+        let port = listener.local_addr().expect("pending address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept pending HTTP");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("read timeout");
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            std::thread::sleep(Duration::from_millis(200));
+        });
+
+        let mut worker = WorkerRuntime::start().unwrap();
+        let policy = http_policy(port);
+        let program = buffered_http_program(port, "pending");
+        let mut exec = worker
+            .bind_phase_exec_with_policy(program, 1, crate::host::NgxPhase::Access, policy.clone())
+            .expect("bind pending HTTP");
+        let mut registry = IdentityRegistry::with_capacity(8);
+        assert_eq!(
+            exec.handle_access(&mut registry, &worker),
+            AccessStatus::Again
+        );
+        assert_eq!(worker.http_client_build_count(), 1);
+
+        let start = Instant::now();
+        exec.cleanup_wait(&worker);
+        worker.shutdown();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "HTTP shutdown must not wait out active work"
+        );
+        assert!(
+            worker
+                .bind_phase_exec_with_policy(
+                    buffered_http_program(port, "after"),
+                    2,
+                    crate::host::NgxPhase::Access,
+                    policy,
+                )
+                .is_err(),
+            "shutdown must reject new HTTP VM admission"
+        );
+        assert!(
+            worker.http_lease_for(&http_policy(port)).is_err(),
+            "shutdown must reject new HTTP leases"
+        );
+        server.join().expect("pending HTTP fixture");
+    }
+
+    #[test]
+    fn worker_replacement_owns_independent_http_clients() {
+        let (port, server) = start_http_server(4);
+        let policy = http_policy(port);
+        let program = buffered_http_program(port, "reload");
+
+        let mut first = WorkerRuntime::start().unwrap();
+        run_reusable_http(&mut first, Arc::clone(&program), 1, policy.clone());
+        assert_eq!(first.http_client_build_count(), 1);
+
+        let mut second = WorkerRuntime::start().unwrap();
+        run_reusable_http(&mut second, Arc::clone(&program), 2, policy.clone());
+        assert_eq!(second.http_client_build_count(), 1);
+        first.shutdown();
+        run_reusable_http(&mut second, Arc::clone(&program), 3, policy.clone());
+        assert_eq!(second.http_client_build_count(), 1);
+
+        let mut third = WorkerRuntime::start().unwrap();
+        run_reusable_http(&mut third, program, 4, policy);
+        assert_eq!(third.http_client_build_count(), 1);
+        second.shutdown();
+        third.shutdown();
+        server.join().expect("reload HTTP fixture");
     }
 }

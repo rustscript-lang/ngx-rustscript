@@ -23,7 +23,7 @@ use ngx::ngx_log_error;
 use tokio::runtime::Handle;
 #[cfg(test)]
 use vm::HostOpId;
-use vm::{Program, Vm, VmError, VmResult, VmStatus};
+use vm::{HttpClientLease, Program, Vm, VmError, VmResult, VmStatus};
 
 use crate::async_bridge::NgxAsyncBridge;
 use crate::host::{
@@ -387,9 +387,13 @@ impl<T> Default for IdentityRegistry<T> {
 /// Programs that import `ngx::timer` hosts also receive the worker timer
 /// runtime. The location's standard-host policy is applied without per-name
 /// binds so the registry plan stays exact.
-pub(crate) fn bind_program_hosts(vm: &mut Vm, policy: &StandardHostPolicy) -> Result<(), String> {
+pub(crate) fn bind_program_hosts(
+    vm: &mut Vm,
+    policy: &StandardHostPolicy,
+    http_client: HttpClientLease,
+) -> Result<(), String> {
     crate::host::bind_production_hosts(vm)?;
-    crate::host::install_standard_policy(vm, policy)?;
+    crate::host::install_standard_policy(vm, policy, http_client)?;
     if crate::timer::program_uses_ngx_timer_hosts(vm.program()) {
         crate::timer::install_timer_runtime_on_vm(vm);
     }
@@ -461,8 +465,16 @@ impl AccessExec {
         request_id: u64,
         generation: u64,
         runtime: Handle,
+        http_client: HttpClientLease,
     ) -> Result<Self, String> {
-        Self::bind_program_in_phase(program, request_id, generation, runtime, NgxPhase::Access)
+        Self::bind_program_in_phase(
+            program,
+            request_id,
+            generation,
+            runtime,
+            NgxPhase::Access,
+            http_client,
+        )
     }
 
     pub fn bind_program_in_phase(
@@ -471,6 +483,7 @@ impl AccessExec {
         generation: u64,
         runtime: Handle,
         phase: NgxPhase,
+        http_client: HttpClientLease,
     ) -> Result<Self, String> {
         Self::bind_program_in_phase_with_policy(
             program,
@@ -479,6 +492,7 @@ impl AccessExec {
             runtime,
             phase,
             StandardHostPolicy::fail_closed(),
+            http_client,
         )
     }
 
@@ -489,9 +503,10 @@ impl AccessExec {
         runtime: Handle,
         phase: NgxPhase,
         policy: StandardHostPolicy,
+        http_client: HttpClientLease,
     ) -> Result<Self, String> {
         let mut vm = Vm::new_shared(program);
-        bind_program_hosts(&mut vm, &policy)?;
+        bind_program_hosts(&mut vm, &policy, http_client)?;
         vm.set_async_bridge(Box::new(NgxAsyncBridge::new(runtime)))
             .map_err(|err| err.to_string())?;
         vm.set_runtime_print_sink(|_| {});
