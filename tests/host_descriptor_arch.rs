@@ -251,10 +251,12 @@ fn production_has_one_descriptor_binding_authority() {
         timer.contains("install_prepared_timer_vm"),
         "timer roots must use the prepared VM installation path"
     );
+    let host_timer = read("src/host/timer.rs");
     assert!(
-        timer.contains("pinned RustScript owned-callback API")
-            && timer.contains("newer upstream API"),
-        "the callback binding dependency must remain explicit until the upstream pin changes"
+        host_timer.contains("Some(bound_program) => register_owned_timer_with_bound_program(")
+            && host_timer
+                .contains("configured PreparedScript VMs always carry Some(bound_program)"),
+        "configured timer callbacks must use the bound-aware registration path"
     );
 }
 
