@@ -280,8 +280,9 @@ pub struct NotifyBridge {
     fd_state: FdState,
     stopped: bool,
     #[cfg(test)]
-    // Keep eventfd-bearing unit tests out of process-wide fd observations and
-    // NGINX-global mutation tests running in parallel.
+    eventfd_lifecycle: Option<crate::test_support::EventFdLifecycleToken>,
+    #[cfg(test)]
+    // Serialize eventfd-bearing unit tests with tests that mutate NGINX globals.
     _global_test_guard: crate::test_support::GlobalNginxTestGuard,
 }
 
@@ -299,6 +300,8 @@ impl NotifyBridge {
         let global_test_guard = crate::test_support::global_ngx_test_guard();
         let flags = libc::EFD_NONBLOCK | libc::EFD_CLOEXEC;
         let fd = io.eventfd(0, flags).map_err(NotifyError::EventFdCreate)?;
+        #[cfg(test)]
+        let eventfd_lifecycle = crate::test_support::record_eventfd_created(fd);
         let accepting = Arc::new(AtomicBool::new(true));
         let pending = Arc::new(Mutex::new(Pending {
             queue: VecDeque::new(),
@@ -324,6 +327,8 @@ impl NotifyBridge {
             fd: fd_inner,
             fd_state: FdState::Local,
             stopped: false,
+            #[cfg(test)]
+            eventfd_lifecycle,
             #[cfg(test)]
             _global_test_guard: global_test_guard,
         })
@@ -566,12 +571,26 @@ impl NotifyBridge {
         };
         if let Ok(mut guard) = self.fd.lock() {
             if let FdInner::Open(fd) = std::mem::replace(&mut *guard, FdInner::Closed) {
-                if let Some(conn) = conn {
-                    if !conn.is_null() {
+                #[cfg(test)]
+                let close_succeeded = match conn {
+                    Some(conn) if !conn.is_null() => {
                         unsafe { ngx_close_connection(conn) };
+                        true
                     }
-                } else {
-                    let _ = self.io.close(fd);
+                    Some(_) => false,
+                    None => self.io.close(fd).is_ok(),
+                };
+                #[cfg(not(test))]
+                match conn {
+                    Some(conn) if !conn.is_null() => unsafe { ngx_close_connection(conn) },
+                    Some(_) => {}
+                    None => {
+                        let _ = self.io.close(fd);
+                    }
+                }
+                #[cfg(test)]
+                if let Some(lifecycle) = self.eventfd_lifecycle.as_ref() {
+                    lifecycle.record_close(fd, close_succeeded);
                 }
             }
         }

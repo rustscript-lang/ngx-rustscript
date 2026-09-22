@@ -735,15 +735,6 @@ mod tests {
         false
     }
 
-    fn eventfd_count() -> usize {
-        std::fs::read_dir("/proc/self/fd")
-            .expect("proc fd directory")
-            .filter_map(Result::ok)
-            .filter_map(|entry| std::fs::read_link(entry.path()).ok())
-            .filter(|target| target.to_string_lossy() == "anon_inode:[eventfd]")
-            .count()
-    }
-
     struct NgxProcessRestore {
         previous: ngx_uint_t,
     }
@@ -1033,18 +1024,18 @@ mod tests {
 
     #[test]
     fn partial_worker_init_failure_rolls_back_through_drop_and_allows_replacement() {
-        let _global_test_guard = crate::test_support::global_ngx_test_guard();
+        let global_test_guard = crate::test_support::global_ngx_test_guard();
         crate::host::ngx_host_registry().expect("warm host registry before timing rollback");
         let mut warmup = WorkerRuntime::start().expect("warm worker runtime");
         warmup.shutdown();
         drop(warmup);
-        let before_eventfds = eventfd_count();
+        let lifecycle_probe =
+            crate::test_support::install_eventfd_lifecycle_probe(&global_test_guard);
         let mut cycle = unsafe { std::mem::zeroed::<nginx_sys::ngx_cycle_t>() };
         let previous_process = unsafe { ngx::ffi::ngx_process };
         let process_restore = NgxProcessRestore::set(ngx::ffi::NGX_PROCESS_WORKER as _);
         let started = Instant::now();
         let result = unsafe { init_worker(std::ptr::addr_of_mut!(cycle)) };
-        let after_eventfds = eventfd_count();
         drop(process_restore);
         assert_eq!(
             unsafe { ngx::ffi::ngx_process },
@@ -1062,10 +1053,22 @@ mod tests {
             "partial init Drop rollback must not wait or enter a blocking shutdown"
         );
         assert!(!worker_is_active(), "failed init must not publish a worker");
-        assert_eq!(
-            after_eventfds, before_eventfds,
-            "Drop rollback must close the eventfd notifier"
+        let instance = lifecycle_probe
+            .snapshot()
+            .expect("the failing init must create one probed notify instance");
+        assert!(
+            instance.close_called,
+            "Drop rollback must call close for the failing init eventfd"
         );
+        assert!(
+            instance.close_succeeded,
+            "Drop rollback must close the failing init eventfd"
+        );
+        assert!(
+            instance.dropped,
+            "Drop rollback must drop the failing init notify instance"
+        );
+        drop(lifecycle_probe);
 
         let mut replacement = WorkerRuntime::start().expect("replacement worker runtime");
         assert!(replacement.raw_fd().is_some());
