@@ -27,8 +27,8 @@ Pinned `pd-vm` evidence in this file is taken from:
 | Pin | Value |
 | --- | --- |
 | Crate metadata | `Cargo.toml` `rustscript-rev` / `vm` git `rev` |
-| `Cargo.lock` | `pd-vm` `source = "git+https://github.com/rustscript-lang/rustscript?rev=5bd2788b620980e1d2ae6a146e4f7548c68d1882#5bd2788b620980e1d2ae6a146e4f7548c68d1882"` |
-| Local Cargo git checkout | `$CARGO_HOME/git/checkouts/rustscript-ab116a0775a56744/5bd2788` |
+| `Cargo.lock` | `pd-vm` `source = "git+https://github.com/rustscript-lang/rustscript?rev=6279d207eddd500096d429b66a321141e01fff2e#6279d207eddd500096d429b66a321141e01fff2e"` |
+| Local Cargo git checkout | `$CARGO_HOME/git/checkouts/rustscript-ab116a0775a56744/6279d20` |
 
 Public versus crate-private is taken from that checkout's `src/lib.rs`
 re-exports and item visibility. Do not treat crate-private helpers as
@@ -132,7 +132,7 @@ same bound artifact to its callback VM. `bind_vm_cached` is retained only as a
 test/integration-gated fallback for standalone unbound fixtures and is not a
 configured production binding path.
 
-## Evidence matrix (pinned `pd-vm` 5bd2788b620980e1d2ae6a146e4f7548c68d1882)
+## Evidence matrix (pinned `pd-vm` 6279d207eddd500096d429b66a321141e01fff2e)
 
 Legend: **P** = public (`src/lib.rs` re-export or `pub` item on a public
 type). **C** = crate-private / `pub(super)` / `pub(crate)`.

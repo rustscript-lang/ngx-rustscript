@@ -1,6 +1,6 @@
 //! Worker-thread-local synchronous VM pool.
 //!
-//! pd-vm at `5bd2788b620980e1d2ae6a146e4f7548c68d1882` exposes the bound
+//! pd-vm at `6279d207eddd500096d429b66a321141e01fff2e` exposes the bound
 //! constructor through [`PreparedScript::new_vm`], which delegates to
 //! `Vm::new_bound`. This pool therefore receives a configuration-time
 //! [`PreparedScript`] and never prepares or fully binds on checkout.
