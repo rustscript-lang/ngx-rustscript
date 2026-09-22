@@ -19,9 +19,11 @@ ngx catalog fingerprint, and standard catalog fingerprint. SQLite, standard
 I/O, SSE, timers, sleep, cosockets, resource or
 unknown host schemas, failures, cancellation, timeouts, pending cleanup, and
 over-capacity returns are excluded. The worker retains at most four reusable
-request VMs, installs a fresh `NgxAsyncBridge` and runtime policy on checkout,
-and clears request `ngx.ctx`, bridge, print sink, futures, resources, and reset
-state before return. Client disconnect during a wait finalizes the request as
+request VMs and installs a fresh `NgxAsyncBridge`, print sink, and request
+state on checkout. A reused VM retains its VM-local runtime policy and HTTP
+lease because the exact pool key already matches their full identity. Return
+to the pool clears request `ngx.ctx`, bridge, print sink, futures, resources,
+and reset state. Client disconnect during a wait finalizes the request as
 HTTP 499. Graceful master shutdown cancels in-flight host futures. The log
 phase stays synchronous and fail-closed.
 

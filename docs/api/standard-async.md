@@ -251,11 +251,13 @@ sqlite::close(db);
 I/O and SQLite are pd-vm compiler builtins dispatched through its public
 standard composition. HTTP is a pd-vm standard host whose dynamic `map`
 interface is what ngx scripts are written against: the compile catalog leaves
-it dynamic, configuration validates the name and phase, and the pd-vm adapter
-is bound through the standard composition (the per-name path for request VMs,
-and the same composition staged by the timer-host registry for owned-dispatch
-programs). These maps and handles follow the pinned pd-vm public contract;
-ngx-rustscript does not modify RustScript or pd-vm core types.
+it dynamic, configuration validates the name and phase, and prepares the exact
+`Arc<BoundHostProgram>` retained by `PreparedScript`. Configured request and
+timer-owned callback VMs are then created through `PreparedScript::new_vm()`
+and `Vm::new_bound`; no per-name binding runs on request checkout. The
+registry/per-name helper remains available only to explicit test and
+integration fallback paths. These maps and handles follow the pinned pd-vm
+public contract; ngx-rustscript does not modify RustScript or pd-vm core types.
 
 The executable end-to-end acceptance is
 `nginx_async_pipeline_runs_io_http_sqlite_shared_dict_and_json` in

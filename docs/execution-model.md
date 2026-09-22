@@ -85,8 +85,9 @@ ready `poll_reset_for_reuse`, no pending scope reset, `clear_async_bridge`,
 `clear_runtime_print_sink`, and `Vm::is_reusable` all succeed. Failure,
 cancellation, timeout, pending cleanup, reset failure, and capacity overflow
 drop the VM. Every checkout installs a new `NgxAsyncBridge`, print sink,
-request identity, raw request pointer scope, empty `RequestLocalCtx`, and
-runtime policy.
+request identity, raw request pointer scope, and empty `RequestLocalCtx`. A
+reused VM retains its VM-local runtime policy and HTTP lease; the exact pool
+key guarantees that both already match the selected request configuration.
 
 The reusable-request pool retains at most four idle VMs per worker. Its exact
 key is `(exact Arc<PreparedScript> identity, NGINX phase, complete
@@ -94,7 +95,8 @@ StandardHostPolicy, ngx catalog fingerprint, standard catalog fingerprint)`.
 Equal source text in distinct prepared scripts does not share a VM.
 Access/content phases and locations with different HTTP, I/O, or SQLite grants
 remain isolated. Policy is installed from the selected key on every newly
-created VM and remains part of every checkout match.
+created VM and remains part of every checkout match; reuse does not reinstall
+it.
 
 The pinned `pd-vm` (see the crate README) provides `Vm::new_bound`,
 `HostAsyncBridge`, `Vm::set_async_bridge`, `VmStatus::Waiting`,
