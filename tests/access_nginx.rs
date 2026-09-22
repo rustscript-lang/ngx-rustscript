@@ -983,7 +983,8 @@ fn nginx_async_pipeline_runs_io_http_sqlite_shared_dict_and_json() {
     let upstream_port = upstream.local_addr().unwrap().port();
     upstream.set_nonblocking(true).unwrap();
     let upstream_thread = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // The listener also waits through nginx -t and worker startup before the request.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
         let (mut stream, _) = loop {
             match upstream.accept() {
                 Ok(pair) => break pair,
