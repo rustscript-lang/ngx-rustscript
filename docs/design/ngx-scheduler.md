@@ -27,8 +27,8 @@ Pinned `pd-vm` evidence in this file is taken from:
 | Pin | Value |
 | --- | --- |
 | Crate metadata | `Cargo.toml` `rustscript-rev` / `vm` git `rev` |
-| `Cargo.lock` | `pd-vm` `source = "git+https://github.com/rustscript-lang/rustscript?rev=b14f7d2edddbe23e996b953c7cc7ff6de2c0a809#b14f7d2edddbe23e996b953c7cc7ff6de2c0a809"` |
-| Local Cargo git checkout | `$CARGO_HOME/git/checkouts/rustscript-ab116a0775a56744/b14f7d2` |
+| `Cargo.lock` | `pd-vm` `source = "git+https://github.com/rustscript-lang/rustscript?rev=5bd2788b620980e1d2ae6a146e4f7548c68d1882#5bd2788b620980e1d2ae6a146e4f7548c68d1882"` |
+| Local Cargo git checkout | `$CARGO_HOME/git/checkouts/rustscript-ab116a0775a56744/5bd2788` |
 
 Public versus crate-private is taken from that checkout's `src/lib.rs`
 re-exports and item visibility. Do not treat crate-private helpers as
@@ -43,7 +43,7 @@ landed.**
 | Family | Decision | Why |
 | --- | --- | --- |
 | `ngx::thread::{spawn,wait,kill}` | **blocked** | Needs concurrent child frames / independent invocation while the parent VM is live and possibly `Waiting`. Public `Vm::start_callable` / `invoke_callable` / `start_invocation` require a halted VM and a single active invocation. |
-| `ngx::timer::{at,every,pending_count,running_count}` | **landed** (199) | The pinned pd-vm exposes `register_owned_timer` / `installed_timer_counts` / `TIMER_CALLBACK_ARG` and a generic owned dispatch that spawns an isolated callback VM. ngx supplies checked seconds, its own exact names/schemas, a worker-owned fake-request registry, and the Timer-phase capability policy. |
+| `ngx::timer::{at,every,pending_count,running_count}` | **landed** (199) | The pinned pd-vm exposes the bound-aware `register_owned_timer_with_bound_program`, `TimerRegistrationTransaction`, `installed_timer_counts`, and `TIMER_CALLBACK_ARG`. ngx supplies checked seconds, its own exact names/schemas, a worker-owned fake-request registry, and the Timer-phase capability policy. |
 | panic / error / shutdown / reload / limits for those families | **landed / covered** for the timer family; **blocked** for the remaining callable families | The landed timer lifecycle ([Timer](#7-timer-landed-worker-owned-fake-request-timers)) covers callback errors (`every` stays eligible after a logged failure), panic isolation, worker `exit_process` (pending callbacks run once with `premature=true`, live callbacks are cancelled, further `every` rounds stop), reload (new workers start with zero timers), and the `TimerConfig` / fake-request caps; validated by `tests/ngx_timer.rs` and `tests/timer_nginx.rs` together with `tests/ngx_scheduler_contract.rs`. `ngx::thread::*`, `ngx::on_abort`, and `ngx::run_worker_thread` still have no public cancellable child-task handle, no generation-safe detached identity, and no exactly-once child completion protocol that composes with the request eventfd bridge. |
 | `ngx::on_abort` | **blocked** | Needs a single callable, request-abort timing, and cleanup that cannot re-enter the dying request VM with live FFI pointers. |
 | semaphore | **landed** (199) | Worker-owned counter + FIFO waiter queue in a `thread_local` registry, reached through a VM-local `resource<ngx.semaphore>` handle. Waits reuse the generic `HostFuture` + `AccessExec` reservation path and invoke no script callable. That does **not** unlock thread/`on_abort`/`run_worker_thread`. |
@@ -123,7 +123,7 @@ Root execution is `Vm::run` / `Vm::resume`. The module does not use
 `ScriptCallback`, `Store`, `Invocation`, or `Vm::invoke_callable` for
 production request handling.
 
-## Evidence matrix (pinned `pd-vm` b14f7d2edddbe23e996b953c7cc7ff6de2c0a809)
+## Evidence matrix (pinned `pd-vm` 5bd2788b620980e1d2ae6a146e4f7548c68d1882)
 
 Legend: **P** = public (`src/lib.rs` re-export or `pub` item on a public
 type). **C** = crate-private / `pub(super)` / `pub(crate)`.
@@ -188,9 +188,10 @@ what `ngx::timer::{at,every}` use.
 
 | Item | Vis | Path | Notes |
 | --- | --- | --- | --- |
-| `OwnedHostCall::spawn_owned_callable_vm(registry, callable, configure)` | P | `src/vm/host.rs` | Fresh child VM that owns the callable and its captured callable graph: new execution instance, stack, resource table, waiting slot, and module-state store. Reuses the same `Arc<Program>` and standard-surface composition; binds hosts from `registry`; copies no frames, locals, resources, waiting op, callback queue, or request-local host state. Rejects foreign callables and resource-bearing captures, including nested ones. |
-| `register_owned_timer(call, registry, TIMER_CALLBACK_ARG, delay, interval)` | P | `src/builtins/runtime/timer.rs` | Standard-host adapter seam: validates the owned callback's type and program provenance, spawns the isolated VM, hands a `TimerRegistration` to the installed backend, and restores the callback argument on every failure path (error *and* panic). |
-| `TimerBackend` / `TimerConfig` / `TimerRegistration` / `OwnedTimerCallback` | P | same | The backend owns admission and accounting; the callback VM is driven on the embedding's VM thread (`start_reporting` / `poll_reporting` / `cancel`), one round at a time. |
+| `OwnedHostCall::spawn_owned_callable_vm(registry, callable, configure)` | P | `src/vm/host.rs` | Compatibility fallback for an unbound source VM. It creates a fresh child VM and binds hosts from `registry`; configured ngx timer paths do not use this entry. |
+| `OwnedHostCall::spawn_owned_callable_vm_with_bound_program(bound, callable, configure)` | P | `src/vm/host.rs` | Fresh child VM from the exact `Arc<BoundHostProgram>` that installed the source VM. It validates program/artifact identity and calls `Vm::new_bound` without registry-plan lookup or full binding. |
+| `register_owned_timer_with_bound_program(call, bound, TIMER_CALLBACK_ARG, delay, interval)` | P | `src/builtins/runtime/timer.rs` | Bound standard-host adapter seam: validates the owned callback's type and provenance, creates the isolated bound VM, hands a `TimerRegistration` to the backend, and restores the callback argument on every returned-error and panic path. |
+| `TimerBackend` / `TimerRegistrationTransaction` / `TimerConfig` / `TimerRegistration` / `OwnedTimerCallback` | P | same | The backend owns admission and accounting. Strong backends prepare without publication, commit once, and provide nonblocking non-panicking rollback that removes partial publication before returning callback ownership; callback bytecode is driven on the embedding's VM thread. |
 | `installed_timer_counts` / `TIMER_CALLBACK_ARG` | P | same | Adapter-facing count surface and callback argument index. |
 
 `Value` still has no resource variant, and this seam does not make
@@ -265,17 +266,18 @@ policy, and the counts. The full contract is
 Landed mechanism:
 
 - **Owned `TakeOwned` dispatch.** `ngx::timer::{at,every}` take their
-  callback argument and hand it to `register_owned_timer`, which
-  validates the argument's type and program provenance, spawns the
-  callback VM, and restores the argument on every failure path
+  callback argument and hand it to
+  `register_owned_timer_with_bound_program` with the exact artifact from the
+  source VM. The shared helper validates the argument's type and provenance,
+  spawns the callback VM, and restores the argument on every failure path
   (returned error *and* panic), so the guest sees it exactly once.
-- **Fresh isolated callback VM.** `OwnedHostCall::spawn_owned_callable_vm`
-  builds a brand-new execution instance, stack, resource table, waiting
-  slot, and module-state store; it reuses only the immutable
-  configuration (same `Arc<Program>`, same standard-surface composition)
-  and binds the host functions from the registry. It never copies the
-  creating VM's frames, stack, locals, resources, waiting operation,
-  callback queue, or request-local host state.
+- **Fresh isolated bound callback VM.**
+  `OwnedHostCall::spawn_owned_callable_vm_with_bound_program` builds a
+  brand-new execution instance, stack, resource table, waiting slot, and
+  module-state store through `Vm::new_bound`. It reuses the immutable
+  `BoundHostProgram` and performs no registry-plan lookup or full bind. It
+  never copies the creating VM's frames, stack, locals, resources, waiting
+  operation, callback queue, or request-local host state.
 - **Worker-owned backend.** The registration travels as
   `TimerRegistration { delay, interval, max_pending, max_running,
   callback }` to the embedding's `TimerBackend` (ngx: `NgxTimerBackend`);
@@ -493,12 +495,15 @@ callable. Access + content only; Log fails configuration compile.
   callback return value is discarded. Seconds are checked into a `Duration`
   (negative, NaN, infinite, and zero `every` intervals are rejected).
 - The family binds through `ngx_host_registry` (owned entries have no
-  name-binding API): the registry carries every production host binding plus
-  the standard composition, and is handed to `register_owned_timer` so the
-  callback VM shares the same host surface. It is built from an empty registry
-  so a program may import a standard HTTP host (`http::client::request`) next
-  to the timer family: the timer entries resolve from the exact ngx catalog,
-  and the standard import resolves from the staged standard composition.
+  name-binding API): configuration creates one immutable
+  `BoundHostProgram` carrying every production host binding plus the standard
+  composition. The exact artifact reaches
+  `register_owned_timer_with_bound_program`, so the callback VM shares the
+  same host surface without a second full bind. The registry is built from an
+  empty registry so a program may import a standard HTTP host
+  (`http::client::request`) next to the timer family: timer entries resolve
+  from the exact ngx catalog, and the standard import resolves from the staged
+  standard composition.
 - Worker lifetime: one `thread_local` registry holds a bounded pool of fake
   requests (1024). The registry is the same generic
   `request_state::IdentityRegistry` (exact identity lookup, hard capacity) the
@@ -656,15 +661,16 @@ config Program P0 (immutable, shared by Arc) ───────────�
                                                              │
 request VM (AccessExec)  ngx::timer::at(seconds, callback)   │
     │ TakeOwned transfer of the callback                     │
-    │ register_owned_timer:                                  │
+    │ register_owned_timer_with_bound_program:                │
     │   type + program-provenance validation,                │
     │   rollback of the callback argument on any failure     │
-    │   → fresh isolated callback VM (new instance, stack,   │
-    │     resource table, waiting slot, module state)        │
-    │     sharing only Arc<Program> P0 + the host registry   │
-    │   → NgxTimerBackend::register: admission under one     │
-    │     critical section (pending/running caps + 1024      │
-    │     fake-request registry capacity)                    │
+    │     → fresh isolated callback VM via Vm::new_bound       │
+    │       (new instance, stack, resource table, waiting     │
+    │       slot, module state; zero full binds)              │
+    │   → NgxTimerBackend::prepare_registration / commit:     │
+    │     reserve, publish, and schedule under one            │
+    │     transactional boundary; rollback removes partial   │
+    │     publication before callback ownership is released  │
     │   → spawn deadline task                                │
     ├─ request continues / ends  (owns no timer state)       │
     ▼                                                        │

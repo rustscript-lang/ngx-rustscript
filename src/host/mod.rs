@@ -5,10 +5,6 @@
 //! Nested modules below match that layout. There is no handwritten
 //! `HostFunction`, argument decode, or yield-based host re-entry.
 
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-use std::cell::RefCell;
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-use std::rc::Rc;
 use std::sync::Arc;
 
 use vm::{BoundHostProgram, Program, Vm, VmError};
@@ -172,112 +168,18 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         .as_slice()
 }
 
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct BindingMetrics {
-    pub prepared_programs: usize,
-    pub bound_vm_instances: usize,
-    /// Calls through the explicit registry fallback used by test fixtures.
-    ///
-    /// This hook does not observe direct `HostFunctionRegistry` calls made by
-    /// other components, including the pinned RustScript owned-callback path.
-    pub registry_fallback_entries: usize,
-}
-
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-thread_local! {
-    static ACTIVE_BINDING_METRICS: RefCell<Vec<Rc<RefCell<BindingMetrics>>>> =
-        const { RefCell::new(Vec::new()) };
-}
-
-/// Test/integration-only binding observation scope.
-///
-/// Counters belong to this scope and the current worker thread. There is no
-/// process-wide reset or snapshot interval, so concurrent tests cannot alter
-/// one another's observations. The production configured path records only at
-/// the pinned RustScript `bind_program_once` and `Vm::new_bound` boundaries.
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-pub struct BindingMetricsScope {
-    metrics: Rc<RefCell<BindingMetrics>>,
-}
-
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-impl BindingMetricsScope {
-    pub fn enter() -> Self {
-        let metrics = Rc::new(RefCell::new(BindingMetrics::default()));
-        ACTIVE_BINDING_METRICS.with(|active| active.borrow_mut().push(Rc::clone(&metrics)));
-        Self { metrics }
-    }
-
-    pub fn snapshot(&self) -> BindingMetrics {
-        *self.metrics.borrow()
-    }
-}
-
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-impl Drop for BindingMetricsScope {
-    fn drop(&mut self) {
-        ACTIVE_BINDING_METRICS.with(|active| {
-            let mut active = active.borrow_mut();
-            if let Some(index) = active
-                .iter()
-                .rposition(|metrics| Rc::ptr_eq(metrics, &self.metrics))
-            {
-                active.remove(index);
-            }
-        });
-    }
-}
-
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-fn record_binding_metric(update: impl FnOnce(&mut BindingMetrics)) {
-    ACTIVE_BINDING_METRICS.with(|active| {
-        let target = active.borrow().last().cloned();
-        if let Some(target) = target {
-            update(&mut target.borrow_mut());
-        }
-    });
-}
-
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-fn record_prepared_program() {
-    record_binding_metric(|metrics| {
-        metrics.prepared_programs = metrics.prepared_programs.saturating_add(1);
-    });
-}
-
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-fn record_bound_vm_instance() {
-    record_binding_metric(|metrics| {
-        metrics.bound_vm_instances = metrics.bound_vm_instances.saturating_add(1);
-    });
-}
-
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-fn record_registry_fallback_entry() {
-    record_binding_metric(|metrics| {
-        metrics.registry_fallback_entries = metrics.registry_fallback_entries.saturating_add(1);
-    });
-}
-
 /// Prepare immutable production host dispatch for one compiled program.
 pub(crate) fn prepare_bound_program(
     program: Arc<Program>,
 ) -> Result<Arc<BoundHostProgram>, String> {
-    let bound = ngx_host_registry()?
+    ngx_host_registry()?
         .bind_program_once(program)
-        .map_err(|error| format!("prepare bound ngx host program: {error}"))?;
-    #[cfg(any(test, ngx_rustscript_integration_hooks))]
-    record_prepared_program();
-    Ok(bound)
+        .map_err(|error| format!("prepare bound ngx host program: {error}"))
 }
 
 /// Instantiate VM-local state from an immutable bound host program.
 pub(crate) fn instantiate_bound_vm(bound: Arc<BoundHostProgram>) -> Result<Vm, String> {
-    let vm = Vm::new_bound(bound).map_err(|error| format!("instantiate bound ngx VM: {error}"))?;
-    #[cfg(any(test, ngx_rustscript_integration_hooks))]
-    record_bound_vm_instance();
-    Ok(vm)
+    Vm::new_bound(bound).map_err(|error| format!("instantiate bound ngx VM: {error}"))
 }
 
 /// Immutable ABI witness for the compiled ngx catalog.
@@ -295,8 +197,6 @@ pub(crate) fn ngx_host_catalog_abi() -> vm::HostApiFingerprint {
 #[cfg(any(test, ngx_rustscript_integration_hooks))]
 #[doc(hidden)]
 pub fn bind_registry_for_test(vm: &mut Vm) -> Result<(), String> {
-    #[cfg(any(test, ngx_rustscript_integration_hooks))]
-    record_registry_fallback_entry();
     ngx_host_registry()?
         .bind_vm_cached(vm)
         .map_err(|error| format!("bind ngx host registry for test fixture: {error}"))
@@ -726,12 +626,13 @@ mod tests {
         assert!(catalog.function(NGX_NOW_NAME).is_some());
     }
 
+    #[cfg(feature = "bind-mode-test-hooks")]
     #[test]
-    fn binding_metric_scopes_are_isolated_per_test_thread() {
+    fn rustscript_bind_mode_scopes_measure_preparation_per_test_thread() {
         let handles = (0..2)
             .map(|_| {
                 std::thread::spawn(|| {
-                    let scope = BindingMetricsScope::enter();
+                    let scope = vm::BindModeTestScope::enter();
                     let program =
                         std::sync::Arc::new(Program::new(Vec::new(), vec![vm::OpCode::Ret as u8]));
                     crate::phase::PreparedScript::prepare(
@@ -746,9 +647,9 @@ mod tests {
 
         for handle in handles {
             let metrics = handle.join().expect("metric scope thread");
-            assert_eq!(metrics.prepared_programs, 1);
-            assert_eq!(metrics.bound_vm_instances, 0);
-            assert_eq!(metrics.registry_fallback_entries, 0);
+            assert_eq!(metrics.bound_program_preparations, 1);
+            assert_eq!(metrics.bound_vm_instantiations, 0);
+            assert_eq!(metrics.full_bind_installs, 0);
         }
     }
 

@@ -20,7 +20,9 @@ use ngx::core::Status;
 use ngx::ffi::NGX_LOG_ERR;
 use ngx::http::{HTTPStatus, HttpModule, HttpModuleLocationConf, HttpRequestHandler, Request};
 use ngx::ngx_log_error;
-use vm::{Program, VmError, VmStatus};
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+use vm::Program;
+use vm::{VmError, VmStatus};
 
 use crate::Module;
 use crate::config::LocationConf;
@@ -28,7 +30,9 @@ use crate::host::{
     AllowedOps, NgxPhase, RequestLocalCtx, with_request_scope, with_vm_request_scope,
 };
 use crate::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
-use crate::phase::{PhaseSlot, PreparedScript, ScriptExecutionMetadata};
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+use crate::phase::ScriptExecutionMetadata;
+use crate::phase::{PhaseSlot, PreparedScript};
 use crate::request_state::{AccessExec, AccessStatus, IdentityRegistry, ReadyEffect};
 use crate::vm_pool;
 

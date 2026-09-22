@@ -3,18 +3,18 @@
 // Worker-owned scheduling, fake requests, callback VMs, and shutdown live in
 // `crate::timer`. These hosts are thin adapters over pd-vm's public timer
 // surface: they validate the seconds argument into a checked `Duration`, keep
-// the family's own exact name and schema, and hand the owned call to
-// `register_owned_timer`, which performs the callback type/provenance
-// validation, the isolated callback VM, the admission limits, the backend
-// registration, and the transactional rollback. No timer state is stored here.
+// the family's own exact name and schema, and hand the owned call to the
+// bound-aware RustScript timer registration API. No timer state is stored
+// here.
 
 use std::time::Duration;
 
 use vm::{
-    CallOutcome, CallReturn, HostAdapterDescriptor, HostBindingDescriptor, HostBindingKind,
-    HostFunctionDescriptor, HostFunctionRegistry, HostModuleDescriptor, HostOwnedAdapterFactory,
-    HostOwnedFunction, OwnedHostCall, OwnedHostContext, TIMER_CALLBACK_ARG, Value, Vm, VmError,
-    VmResult, installed_timer_counts, register_owned_timer,
+    BoundHostProgram, CallOutcome, CallReturn, HostAdapterDescriptor, HostBindingDescriptor,
+    HostBindingKind, HostFunctionDescriptor, HostFunctionRegistry, HostModuleDescriptor,
+    HostOwnedAdapterFactory, HostOwnedFunction, OwnedHostCall, OwnedHostContext,
+    TIMER_CALLBACK_ARG, Value, Vm, VmError, VmResult, installed_timer_counts, register_owned_timer,
+    register_owned_timer_with_bound_program,
 };
 
 use crate::host::catalog::{NGX_TIMER_AT_NAME, NGX_TIMER_EVERY_NAME};
@@ -22,6 +22,7 @@ use crate::host::catalog::{NGX_TIMER_AT_NAME, NGX_TIMER_EVERY_NAME};
 /// One `ngx::timer::{at,every}` registration adapter.
 struct TimerRegister {
     registry: HostFunctionRegistry,
+    bound_program: Option<std::sync::Arc<BoundHostProgram>>,
     name: &'static str,
     repeating: bool,
 }
@@ -32,13 +33,27 @@ impl HostOwnedFunction for TimerRegister {
             VmError::HostError(format!("{} is missing its seconds argument", self.name))
         })?;
         let delay = checked_seconds(seconds, self.name, self.repeating)?;
-        register_owned_timer(
-            call,
-            &self.registry,
-            TIMER_CALLBACK_ARG,
-            delay,
-            self.repeating.then_some(delay),
-        )
+        match self.bound_program.as_ref() {
+            Some(bound_program) => register_owned_timer_with_bound_program(
+                call,
+                std::sync::Arc::clone(bound_program),
+                TIMER_CALLBACK_ARG,
+                delay,
+                self.repeating.then_some(delay),
+            ),
+            None => {
+                // Unbound fixture VMs retain the public compatibility seam;
+                // configured PreparedScript VMs always carry Some(bound_program)
+                // and use the strong bound-aware transaction above.
+                register_owned_timer(
+                    call,
+                    &self.registry,
+                    TIMER_CALLBACK_ARG,
+                    delay,
+                    self.repeating.then_some(delay),
+                )
+            }
+        }
     }
 }
 
@@ -126,6 +141,7 @@ impl HostOwnedAdapterFactory for TimerRegisterFactory {
     fn create(&self, context: OwnedHostContext<'_>) -> Box<dyn HostOwnedFunction> {
         Box::new(TimerRegister {
             registry: context.registry().clone(),
+            bound_program: context.bound_program(),
             name: self.name,
             repeating: self.repeating,
         })

@@ -59,6 +59,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -127,8 +128,10 @@ struct TimerEntry {
     /// registry and never match a live entry again.
     identity: RequestIdentity,
     callback: OwnedTimerCallback,
+    delay: Duration,
     /// `Some` for `ngx::timer::every`.
     interval: Option<Duration>,
+    max_pending: usize,
     max_running: usize,
     phase: RoundPhase,
     /// True when the deadline fired while no running slot was free.
@@ -153,6 +156,10 @@ struct WorkerTimers {
     /// Exact-generation registration map with a hard capacity: the same
     /// bounded registry the request path uses for `Waiting` identities.
     entries: IdentityRegistry<Rc<RefCell<TimerEntry>>>,
+    /// Registrations that have passed backend preparation but are not yet
+    /// published. They consume pending and worker capacity until commit or
+    /// rollback completes.
+    reservations: usize,
     closed: bool,
     /// Live callback rounds, including callbacks suspended on async host work.
     running: usize,
@@ -185,6 +192,7 @@ pub(crate) fn install_worker_timers(handle: Handle, sender: CompletionSender) {
             next_generation: 1,
             next_fake_request_id: 0,
             entries: IdentityRegistry::with_capacity(MAX_LIVE_TIMER_REQUESTS),
+            reservations: 0,
             closed: false,
             running: 0,
             callback_errors: 0,
@@ -278,6 +286,7 @@ pub fn shutdown_current() {
         };
         state.closed = true;
         state.running = 0;
+        state.reservations = 0;
         let drained: Vec<Rc<RefCell<TimerEntry>>> = state.entries.iter_values().cloned().collect();
         state.entries.clear();
         drained
@@ -318,12 +327,6 @@ fn with_timer_scope<R>(identity: RequestIdentity, f: impl FnOnce() -> R) -> R {
 }
 
 /// Installs timer-local state on a VM created from a prepared program.
-///
-/// The pinned RustScript owned-callback API still performs callback VM binding
-/// through its internal registry path. Closing that callback handoff requires
-/// a newer upstream API that accepts `Arc<BoundHostProgram>`; this ngx scope
-/// leaves the dependency explicit and does not claim callback bind closure.
-/// No host descriptors or dispatch tables are resolved here.
 pub fn install_prepared_timer_vm(
     vm: &mut Vm,
     policy: &StandardHostPolicy,
@@ -589,30 +592,86 @@ fn spawn_deadline_with(scheduler: &TimerScheduler, identity: RequestIdentity, de
 /// `pending_count` / `running_count`.
 pub struct NgxTimerBackend;
 
+const TIMER_TXN_RESERVED: u8 = 0;
+const TIMER_TXN_PUBLISHED: u8 = 1;
+const TIMER_TXN_FINISHED: u8 = 2;
+
+impl TimerEntry {
+    fn into_registration(self) -> TimerRegistration {
+        TimerRegistration {
+            delay: self.delay,
+            interval: self.interval,
+            max_pending: self.max_pending,
+            max_running: self.max_running,
+            callback: self.callback,
+        }
+    }
+}
+
+fn release_timer_reservation() {
+    TIMERS.with(|slot| {
+        let Ok(mut guard) = slot.try_borrow_mut() else {
+            return;
+        };
+        if let Some(state) = guard.as_mut() {
+            state.reservations = state.reservations.saturating_sub(1);
+        }
+    });
+}
+
+/// Removes a published entry while the worker registry is borrowed, then
+/// moves its callback ownership after that borrow has ended. The callback VM
+/// is consequently never destroyed under the backend's registry borrow.
+fn remove_published_timer(identity: RequestIdentity) -> Option<TimerRegistration> {
+    let removed = TIMERS.with(|slot| {
+        let Ok(mut guard) = slot.try_borrow_mut() else {
+            return None;
+        };
+        let state = guard.as_mut()?;
+        let entry = state.entries.remove(identity)?;
+        if entry
+            .try_borrow()
+            .is_ok_and(|entry| entry.phase == RoundPhase::Live)
+        {
+            state.running = state.running.saturating_sub(1);
+        }
+        Some(entry)
+    })?;
+    match Rc::try_unwrap(removed) {
+        Ok(cell) => Some(cell.into_inner().into_registration()),
+        Err(remaining) => {
+            drop(remaining);
+            None
+        }
+    }
+}
+
 impl TimerBackend for NgxTimerBackend {
     fn register(&self, registration: TimerRegistration) -> VmResult<()> {
-        let TimerRegistration {
-            delay,
-            interval,
-            max_pending,
-            max_running,
-            mut callback,
-        } = registration;
-        let Some(scheduler) = scheduler() else {
+        let metadata = registration.metadata();
+        let mut transaction = self.prepare_registration(metadata)?;
+        transaction.commit(registration)
+    }
+
+    fn prepare_registration<'a>(
+        &'a self,
+        metadata: vm::TimerRegistrationMetadata,
+    ) -> VmResult<vm::TimerRegistrationTransaction<'a>> {
+        if metadata.interval.is_some_and(|interval| interval.is_zero()) {
             return Err(VmError::HostError(
-                "ngx.timer: worker timer runtime is not started".to_string(),
+                "ngx.timer: interval must be positive".to_string(),
             ));
-        };
-        // The callback VM can suspend on async host work: install its own
-        // bridge before the first round, never the creating request's.
-        callback.set_async_bridge(Box::new(NgxAsyncBridge::new(scheduler.handle.clone())))?;
+        }
+        let scheduler = scheduler().ok_or_else(|| {
+            VmError::HostError("ngx.timer: worker timer runtime is not started".to_string())
+        })?;
         let identity = TIMERS.with(|slot| {
-            let mut guard = slot.borrow_mut();
-            let Some(state) = guard.as_mut() else {
-                return Err(VmError::HostError(
-                    "ngx.timer: worker timer runtime is not started".to_string(),
-                ));
-            };
+            let mut guard = slot.try_borrow_mut().map_err(|_| {
+                VmError::HostError("ngx.timer: worker timer backend is busy".to_string())
+            })?;
+            let state = guard.as_mut().ok_or_else(|| {
+                VmError::HostError("ngx.timer: worker timer runtime is not started".to_string())
+            })?;
             if state.closed {
                 return Err(VmError::HostError(
                     "ngx.timer: worker is shutting down".to_string(),
@@ -622,21 +681,22 @@ impl TimerBackend for NgxTimerBackend {
                 .entries
                 .iter_values()
                 .filter(|entry| {
-                    // An executing callback's own entry is mutably borrowed by
-                    // the dispatcher and is Live, so it never counts as pending.
                     entry
                         .try_borrow()
                         .is_ok_and(|entry| entry.phase == RoundPhase::Pending)
                 })
                 .count();
-            if pending >= max_pending {
+            if pending.saturating_add(state.reservations) >= metadata.max_pending {
                 return Err(VmError::HostError(format!(
-                    "ngx.timer: pending timer limit reached ({max_pending})"
+                    "ngx.timer: pending timer limit reached ({})",
+                    metadata.max_pending
                 )));
             }
-            // One ordinary identity per registration: the fake request id is
-            // worker-unique, never reused, and tagged out of the real
-            // request-id space.
+            if state.entries.len().saturating_add(state.reservations) >= MAX_LIVE_TIMER_REQUESTS {
+                return Err(VmError::HostError(format!(
+                    "ngx.timer: worker timer limit reached ({MAX_LIVE_TIMER_REQUESTS})"
+                )));
+            }
             let untagged = state.next_fake_request_id;
             if untagged >= MAX_FAKE_REQUEST_IDS {
                 return Err(VmError::HostError(
@@ -647,28 +707,96 @@ impl TimerBackend for NgxTimerBackend {
             let request_id = FAKE_REQUEST_ID_TAG | untagged;
             let generation = state.next_generation;
             advance_generation(&mut state.next_generation);
-            let identity = RequestIdentity::new(generation, request_id);
-            let entry = Rc::new(RefCell::new(TimerEntry {
-                id: request_id,
-                identity,
-                callback,
-                interval,
-                max_running,
-                phase: RoundPhase::Pending,
-                due: false,
-            }));
-            match state.entries.insert_new(identity, Rc::clone(&entry)) {
-                Ok(()) => Ok(identity),
-                Err(RegistryError::Full) => Err(VmError::HostError(format!(
-                    "ngx.timer: worker timer limit reached ({MAX_LIVE_TIMER_REQUESTS})"
-                ))),
-                Err(RegistryError::Duplicate) => Err(VmError::HostError(
-                    "ngx.timer: worker timer identity was already registered".to_string(),
-                )),
-            }
+            state.reservations += 1;
+            Ok(RequestIdentity::new(generation, request_id))
         })?;
-        spawn_deadline_with(&scheduler, identity, delay);
-        Ok(())
+        let transaction_state = Arc::new(AtomicU8::new(TIMER_TXN_RESERVED));
+        let commit_state = Arc::clone(&transaction_state);
+        let rollback_state = Arc::clone(&transaction_state);
+        Ok(vm::TimerRegistrationTransaction::new(
+            move |mut registration| {
+                // The callback VM can suspend on async host work: install its
+                // own bridge before the first round, never the source VM's.
+                registration
+                    .callback
+                    .set_async_bridge(Box::new(NgxAsyncBridge::new(scheduler.handle.clone())))?;
+                let TimerRegistration {
+                    delay,
+                    interval,
+                    max_pending,
+                    max_running,
+                    callback,
+                } = registration;
+                let result = TIMERS.with(|slot| {
+                    let mut guard = slot.try_borrow_mut().map_err(|_| {
+                        VmError::HostError("ngx.timer: worker timer backend is busy".to_string())
+                    })?;
+                    let state = guard.as_mut().ok_or_else(|| {
+                        VmError::HostError(
+                            "ngx.timer: worker timer runtime is not started".to_string(),
+                        )
+                    })?;
+                    if state.closed {
+                        return Err(VmError::HostError(
+                            "ngx.timer: worker is shutting down".to_string(),
+                        ));
+                    }
+                    let entry = Rc::new(RefCell::new(TimerEntry {
+                        id: identity.request_id(),
+                        identity,
+                        callback,
+                        delay,
+                        interval,
+                        max_pending,
+                        max_running,
+                        phase: RoundPhase::Pending,
+                        due: false,
+                    }));
+                    match state.entries.insert_new(identity, entry) {
+                        Ok(()) => {
+                            state.reservations = state.reservations.saturating_sub(1);
+                            Ok(())
+                        }
+                        Err(RegistryError::Full) => Err(VmError::HostError(format!(
+                            "ngx.timer: worker timer limit reached ({MAX_LIVE_TIMER_REQUESTS})"
+                        ))),
+                        Err(RegistryError::Duplicate) => Err(VmError::HostError(
+                            "ngx.timer: worker timer identity was already registered".to_string(),
+                        )),
+                    }
+                });
+                result?;
+                commit_state.store(TIMER_TXN_PUBLISHED, Ordering::Release);
+                spawn_deadline_with(&scheduler, identity, delay);
+                Ok(())
+            },
+            move || match rollback_state.compare_exchange(
+                TIMER_TXN_RESERVED,
+                TIMER_TXN_FINISHED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    release_timer_reservation();
+                    None
+                }
+                Err(TIMER_TXN_PUBLISHED) => {
+                    if rollback_state
+                        .compare_exchange(
+                            TIMER_TXN_PUBLISHED,
+                            TIMER_TXN_FINISHED,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_err()
+                    {
+                        return None;
+                    }
+                    remove_published_timer(identity)
+                }
+                Err(TIMER_TXN_FINISHED) | Err(_) => None,
+            },
+        ))
     }
 
     fn pending_count(&self) -> usize {

@@ -203,9 +203,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    #[cfg(feature = "bind-mode-test-hooks")]
     #[test]
     fn prepared_script_instantiates_through_the_bound_vm_hook() {
-        let scope = crate::host::BindingMetricsScope::enter();
+        let scope = vm::BindModeTestScope::enter();
         let program = Arc::new(Program::new(Vec::new(), vec![vm::OpCode::Ret as u8]));
         let prepared = PreparedScript::prepare(program, ScriptExecutionMetadata::default())
             .expect("prepare empty program");
@@ -213,8 +214,8 @@ mod tests {
         prepared.new_vm().expect("instantiate bound VM");
 
         let metrics = scope.snapshot();
-        assert_eq!(metrics.prepared_programs, 1);
-        assert_eq!(metrics.bound_vm_instances, 1);
-        assert_eq!(metrics.registry_fallback_entries, 0);
+        assert_eq!(metrics.bound_program_preparations, 1);
+        assert_eq!(metrics.bound_vm_instantiations, 1);
+        assert_eq!(metrics.full_bind_installs, 0);
     }
 }

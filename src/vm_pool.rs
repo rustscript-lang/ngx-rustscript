@@ -1,6 +1,6 @@
 //! Worker-thread-local synchronous VM pool.
 //!
-//! pd-vm at `b14f7d2edddbe23e996b953c7cc7ff6de2c0a809` exposes the bound
+//! pd-vm at `5bd2788b620980e1d2ae6a146e4f7548c68d1882` exposes the bound
 //! constructor through [`PreparedScript::new_vm`], which delegates to
 //! `Vm::new_bound`. This pool therefore receives a configuration-time
 //! [`PreparedScript`] and never prepares or fully binds on checkout.
@@ -234,10 +234,11 @@ mod tests {
         assert!(idle_count() <= MAX_IDLE_VMS);
     }
 
+    #[cfg(feature = "bind-mode-test-hooks")]
     #[test]
     fn prepared_pool_checkout_reuse_and_capacity_use_bound_construction() {
         reset_test_state();
-        let scope = crate::host::BindingMetricsScope::enter();
+        let scope = vm::BindModeTestScope::enter();
         let program = compile("let x = 1 + 2;\n");
         let prepared = (0..=MAX_IDLE_VMS)
             .map(|_| {
@@ -272,16 +273,20 @@ mod tests {
         assert_eq!(created_count(), MAX_IDLE_VMS + 2);
 
         let metrics = scope.snapshot();
-        assert_eq!(metrics.prepared_programs, MAX_IDLE_VMS + 1);
-        assert_eq!(metrics.bound_vm_instances, MAX_IDLE_VMS + 2);
-        assert_eq!(metrics.registry_fallback_entries, 0);
+        assert_eq!(
+            metrics.bound_program_preparations,
+            (MAX_IDLE_VMS + 1) as u64
+        );
+        assert_eq!(metrics.bound_vm_instantiations, (MAX_IDLE_VMS + 2) as u64);
+        assert_eq!(metrics.full_bind_installs, 0);
         assert_eq!(idle_count(), MAX_IDLE_VMS);
     }
 
+    #[cfg(feature = "bind-mode-test-hooks")]
     #[test]
     fn distinct_preparations_sharing_one_program_never_share_an_idle_vm() {
         reset_test_state();
-        let scope = crate::host::BindingMetricsScope::enter();
+        let scope = vm::BindModeTestScope::enter();
         let program = compile("let x = 1 + 2;\n");
         let first =
             PreparedScript::prepare(Arc::clone(&program), ScriptExecutionMetadata::default())
@@ -304,9 +309,9 @@ mod tests {
         );
         assert_eq!(idle_count(), 2);
         let metrics = scope.snapshot();
-        assert_eq!(metrics.prepared_programs, 2);
-        assert_eq!(metrics.bound_vm_instances, 2);
-        assert_eq!(metrics.registry_fallback_entries, 0);
+        assert_eq!(metrics.bound_program_preparations, 2);
+        assert_eq!(metrics.bound_vm_instantiations, 2);
+        assert_eq!(metrics.full_bind_installs, 0);
     }
 
     #[test]

@@ -25,13 +25,17 @@ use ngx::ngx_log_error;
 use tokio::runtime::{Handle, Runtime};
 #[cfg(any(test, ngx_rustscript_integration_hooks))]
 use vm::HttpConfig;
-use vm::{HttpClientLease, HttpWorkerResources, HttpWorkerShutdown, Program, Vm};
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+use vm::Program;
+use vm::{HttpClientLease, HttpWorkerResources, HttpWorkerShutdown, Vm};
 
 use crate::notify::{
     CompletionPermit, CompletionSender, DEFAULT_MAX_IN_FLIGHT, NotifyBridge, NotifyError,
     RequestIdentity, eventfd_waker,
 };
-use crate::phase::{PreparedScript, ScriptExecutionMetadata};
+use crate::phase::PreparedScript;
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+use crate::phase::ScriptExecutionMetadata;
 use crate::request_state::{AccessExec, AsyncWait, ReusableVmKey, SubmitError};
 
 thread_local! {

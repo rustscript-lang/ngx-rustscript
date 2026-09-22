@@ -267,6 +267,25 @@ fn at_registers_one_fake_request_with_an_ordinary_identity() {
     assert_eq!(live_timer_count(), 0, "shutdown releases the fake request");
 }
 
+#[cfg(feature = "bind-mode-test-hooks")]
+#[test]
+fn configured_timer_path_uses_one_preparation_and_two_bound_vms() {
+    shutdown_current();
+    let scope = vm::BindModeTestScope::enter();
+    let mut worker = WorkerRuntime::start().expect("worker runtime");
+    run_script("use ngx;\nngx::timer::at(10, |premature| null);\n", &worker)
+        .expect("timer registration");
+
+    let metrics = scope.snapshot();
+    assert_eq!(metrics.bound_program_preparations, 1);
+    assert_eq!(metrics.bound_vm_instantiations, 2);
+    assert_eq!(metrics.full_bind_installs, 0);
+    assert_eq!(live_timer_count(), 1);
+
+    shutdown_current();
+    worker.shutdown();
+}
+
 #[test]
 fn deadline_fires_the_callback_once_with_premature_false() {
     let mut worker = WorkerRuntime::start().expect("worker runtime");
