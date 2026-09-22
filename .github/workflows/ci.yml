@@ -99,12 +99,16 @@ jobs:
         run: cargo check --locked
 
       - name: Run Clippy
+        env:
+          NGX_RUSTSCRIPT_INTEGRATION_HOOKS: "1"
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Build debug module
         run: cargo build --locked --lib
 
       - name: Run complete test suite
+        env:
+          NGX_RUSTSCRIPT_INTEGRATION_HOOKS: "1"
         run: cargo test --locked --all-targets -- --test-threads=1
 
       - name: Build release module
