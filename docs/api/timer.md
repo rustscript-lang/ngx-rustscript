@@ -23,9 +23,11 @@ created it; the callback runs on a timer-owned VM.
 Binding and lifetime:
 
 - The two registration hosts consume their callback through
-  `HostParamPassing::TakeOwned`; they are the only catalogued callables. A
-  program that imports a timer host is bound from the timer-host registry
-  (`ngx_host_registry`), and callback VMs spawn from that same registry.
+  `HostParamPassing::TakeOwned`; they are the only catalogued callables.
+  Configuration prepares a `BoundHostProgram` using `ngx_host_registry`.
+  Configured timer roots pass that exact artifact to owned dispatch; callback
+  VMs use `Vm::new_bound` without a request-time registry bind. The
+  registry-only adapter remains an explicit test/integration fallback.
 - Every accepted registration owns one ordinary `RequestIdentity` and one fake
   request in a bounded worker pool (1024, the capacity of the shared
   `request_state::IdentityRegistry`). The deadline task holds only a
