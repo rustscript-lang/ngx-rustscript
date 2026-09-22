@@ -279,6 +279,10 @@ pub struct NotifyBridge {
     fd: Arc<Mutex<FdInner>>,
     fd_state: FdState,
     stopped: bool,
+    #[cfg(test)]
+    // Keep eventfd-bearing unit tests out of process-wide fd observations and
+    // NGINX-global mutation tests running in parallel.
+    _global_test_guard: crate::test_support::GlobalNginxTestGuard,
 }
 
 impl NotifyBridge {
@@ -291,6 +295,8 @@ impl NotifyBridge {
     }
 
     pub fn with_io(io: Arc<dyn EventFdIo>, cap: usize) -> Result<Self, NotifyError> {
+        #[cfg(test)]
+        let global_test_guard = crate::test_support::global_ngx_test_guard();
         let flags = libc::EFD_NONBLOCK | libc::EFD_CLOEXEC;
         let fd = io.eventfd(0, flags).map_err(NotifyError::EventFdCreate)?;
         let accepting = Arc::new(AtomicBool::new(true));
@@ -318,6 +324,8 @@ impl NotifyBridge {
             fd: fd_inner,
             fd_state: FdState::Local,
             stopped: false,
+            #[cfg(test)]
+            _global_test_guard: global_test_guard,
         })
     }
 

@@ -7,8 +7,6 @@
 //! [`crate::notify::RequestIdentity`]. They never hold NGINX request/pool/VM
 //! pointers and never call `ngx_post_event`.
 
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-use std::cell::Cell;
 use std::cell::RefCell;
 #[cfg(any(test, ngx_rustscript_integration_hooks))]
 use std::collections::HashSet;
@@ -191,9 +189,9 @@ pub struct WorkerRuntime {
     reusable_request_vms: RefCell<ReusableRequestVmPool>,
     http: RefCell<Option<HttpWorkerResources>>,
     #[cfg(any(test, ngx_rustscript_integration_hooks))]
-    http_configs: RefCell<HashSet<HttpConfig>>,
-    #[cfg(any(test, ngx_rustscript_integration_hooks))]
-    http_client_builds: Cell<usize>,
+    /// Test/integration observation of distinct full configs passed to
+    /// `HttpWorkerResources::client_for`; this does not count client builds.
+    observed_http_configs: RefCell<HashSet<HttpConfig>>,
     stopped: bool,
 }
 
@@ -224,9 +222,7 @@ impl WorkerRuntime {
             // historical local limit through HttpHostExt.
             http: RefCell::new(Some(HttpWorkerResources::with_max_in_flight(usize::MAX))),
             #[cfg(any(test, ngx_rustscript_integration_hooks))]
-            http_configs: RefCell::new(HashSet::new()),
-            #[cfg(any(test, ngx_rustscript_integration_hooks))]
-            http_client_builds: Cell::new(0),
+            observed_http_configs: RefCell::new(HashSet::new()),
             stopped: false,
         })
     }
@@ -392,16 +388,18 @@ impl WorkerRuntime {
                 .map_err(|err| err.to_string())?
         };
         #[cfg(any(test, ngx_rustscript_integration_hooks))]
-        if self.http_configs.borrow_mut().insert(config) {
-            self.http_client_builds
-                .set(self.http_client_builds.get().saturating_add(1));
-        }
+        self.observed_http_configs.borrow_mut().insert(config);
         Ok(lease)
     }
 
     #[cfg(test)]
-    fn http_client_build_count(&self) -> usize {
-        self.http_client_builds.get()
+    /// Count distinct full HTTP configs observed by `client_for`.
+    ///
+    /// This is configuration-observation evidence only. It does not count
+    /// Hyper client construction; the keep-alive fixtures independently prove
+    /// connection reuse where that behavior is asserted.
+    fn observed_http_config_count(&self) -> usize {
+        self.observed_http_configs.borrow().len()
     }
 
     pub(crate) fn bind_configured_phase_exec_with_policy(
@@ -452,7 +450,7 @@ impl WorkerRuntime {
             HttpShutdownPoll::NotOwned
         };
         #[cfg(any(test, ngx_rustscript_integration_hooks))]
-        self.http_configs.get_mut().clear();
+        self.observed_http_configs.get_mut().clear();
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_timeout(Duration::from_secs(5));
         }
@@ -481,7 +479,7 @@ impl WorkerRuntime {
             drop(http);
         }
         #[cfg(any(test, ngx_rustscript_integration_hooks))]
-        self.http_configs.get_mut().clear();
+        self.observed_http_configs.get_mut().clear();
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
@@ -744,6 +742,28 @@ mod tests {
             .filter_map(|entry| std::fs::read_link(entry.path()).ok())
             .filter(|target| target.to_string_lossy() == "anon_inode:[eventfd]")
             .count()
+    }
+
+    struct NgxProcessRestore {
+        previous: ngx_uint_t,
+    }
+
+    impl NgxProcessRestore {
+        fn set(process: ngx_uint_t) -> Self {
+            let previous = unsafe { ngx::ffi::ngx_process };
+            unsafe {
+                std::ptr::addr_of_mut!(ngx::ffi::ngx_process).write(process);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for NgxProcessRestore {
+        fn drop(&mut self) {
+            unsafe {
+                std::ptr::addr_of_mut!(ngx::ffi::ngx_process).write(self.previous);
+            }
+        }
     }
 
     fn sleep_once(ms: i64) -> Arc<Program> {
@@ -1013,20 +1033,24 @@ mod tests {
 
     #[test]
     fn partial_worker_init_failure_rolls_back_through_drop_and_allows_replacement() {
+        let _global_test_guard = crate::test_support::global_ngx_test_guard();
         crate::host::ngx_host_registry().expect("warm host registry before timing rollback");
         let mut warmup = WorkerRuntime::start().expect("warm worker runtime");
         warmup.shutdown();
+        drop(warmup);
         let before_eventfds = eventfd_count();
         let mut cycle = unsafe { std::mem::zeroed::<nginx_sys::ngx_cycle_t>() };
         let previous_process = unsafe { ngx::ffi::ngx_process };
-        unsafe {
-            std::ptr::addr_of_mut!(ngx::ffi::ngx_process).write(ngx::ffi::NGX_PROCESS_WORKER as _);
-        }
+        let process_restore = NgxProcessRestore::set(ngx::ffi::NGX_PROCESS_WORKER as _);
         let started = Instant::now();
         let result = unsafe { init_worker(std::ptr::addr_of_mut!(cycle)) };
-        unsafe {
-            std::ptr::addr_of_mut!(ngx::ffi::ngx_process).write(previous_process);
-        }
+        let after_eventfds = eventfd_count();
+        drop(process_restore);
+        assert_eq!(
+            unsafe { ngx::ffi::ngx_process },
+            previous_process,
+            "the process-global test override must be restored"
+        );
 
         assert_eq!(
             result,
@@ -1039,8 +1063,7 @@ mod tests {
         );
         assert!(!worker_is_active(), "failed init must not publish a worker");
         assert_eq!(
-            eventfd_count(),
-            before_eventfds,
+            after_eventfds, before_eventfds,
             "Drop rollback must close the eventfd notifier"
         );
 
@@ -1050,9 +1073,10 @@ mod tests {
         replacement
             .http_lease_for(&policy)
             .expect("replacement worker HTTP owner must admit a lease");
-        assert_eq!(replacement.http_client_build_count(), 1);
+        assert_eq!(replacement.observed_http_config_count(), 1);
         let outcome = replacement.shutdown();
         assert_eq!(outcome.http, HttpShutdownPoll::Ready);
+        drop(replacement);
     }
 
     #[test]
@@ -1810,7 +1834,7 @@ if summary["items"] != 4 {{ 1 / 0; }}
     }
 
     #[test]
-    fn one_worker_http_config_shares_client_across_vm_reuse_and_eviction() {
+    fn one_worker_http_client_reuses_connection_across_vm_reuse_and_eviction() {
         let (port, accepted, server) = start_keep_alive_server(10);
         let mut worker = WorkerRuntime::start().unwrap();
         let policy = http_policy(port);
@@ -1826,7 +1850,7 @@ if summary["items"] != 4 {{ 1 / 0; }}
             );
         }
         assert_eq!(worker.reusable_request_vm_created_count(), 1);
-        assert_eq!(worker.http_client_build_count(), 1);
+        assert_eq!(worker.observed_http_config_count(), 1);
 
         for (offset, marker) in ["a", "b", "c", "d", "e"].into_iter().enumerate() {
             run_reusable_http(
@@ -1842,18 +1866,22 @@ if summary["items"] != 4 {{ 1 / 0; }}
             super::MAX_IDLE_REUSABLE_REQUEST_VMS
         );
         assert_eq!(
-            worker.http_client_build_count(),
+            worker.observed_http_config_count(),
             1,
-            "VM pool cap/eviction must not build another HTTP client"
+            "VM pool cap/eviction must keep one full HTTP config observation"
         );
 
         worker.shutdown();
-        assert_eq!(accepted.recv_timeout(Duration::from_secs(3)).unwrap(), 1);
+        assert_eq!(
+            accepted.recv_timeout(Duration::from_secs(3)).unwrap(),
+            1,
+            "keep-alive fixture must observe one TCP connection across all requests"
+        );
         server.join().expect("keep-alive server");
     }
 
     #[test]
-    fn different_http_configs_stay_isolated() {
+    fn different_http_configs_are_observed_separately() {
         let (port, server) = start_http_server(2);
         let mut worker = WorkerRuntime::start().unwrap();
         let first = http_policy(port);
@@ -1863,7 +1891,11 @@ if summary["items"] != 4 {{ 1 / 0; }}
 
         run_reusable_http(&mut worker, Arc::clone(&program), 1, first);
         run_reusable_http(&mut worker, program, 2, second);
-        assert_eq!(worker.http_client_build_count(), 2);
+        assert_eq!(
+            worker.observed_http_config_count(),
+            2,
+            "distinct full HTTP configs must be observed separately"
+        );
         assert_eq!(worker.reusable_request_vm_created_count(), 2);
 
         worker.shutdown();
@@ -1871,7 +1903,7 @@ if summary["items"] != 4 {{ 1 / 0; }}
     }
 
     #[test]
-    fn vm_reset_and_drop_retain_worker_http_client_ownership() {
+    fn vm_reset_and_drop_retain_worker_http_lease_access() {
         let (port, server) = start_http_server(8);
         let mut worker = WorkerRuntime::start().unwrap();
         let policy = http_policy(port);
@@ -1893,7 +1925,7 @@ let boom = 1 / 0;
             run_reusable_http(&mut worker, Arc::clone(&ok), request_id, policy.clone());
         }
         assert_eq!(worker.reusable_request_vm_created_count(), 1);
-        assert_eq!(worker.http_client_build_count(), 1);
+        assert_eq!(worker.observed_http_config_count(), 1);
 
         for request_id in 3..=8 {
             let mut exec = worker
@@ -1910,7 +1942,7 @@ let boom = 1 / 0;
             );
             assert!(exec.cleanup_wait(&worker).is_none());
         }
-        assert_eq!(worker.http_client_build_count(), 1);
+        assert_eq!(worker.observed_http_config_count(), 1);
         assert_eq!(worker.reusable_request_vm_idle_count(), 1);
 
         worker.shutdown();
@@ -1945,7 +1977,7 @@ let boom = 1 / 0;
             execs.push(exec);
         }
 
-        assert_eq!(worker.http_client_build_count(), 1);
+        assert_eq!(worker.observed_http_config_count(), 1);
         assert_eq!(
             drive_held_http_execs_until_ready(&mut worker, &mut execs, &mut registry, &ready),
             VMS,
@@ -1977,7 +2009,7 @@ let boom = 1 / 0;
             1,
             policy.clone(),
         );
-        assert_eq!(worker.http_client_build_count(), 1);
+        assert_eq!(worker.observed_http_config_count(), 1);
 
         let sse = sse_http_program(http_port);
         assert!(!crate::config::program_can_reuse_request_vm(&sse));
@@ -1991,7 +2023,7 @@ let boom = 1 / 0;
             exec.last_error()
         );
         assert!(exec.cleanup_wait(&worker).is_none());
-        assert_eq!(worker.http_client_build_count(), 1);
+        assert_eq!(worker.observed_http_config_count(), 1);
         assert_eq!(worker.reusable_request_vm_created_count(), 1);
 
         worker.shutdown();
@@ -2146,25 +2178,25 @@ let boom = 1 / 0;
     }
 
     #[test]
-    fn worker_replacement_owns_independent_http_clients() {
+    fn worker_replacement_keeps_http_config_observations_independent() {
         let (port, server) = start_http_server(4);
         let policy = http_policy(port);
         let program = buffered_http_program(port, "reload");
 
         let mut first = WorkerRuntime::start().unwrap();
         run_reusable_http(&mut first, Arc::clone(&program), 1, policy.clone());
-        assert_eq!(first.http_client_build_count(), 1);
+        assert_eq!(first.observed_http_config_count(), 1);
 
         let mut second = WorkerRuntime::start().unwrap();
         run_reusable_http(&mut second, Arc::clone(&program), 2, policy.clone());
-        assert_eq!(second.http_client_build_count(), 1);
+        assert_eq!(second.observed_http_config_count(), 1);
         first.shutdown();
         run_reusable_http(&mut second, Arc::clone(&program), 3, policy.clone());
-        assert_eq!(second.http_client_build_count(), 1);
+        assert_eq!(second.observed_http_config_count(), 1);
 
         let mut third = WorkerRuntime::start().unwrap();
         run_reusable_http(&mut third, program, 4, policy);
-        assert_eq!(third.http_client_build_count(), 1);
+        assert_eq!(third.observed_http_config_count(), 1);
         second.shutdown();
         third.shutdown();
         server.join().expect("reload HTTP fixture");
