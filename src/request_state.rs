@@ -31,6 +31,7 @@ use crate::host::{
     with_vm_request_scope_full,
 };
 use crate::notify::{CompletionPermit, RequestIdentity};
+use crate::phase::{PreparedScript, ScriptExecutionMetadata};
 
 #[cfg(ngx_rustscript_integration_hooks)]
 static WAIT_EVENTFD_ARMS: AtomicU64 = AtomicU64::new(0);
@@ -381,27 +382,30 @@ impl<T> Default for IdentityRegistry<T> {
     }
 }
 
-/// Binds the production host surface for one program.
+/// Installs VM-local policy and worker-owned state after bound construction.
 ///
-/// Every request VM installs catalog adapters from [`crate::host::ngx_host_registry`].
-/// Programs that import `ngx::timer` hosts also receive the worker timer
-/// runtime. The location's standard-host policy is applied without per-name
-/// binds so the registry plan stays exact.
+/// Host descriptors and resolved calls are already installed by
+/// [`PreparedScript::new_vm`]. The immutable artifact comes from
+/// [`crate::host::ngx_host_registry`] during preparation; this function only
+/// attaches mutable state whose lifetime belongs to the current request or worker.
 pub(crate) fn bind_program_hosts(
     vm: &mut Vm,
+    prepared: &PreparedScript,
     policy: &StandardHostPolicy,
     http_client: HttpClientLease,
 ) -> Result<(), String> {
-    crate::host::bind_production_hosts(vm)?;
-    crate::host::install_standard_policy(vm, policy, http_client)?;
-    if crate::timer::program_uses_ngx_timer_hosts(vm.program()) {
-        crate::timer::install_timer_runtime_on_vm(vm);
+    // `crate::host::ngx_host_registry` prepared the immutable dispatch before
+    // this request-local configuration step.
+    if crate::timer::program_uses_ngx_timer_hosts(prepared.program()) {
+        crate::timer::install_prepared_timer_vm(vm, policy, http_client)?;
+    } else {
+        crate::host::install_standard_policy(vm, policy, http_client)?;
     }
     Ok(())
 }
 
 pub(crate) struct ReusableVmKey {
-    pub program: std::sync::Arc<Program>,
+    pub prepared: std::sync::Arc<PreparedScript>,
     pub phase: NgxPhase,
     pub policy: StandardHostPolicy,
     pub ngx_catalog_abi: vm::HostApiFingerprint,
@@ -410,8 +414,10 @@ pub(crate) struct ReusableVmKey {
 
 impl ReusableVmKey {
     pub(crate) fn matches(&self, other: &Self) -> bool {
-        std::ptr::eq(self.program.as_ref(), other.program.as_ref())
-            && self.phase == other.phase
+        std::ptr::eq(
+            self.prepared.program().as_ref(),
+            other.prepared.program().as_ref(),
+        ) && self.phase == other.phase
             && self.policy == other.policy
             && self.ngx_catalog_abi == other.ngx_catalog_abi
             && self.standard_catalog_abi == other.standard_catalog_abi
@@ -505,8 +511,29 @@ impl AccessExec {
         policy: StandardHostPolicy,
         http_client: HttpClientLease,
     ) -> Result<Self, String> {
-        let mut vm = Vm::new_shared(program);
-        bind_program_hosts(&mut vm, &policy, http_client)?;
+        let prepared = PreparedScript::prepare(program, ScriptExecutionMetadata::default())?;
+        Self::bind_prepared_program_in_phase_with_policy(
+            prepared,
+            request_id,
+            generation,
+            runtime,
+            phase,
+            policy,
+            http_client,
+        )
+    }
+
+    pub(crate) fn bind_prepared_program_in_phase_with_policy(
+        prepared: std::sync::Arc<PreparedScript>,
+        request_id: u64,
+        generation: u64,
+        runtime: Handle,
+        phase: NgxPhase,
+        policy: StandardHostPolicy,
+        http_client: HttpClientLease,
+    ) -> Result<Self, String> {
+        let mut vm = prepared.new_vm()?;
+        bind_program_hosts(&mut vm, &prepared, &policy, http_client)?;
         vm.set_async_bridge(Box::new(NgxAsyncBridge::new(runtime)))
             .map_err(|err| err.to_string())?;
         vm.set_runtime_print_sink(|_| {});
@@ -1200,15 +1227,18 @@ mod tests {
     #[test]
     fn reusable_vm_key_isolates_standard_catalog_abi() {
         let program = compile("use ngx;\nngx::ctx::get(\"k\");\n");
+        let prepared =
+            PreparedScript::prepare(Arc::clone(&program), ScriptExecutionMetadata::default())
+                .expect("prepare key program");
         let base = ReusableVmKey {
-            program: Arc::clone(&program),
+            prepared: Arc::clone(&prepared),
             phase: NgxPhase::Access,
             policy: StandardHostPolicy::fail_closed(),
             ngx_catalog_abi: crate::host::compile_host_catalog().fingerprint(),
             standard_catalog_abi: vm::standard_host_catalog_fingerprint(),
         };
         let different_abi = ReusableVmKey {
-            program,
+            prepared: Arc::clone(&prepared),
             phase: NgxPhase::Access,
             policy: StandardHostPolicy::fail_closed(),
             ngx_catalog_abi: crate::host::compile_host_catalog().fingerprint(),
@@ -1220,15 +1250,18 @@ mod tests {
     #[test]
     fn reusable_vm_key_isolates_ngx_catalog_abi() {
         let program = compile("use ngx;\nngx::ctx::get(\"k\");\n");
+        let prepared =
+            PreparedScript::prepare(Arc::clone(&program), ScriptExecutionMetadata::default())
+                .expect("prepare key program");
         let base = ReusableVmKey {
-            program: Arc::clone(&program),
+            prepared: Arc::clone(&prepared),
             phase: NgxPhase::Access,
             policy: StandardHostPolicy::fail_closed(),
             ngx_catalog_abi: crate::host::compile_host_catalog().fingerprint(),
             standard_catalog_abi: vm::standard_host_catalog_fingerprint(),
         };
         let different_abi = ReusableVmKey {
-            program,
+            prepared: Arc::clone(&prepared),
             phase: NgxPhase::Access,
             policy: StandardHostPolicy::fail_closed(),
             ngx_catalog_abi: vm::HostApiCatalog::default().fingerprint(),

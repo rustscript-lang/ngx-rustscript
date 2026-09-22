@@ -21,7 +21,7 @@ use crate::host::{
     HostCapability, HostFamily, HostSyncKind, NgxPhase, StandardHostPolicy, compile_host_catalog,
     host_validates_for_log, is_standard_host_import, ngx_host_manifest,
 };
-use crate::phase::{DuplicateSlot, ScriptExecutionMetadata, ScriptLocationConf};
+use crate::phase::{DuplicateSlot, PreparedScript, ScriptExecutionMetadata, ScriptLocationConf};
 
 /// Per-location compiled scripts. Access, content, and log slots are independent.
 #[derive(Default)]
@@ -47,6 +47,10 @@ impl LocationConf {
         self.access.metadata()
     }
 
+    pub fn access_prepared(&self) -> Option<&Arc<PreparedScript>> {
+        self.access.prepared()
+    }
+
     /// Compiled content program after merge, if any.
     pub fn content_program(&self) -> Option<&Arc<Program>> {
         self.content.program()
@@ -54,6 +58,10 @@ impl LocationConf {
 
     pub fn content_metadata(&self) -> ScriptExecutionMetadata {
         self.content.metadata()
+    }
+
+    pub fn content_prepared(&self) -> Option<&Arc<PreparedScript>> {
+        self.content.prepared()
     }
 
     /// Compiled log program after merge, if any.
@@ -65,27 +73,46 @@ impl LocationConf {
         self.log.metadata()
     }
 
+    pub fn log_prepared(&self) -> Option<&Arc<PreparedScript>> {
+        self.log.prepared()
+    }
+
     /// Record a compiled access program. A second set in the same location is a duplicate.
     pub fn set_access_program(&mut self, program: Arc<Program>) -> Result<(), ConfigError> {
         let metadata = script_execution_metadata(&program);
+        if self.access.is_set() {
+            return Err(ConfigError::Duplicate);
+        }
+        let prepared = PreparedScript::prepare(Arc::clone(&program), metadata)
+            .map_err(ConfigError::HostPrepare)?;
         self.access
-            .set_program_with_metadata(program, metadata)
+            .set_prepared_program(program, metadata, prepared)
             .map_err(|DuplicateSlot| ConfigError::Duplicate)
     }
 
     /// Record a compiled content program. A second set in the same location is a duplicate.
     pub fn set_content_program(&mut self, program: Arc<Program>) -> Result<(), ConfigError> {
         let metadata = script_execution_metadata(&program);
+        if self.content.is_set() {
+            return Err(ConfigError::DuplicateContent);
+        }
+        let prepared = PreparedScript::prepare(Arc::clone(&program), metadata)
+            .map_err(ConfigError::HostPrepare)?;
         self.content
-            .set_program_with_metadata(program, metadata)
+            .set_prepared_program(program, metadata, prepared)
             .map_err(|DuplicateSlot| ConfigError::DuplicateContent)
     }
 
     /// Record a compiled log program. A second set in the same location is a duplicate.
     pub fn set_log_program(&mut self, program: Arc<Program>) -> Result<(), ConfigError> {
         let metadata = script_execution_metadata(&program);
+        if self.log.is_set() {
+            return Err(ConfigError::DuplicateLog);
+        }
+        let prepared = PreparedScript::prepare(Arc::clone(&program), metadata)
+            .map_err(ConfigError::HostPrepare)?;
         self.log
-            .set_program_with_metadata(program, metadata)
+            .set_prepared_program(program, metadata, prepared)
             .map_err(|DuplicateSlot| ConfigError::DuplicateLog)
     }
 
@@ -168,6 +195,7 @@ pub enum ConfigError {
     Unreadable { path: PathBuf, source: io::Error },
     NotUtf8(PathBuf),
     Compile(String),
+    HostPrepare(String),
     UnsupportedImport(String),
     PhaseForbidden { name: String, phase: NgxPhase },
     Duplicate,
@@ -189,6 +217,7 @@ impl fmt::Display for ConfigError {
             }
             Self::NotUtf8(path) => write!(f, "script is not valid UTF-8: {}", path.display()),
             Self::Compile(msg) => write!(f, "failed to compile script: {msg}"),
+            Self::HostPrepare(msg) => write!(f, "failed to prepare script hosts: {msg}"),
             Self::UnsupportedImport(names) => {
                 write!(f, "script imports are not supported: {names}")
             }
@@ -794,9 +823,9 @@ fn set_phase_by_rss_file(
     // SAFETY: NGINX invokes the setter with a live conf, command, and location conf.
     let loc = unsafe { &mut *conf.cast::<LocationConf>() };
     let already_set = match phase {
-        NgxPhase::Content => loc.content_program().is_some(),
-        NgxPhase::Log => loc.log_program().is_some(),
-        _ => loc.access_program().is_some(),
+        NgxPhase::Content => loc.content_prepared().is_some(),
+        NgxPhase::Log => loc.log_prepared().is_some(),
+        _ => loc.access_prepared().is_some(),
     };
     if already_set {
         ngx_conf_log_error!(

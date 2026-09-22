@@ -28,7 +28,7 @@ use crate::host::{
     AllowedOps, NgxPhase, RequestLocalCtx, with_request_scope, with_vm_request_scope,
 };
 use crate::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
-use crate::phase::PhaseSlot;
+use crate::phase::{PhaseSlot, PreparedScript};
 use crate::request_state::{AccessExec, AccessStatus, IdentityRegistry, ReadyEffect};
 use crate::vm_pool;
 
@@ -395,6 +395,13 @@ pub fn run_access_program(program: &Arc<Program>) -> Result<VmStatus, VmError> {
     vm_pool::run(program)
 }
 
+pub(crate) fn run_prepared_access_program(
+    prepared: &Arc<PreparedScript>,
+) -> Result<VmStatus, VmError> {
+    mark_cached_clock_event_boundary();
+    vm_pool::run_prepared(prepared)
+}
+
 /// Map VM termination onto the access-phase continuation / error codes.
 pub fn status_from_vm_run(result: Result<VmStatus, VmError>) -> Status {
     match result {
@@ -423,11 +430,11 @@ pub(crate) fn run_phase_handler(request: &mut Request, slot: PhaseSlot) -> Statu
 }
 
 fn run_configured_phase(request: &mut Request, conf: &LocationConf, slot: PhaseSlot) -> Status {
-    let (program, metadata) = match slot {
-        PhaseSlot::Access => (conf.access_program(), conf.access_metadata()),
-        PhaseSlot::Content => (conf.content_program(), conf.content_metadata()),
+    let (prepared, metadata) = match slot {
+        PhaseSlot::Access => (conf.access_prepared(), conf.access_metadata()),
+        PhaseSlot::Content => (conf.content_prepared(), conf.content_metadata()),
     };
-    let Some(program) = program else {
+    let Some(prepared) = prepared else {
         return Status::NGX_DECLINED;
     };
     let phase = slot.phase();
@@ -447,24 +454,26 @@ fn run_configured_phase(request: &mut Request, conf: &LocationConf, slot: PhaseS
         let raw = request.as_mut() as *mut ngx_http_request_t;
         let identity = allocate_scope_identity();
         return enter_phase_scope(raw, identity, phase, || {
-            enter_phase_vm(identity, phase, || match run_access_program(program) {
-                Ok(VmStatus::Halted) => complete_sync_ok(raw, slot),
-                Ok(status) => {
-                    ngx_log_error!(
-                        NGX_LOG_ERR,
-                        request.log(),
-                        "{directive}: unexpected VM status {status:?}"
-                    );
-                    HTTPStatus::INTERNAL_SERVER_ERROR.into()
-                }
-                Err(err) => {
-                    ngx_log_error!(NGX_LOG_ERR, request.log(), "{directive}: {err}");
-                    HTTPStatus::INTERNAL_SERVER_ERROR.into()
+            enter_phase_vm(identity, phase, || {
+                match run_prepared_access_program(prepared) {
+                    Ok(VmStatus::Halted) => complete_sync_ok(raw, slot),
+                    Ok(status) => {
+                        ngx_log_error!(
+                            NGX_LOG_ERR,
+                            request.log(),
+                            "{directive}: unexpected VM status {status:?}"
+                        );
+                        HTTPStatus::INTERNAL_SERVER_ERROR.into()
+                    }
+                    Err(err) => {
+                        ngx_log_error!(NGX_LOG_ERR, request.log(), "{directive}: {err}");
+                        HTTPStatus::INTERNAL_SERVER_ERROR.into()
+                    }
                 }
             })
         });
     }
-    run_request_owned_phase(request, program, slot, policy, metadata)
+    run_request_owned_phase(request, prepared, slot, policy, metadata)
 }
 
 fn complete_sync_ok(raw: *mut ngx_http_request_t, slot: PhaseSlot) -> Status {
@@ -480,7 +489,7 @@ fn send_empty_last(raw: *mut ngx_http_request_t) -> Status {
 
 fn run_request_owned_phase(
     request: &mut Request,
-    program: &Arc<Program>,
+    prepared: &Arc<PreparedScript>,
     slot: PhaseSlot,
     policy: crate::host::StandardHostPolicy,
     metadata: crate::phase::ScriptExecutionMetadata,
@@ -493,8 +502,11 @@ fn run_request_owned_phase(
     {
         let request_id = next_request_id();
         let mut exec = match crate::runtime::with_worker(|worker| {
-            worker.bind_configured_phase_exec_with_policy(
-                Arc::clone(program),
+            // This is the prepared counterpart of
+            // `bind_configured_phase_exec_with_policy`; the configured record has
+            // already completed host preparation before request admission.
+            worker.bind_configured_prepared_phase_exec_with_policy(
+                Arc::clone(prepared),
                 request_id,
                 slot.phase(),
                 policy,

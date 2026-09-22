@@ -8,17 +8,17 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use crate::phase::PreparedScript;
 use nginx_sys::ngx_http_request_t;
 use ngx::core::Status;
 use ngx::ffi::NGX_LOG_ERR;
 use ngx::http::{HttpModuleLocationConf, HttpRequestHandler, Request};
 use ngx::ngx_log_error;
-use vm::Program;
 
 use crate::Module;
 use crate::access::{
     allocate_scope_identity, ensure_shared_ngx_ctx, enter_phase_scope, enter_phase_vm,
-    next_request_id, run_access_program,
+    next_request_id, run_prepared_access_program,
 };
 use crate::host::NgxPhase;
 use crate::request_state::fail_closed_log_status;
@@ -52,25 +52,25 @@ fn run_log_handler(request: &mut Request) -> Status {
     let Some(conf) = Module::location_conf(request) else {
         return Status::NGX_DECLINED;
     };
-    let Some(program) = conf.log_program() else {
+    let Some(prepared) = conf.log_prepared() else {
         return Status::NGX_DECLINED;
     };
     let status = if !conf.log_metadata().requires_request_state {
-        run_pooled_log(request, program)
+        run_pooled_log(request, prepared)
     } else {
-        run_request_owned_log(request, program)
+        run_request_owned_log(request, prepared, conf.log_metadata())
     };
     #[cfg(ngx_rustscript_integration_hooks)]
     log_wait_proof(request);
     status
 }
 
-fn run_pooled_log(request: &mut Request, program: &Arc<Program>) -> Status {
+fn run_pooled_log(request: &mut Request, prepared: &Arc<PreparedScript>) -> Status {
     let raw = request.as_mut() as *mut ngx_http_request_t;
     let identity = allocate_scope_identity();
     enter_phase_scope(raw, identity, NgxPhase::Log, || {
         enter_phase_vm(identity, NgxPhase::Log, || {
-            if let Err(err) = fail_closed_log_status(run_access_program(program)) {
+            if let Err(err) = fail_closed_log_status(run_prepared_access_program(prepared)) {
                 ngx_log_error!(NGX_LOG_ERR, request.log(), "{DIRECTIVE}: {err}");
             }
             Status::NGX_OK
@@ -78,7 +78,11 @@ fn run_pooled_log(request: &mut Request, program: &Arc<Program>) -> Status {
     })
 }
 
-fn run_request_owned_log(request: &mut Request, program: &Arc<Program>) -> Status {
+fn run_request_owned_log(
+    request: &mut Request,
+    prepared: &Arc<PreparedScript>,
+    metadata: crate::phase::ScriptExecutionMetadata,
+) -> Status {
     let raw = request.as_mut() as *mut ngx_http_request_t;
     let ctx_ptr = match ensure_shared_ngx_ctx(request) {
         Ok(ptr) => ptr,
@@ -89,7 +93,13 @@ fn run_request_owned_log(request: &mut Request, program: &Arc<Program>) -> Statu
     };
     let request_id = next_request_id();
     let mut exec = match crate::runtime::with_worker(|worker| {
-        worker.bind_phase_exec(Arc::clone(program), request_id, NgxPhase::Log)
+        worker.bind_configured_prepared_phase_exec_with_policy(
+            Arc::clone(prepared),
+            request_id,
+            NgxPhase::Log,
+            crate::host::StandardHostPolicy::fail_closed(),
+            metadata,
+        )
     }) {
         Some(Ok(exec)) => exec,
         Some(Err(err)) => {

@@ -31,6 +31,7 @@ use crate::notify::{
     CompletionPermit, CompletionSender, DEFAULT_MAX_IN_FLIGHT, NotifyBridge, NotifyError,
     RequestIdentity, eventfd_waker,
 };
+use crate::phase::{PreparedScript, ScriptExecutionMetadata};
 use crate::request_state::{AccessExec, AsyncWait, ReusableVmKey, SubmitError};
 
 thread_local! {
@@ -104,11 +105,6 @@ fn is_worker_or_single() -> bool {
 
 const MAX_IDLE_REUSABLE_REQUEST_VMS: usize = 4;
 
-fn request_vm_ngx_catalog_abi() -> vm::HostApiFingerprint {
-    static ABI: std::sync::OnceLock<vm::HostApiFingerprint> = std::sync::OnceLock::new();
-    *ABI.get_or_init(|| crate::host::compile_host_catalog().fingerprint())
-}
-
 struct ReusableRequestVm {
     key: ReusableVmKey,
     vm: Vm,
@@ -149,8 +145,8 @@ impl ReusableRequestVmPool {
             }
             return Ok(self.idle.swap_remove(index).vm);
         }
-        let mut vm = Vm::new_shared(Arc::clone(&key.program));
-        crate::request_state::bind_program_hosts(&mut vm, &key.policy, http_client)?;
+        let mut vm = key.prepared.new_vm()?;
+        crate::request_state::bind_program_hosts(&mut vm, &key.prepared, &key.policy, http_client)?;
         self.created = self.created.saturating_add(1);
         Ok(vm)
     }
@@ -298,30 +294,13 @@ impl WorkerRuntime {
         phase: crate::host::NgxPhase,
         policy: crate::host::StandardHostPolicy,
     ) -> Result<AccessExec, String> {
-        if self.stopped || !self.notify.is_accepting() {
-            return Err(NotifyError::ShutDown.to_string());
-        }
-        let generation = self.next_generation;
-        self.next_generation = self.next_generation.wrapping_add(1);
-        if self.next_generation == 0 {
-            self.next_generation = 1;
-        }
-        let handle = self.handle().map_err(|err| err.to_string())?;
-        let http_client = self.http_lease_for(&policy)?;
-        AccessExec::bind_program_in_phase_with_policy(
-            program,
-            request_id,
-            generation,
-            handle,
-            phase,
-            policy,
-            http_client,
-        )
+        let prepared = PreparedScript::prepare(program, ScriptExecutionMetadata::default())?;
+        self.bind_prepared_phase_exec_with_policy(prepared, request_id, phase, policy)
     }
 
-    pub(crate) fn bind_reusable_phase_exec_with_policy(
+    pub(crate) fn bind_prepared_phase_exec_with_policy(
         &mut self,
-        program: Arc<Program>,
+        prepared: Arc<PreparedScript>,
         request_id: u64,
         phase: crate::host::NgxPhase,
         policy: crate::host::StandardHostPolicy,
@@ -334,12 +313,54 @@ impl WorkerRuntime {
         if self.next_generation == 0 {
             self.next_generation = 1;
         }
-        let key = ReusableVmKey {
-            program,
+        let handle = self.handle().map_err(|err| err.to_string())?;
+        let http_client = self.http_lease_for(&policy)?;
+        AccessExec::bind_prepared_program_in_phase_with_policy(
+            prepared,
+            request_id,
+            generation,
+            handle,
             phase,
             policy,
-            ngx_catalog_abi: request_vm_ngx_catalog_abi(),
-            standard_catalog_abi: vm::standard_host_catalog_fingerprint(),
+            http_client,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bind_reusable_phase_exec_with_policy(
+        &mut self,
+        program: Arc<Program>,
+        request_id: u64,
+        phase: crate::host::NgxPhase,
+        policy: crate::host::StandardHostPolicy,
+    ) -> Result<AccessExec, String> {
+        let prepared = PreparedScript::prepare(program, ScriptExecutionMetadata::default())?;
+        self.bind_reusable_prepared_phase_exec_with_policy(prepared, request_id, phase, policy)
+    }
+
+    pub(crate) fn bind_reusable_prepared_phase_exec_with_policy(
+        &mut self,
+        prepared: Arc<PreparedScript>,
+        request_id: u64,
+        phase: crate::host::NgxPhase,
+        policy: crate::host::StandardHostPolicy,
+    ) -> Result<AccessExec, String> {
+        if self.stopped || !self.notify.is_accepting() {
+            return Err(NotifyError::ShutDown.to_string());
+        }
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
+        if self.next_generation == 0 {
+            self.next_generation = 1;
+        }
+        let ngx_catalog_abi = prepared.ngx_catalog_abi();
+        let standard_catalog_abi = prepared.standard_catalog_abi();
+        let key = ReusableVmKey {
+            prepared,
+            phase,
+            policy,
+            ngx_catalog_abi,
+            standard_catalog_abi,
         };
         let handle = self.handle().map_err(|error| error.to_string())?;
         let http_client = self.http_lease_for(&key.policy)?;
@@ -402,6 +423,7 @@ impl WorkerRuntime {
         self.observed_http_configs.borrow().len()
     }
 
+    #[cfg(test)]
     pub(crate) fn bind_configured_phase_exec_with_policy(
         &mut self,
         program: Arc<Program>,
@@ -410,10 +432,27 @@ impl WorkerRuntime {
         policy: crate::host::StandardHostPolicy,
         metadata: crate::phase::ScriptExecutionMetadata,
     ) -> Result<AccessExec, String> {
+        let prepared = PreparedScript::prepare(program, metadata)?;
+        self.bind_configured_prepared_phase_exec_with_policy(
+            prepared, request_id, phase, policy, metadata,
+        )
+    }
+
+    pub(crate) fn bind_configured_prepared_phase_exec_with_policy(
+        &mut self,
+        prepared: Arc<PreparedScript>,
+        request_id: u64,
+        phase: crate::host::NgxPhase,
+        policy: crate::host::StandardHostPolicy,
+        metadata: crate::phase::ScriptExecutionMetadata,
+    ) -> Result<AccessExec, String> {
+        if prepared.metadata() != metadata {
+            return Err("prepared script execution metadata mismatch".to_string());
+        }
         if metadata.reuses_request_vm {
-            self.bind_reusable_phase_exec_with_policy(program, request_id, phase, policy)
+            self.bind_reusable_prepared_phase_exec_with_policy(prepared, request_id, phase, policy)
         } else {
-            self.bind_phase_exec_with_policy(program, request_id, phase, policy)
+            self.bind_prepared_phase_exec_with_policy(prepared, request_id, phase, policy)
         }
     }
 
@@ -566,9 +605,8 @@ pub unsafe fn init_worker(cycle: *mut ngx_cycle_t) -> Result<(), RuntimeError> {
         return Err(RuntimeError::AlreadyStarted);
     }
     // Build the restricted catalog registry before the worker accepts
-    // connections. First `bind_vm_cached` is cheap once the process-wide
-    // table exists; constructing it on the first request would block the
-    // event loop for the entire install.
+    // connections. Configured scripts already carry their immutable bound
+    // program; VM creation never performs a request-window full bind.
     crate::host::ngx_host_registry().map_err(RuntimeError::HostRegistry)?;
     let mut worker = WorkerRuntime::start()?;
     unsafe {

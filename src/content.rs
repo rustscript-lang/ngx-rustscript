@@ -32,7 +32,7 @@ pub(crate) fn install_configured_content(
     cf: *mut ngx_conf_t,
     loc: &crate::config::LocationConf,
 ) -> Result<(), ()> {
-    if loc.content_program().is_none() {
+    if loc.content_prepared().is_none() {
         return Ok(());
     }
     install_content_handler(cf)

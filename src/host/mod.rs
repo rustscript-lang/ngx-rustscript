@@ -5,7 +5,9 @@
 //! Nested modules below match that layout. There is no handwritten
 //! `HostFunction`, argument decode, or yield-based host re-entry.
 
-use vm::{Vm, VmError};
+use std::sync::Arc;
+
+use vm::{BoundHostProgram, Program, Vm, VmError};
 
 pub mod catalog;
 pub(crate) mod context;
@@ -166,11 +168,84 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         .as_slice()
 }
 
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BindingMetrics {
+    pub prepared_programs: usize,
+    pub bound_vm_instances: usize,
+    pub full_bind_fallbacks: usize,
+}
+
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+static PREPARED_PROGRAMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+static BOUND_VM_INSTANCES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+static FULL_BIND_FALLBACKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+pub fn binding_metrics_snapshot() -> BindingMetrics {
+    use std::sync::atomic::Ordering;
+
+    BindingMetrics {
+        prepared_programs: PREPARED_PROGRAMS.load(Ordering::Relaxed),
+        bound_vm_instances: BOUND_VM_INSTANCES.load(Ordering::Relaxed),
+        full_bind_fallbacks: FULL_BIND_FALLBACKS.load(Ordering::Relaxed),
+    }
+}
+
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+pub fn reset_binding_metrics() {
+    use std::sync::atomic::Ordering;
+
+    PREPARED_PROGRAMS.store(0, Ordering::Relaxed);
+    BOUND_VM_INSTANCES.store(0, Ordering::Relaxed);
+    FULL_BIND_FALLBACKS.store(0, Ordering::Relaxed);
+}
+
+/// Prepare immutable production host dispatch for one compiled program.
+pub(crate) fn prepare_bound_program(
+    program: Arc<Program>,
+) -> Result<Arc<BoundHostProgram>, String> {
+    let bound = ngx_host_registry()?
+        .bind_program_once(program)
+        .map_err(|error| format!("prepare bound ngx host program: {error}"))?;
+    #[cfg(any(test, ngx_rustscript_integration_hooks))]
+    {
+        use std::sync::atomic::Ordering;
+        PREPARED_PROGRAMS.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(bound)
+}
+
+/// Instantiate VM-local state from an immutable bound host program.
+pub(crate) fn instantiate_bound_vm(bound: Arc<BoundHostProgram>) -> Result<Vm, String> {
+    let vm = Vm::new_bound(bound).map_err(|error| format!("instantiate bound ngx VM: {error}"))?;
+    #[cfg(any(test, ngx_rustscript_integration_hooks))]
+    {
+        use std::sync::atomic::Ordering;
+        BOUND_VM_INSTANCES.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(vm)
+}
+
+/// Immutable ABI witness for the compiled ngx catalog.
+pub(crate) fn ngx_host_catalog_abi() -> vm::HostApiFingerprint {
+    static ABI: std::sync::OnceLock<vm::HostApiFingerprint> = std::sync::OnceLock::new();
+    *ABI.get_or_init(|| compile_host_catalog().fingerprint())
+}
+
 /// Bind the calling VM through the production descriptor registry.
 ///
-/// Catalog-compiled programs resolve hosts by exact adapter. There is no
-/// name/arity fallback table.
+/// This legacy helper remains for standalone test fixtures that construct an
+/// unbound VM directly. Configured production paths use
+/// [`prepare_bound_program`] and [`instantiate_bound_vm`] instead.
 pub fn bind_production_hosts(vm: &mut Vm) -> Result<(), String> {
+    #[cfg(any(test, ngx_rustscript_integration_hooks))]
+    {
+        use std::sync::atomic::Ordering;
+        FULL_BIND_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+    }
     ngx_host_registry()?
         .bind_vm_cached(vm)
         .map_err(|error| format!("bind ngx host registry: {error}"))
@@ -200,12 +275,9 @@ pub fn ngx_timer_host_names() -> &'static [&'static str] {
 
 /// Restricted production registry for every catalogued ngx host.
 ///
-/// Request VMs, pool VMs, and timer/callback VMs all bind through
-/// [`vm::HostFunctionRegistry::bind_vm_cached`]. The registry is built once per
-/// process and cloned per bind; a clone shares the immutable entry table,
-/// capability profile, and standard-surface composition, and reuses its
-/// host-binding plan cache. The same registry is handed to
-/// `register_owned_timer` through `OwnedHostContext`.
+/// The registry is built once per process. Configured scripts prepare an
+/// immutable [`BoundHostProgram`] from this registry before request admission;
+/// VM construction then uses that artifact without a full bind.
 pub fn ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
     static REGISTRY: std::sync::OnceLock<Result<vm::HostFunctionRegistry, String>> =
         std::sync::OnceLock::new();
@@ -214,13 +286,9 @@ pub fn ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
 
 fn build_ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
     let catalog = catalog::compile_host_catalog();
-    // HostFunctionRegistry::restricted() starts from HostFunctionRegistry::new(),
-    // which catalog-installs HTTP adapters. Those catalog entries then reject
-    // ngx-compiled `http::client::*` imports that have no fingerprint — the ngx
-    // compile catalog deliberately omits HTTP so documented map literals keep
-    // compiling. empty() + deny_all is the same capability restriction without
-    // that HTTP catalog seed. Standard HTTP names are granted below; bind_vm_cached
-    // stages name-only adapters through standard_composition::ensure_surfaces.
+    // HostFunctionRegistry::empty() avoids an implicit host-binding fallback.
+    // The ngx catalog deliberately omits HTTP function schemas while the
+    // shared HTTP named schemas remain available to the standard composition.
     let mut registry = vm::HostFunctionRegistry::empty();
     registry.set_capability_profile(standard_capability_profile());
     registry.set_standard_composition(vm::standard_composition());

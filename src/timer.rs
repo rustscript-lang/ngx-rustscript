@@ -317,16 +317,27 @@ fn with_timer_scope<R>(identity: RequestIdentity, f: impl FnOnce() -> R) -> R {
     )
 }
 
-/// Installs the worker timer backend on a VM that imports the timer family.
+/// Installs the worker timer backend on an unbound standalone test VM.
 ///
-/// Hosts are bound through [`crate::host::ngx_host_registry`]; this only
-/// attaches the worker timer runtime after that bind.
+/// Configured scripts must use [`install_prepared_timer_vm`] instead; this
+/// compatibility wrapper is the only remaining legacy bind entry point.
 pub fn install_timer_vm(
     vm: &mut Vm,
     policy: &StandardHostPolicy,
     http_client: HttpClientLease,
 ) -> Result<(), String> {
     crate::host::bind_production_hosts(vm)?;
+    install_prepared_timer_vm(vm, policy, http_client)
+}
+
+/// Installs timer-local state on a VM created from a prepared program.
+///
+/// No host descriptors or dispatch tables are resolved here.
+pub fn install_prepared_timer_vm(
+    vm: &mut Vm,
+    policy: &StandardHostPolicy,
+    http_client: HttpClientLease,
+) -> Result<(), String> {
     crate::host::install_standard_policy(vm, policy, http_client)?;
     install_timer_runtime_on_vm(vm);
     Ok(())
@@ -758,12 +769,17 @@ mod tests {
             "use ngx;\nngx::timer::at(30, |premature| null);\nngx::timer::at(20, |premature| null);\n",
         )
         .expect("compile timer script");
-        let mut vm = Vm::new_shared(program);
+        let prepared = crate::phase::PreparedScript::prepare(
+            Arc::clone(&program),
+            crate::phase::ScriptExecutionMetadata::default(),
+        )
+        .expect("prepare timer script");
+        let mut vm = prepared.new_vm().expect("bound timer vm");
         let policy = StandardHostPolicy::fail_closed();
         let http_client = worker
             .http_lease_for(&policy)
             .expect("fail-closed HTTP lease");
-        install_timer_vm(&mut vm, &policy, http_client).expect("install timer vm");
+        install_prepared_timer_vm(&mut vm, &policy, http_client).expect("install timer vm");
         vm.set_async_bridge(Box::new(NgxAsyncBridge::new(
             worker.handle().expect("worker handle"),
         )))
@@ -825,12 +841,17 @@ mod tests {
         let program =
             crate::config::compile_rss_source("use ngx;\nngx::timer::at(30, |premature| null);\n")
                 .expect("compile timer script");
-        let mut vm = Vm::new_shared(program);
+        let prepared = crate::phase::PreparedScript::prepare(
+            Arc::clone(&program),
+            crate::phase::ScriptExecutionMetadata::default(),
+        )
+        .expect("prepare timer script");
+        let mut vm = prepared.new_vm().expect("bound timer vm");
         let policy = StandardHostPolicy::fail_closed();
         let http_client = worker
             .http_lease_for(&policy)
             .expect("fail-closed HTTP lease");
-        install_timer_vm(&mut vm, &policy, http_client).expect("install timer vm");
+        install_prepared_timer_vm(&mut vm, &policy, http_client).expect("install timer vm");
         vm.set_async_bridge(Box::new(NgxAsyncBridge::new(
             worker.handle().expect("worker handle"),
         )))

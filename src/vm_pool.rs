@@ -25,6 +25,8 @@ use std::task::{Context, Poll, Waker};
 
 use vm::{Program, Vm, VmError, VmStatus};
 
+use crate::phase::{PreparedScript, ScriptExecutionMetadata};
+
 /// Maximum idle VMs retained on one worker thread.
 pub const MAX_IDLE_VMS: usize = 4;
 
@@ -33,7 +35,12 @@ thread_local! {
 }
 
 struct WorkerVmPool {
-    idle: Vec<Vm>,
+    idle: Vec<PooledVm>,
+}
+
+struct PooledVm {
+    prepared: Arc<PreparedScript>,
+    vm: Vm,
 }
 
 impl WorkerVmPool {
@@ -41,33 +48,35 @@ impl WorkerVmPool {
         Self { idle: Vec::new() }
     }
 
-    fn take(&mut self, program: &Arc<Program>) -> Vm {
-        if let Some(idx) = self
-            .idle
-            .iter()
-            .position(|vm| std::ptr::eq(vm.program(), program.as_ref()))
-        {
-            return self.idle.swap_remove(idx);
+    fn take(&mut self, prepared: &Arc<PreparedScript>) -> Result<Vm, String> {
+        if let Some(idx) = self.idle.iter().position(|entry| {
+            std::ptr::eq(
+                entry.prepared.program().as_ref(),
+                prepared.program().as_ref(),
+            ) && entry.prepared.ngx_catalog_abi() == prepared.ngx_catalog_abi()
+                && entry.prepared.standard_catalog_abi() == prepared.standard_catalog_abi()
+        }) {
+            return Ok(self.idle.swap_remove(idx).vm);
         }
-        construct(program)
+        construct(prepared)
     }
 
-    fn recycle(&mut self, mut vm: Vm) {
+    fn recycle(&mut self, prepared: Arc<PreparedScript>, mut vm: Vm) {
         if self.idle.len() >= MAX_IDLE_VMS {
             return;
         }
         if reset_for_pool(&mut vm) {
-            self.idle.push(vm);
+            self.idle.push(PooledVm { prepared, vm });
         }
     }
 }
 
-fn construct(program: &Arc<Program>) -> Vm {
+fn construct(prepared: &Arc<PreparedScript>) -> Result<Vm, String> {
+    // The prepared artifact was created through crate::host::ngx_host_registry;
+    // pool misses only instantiate it.
     #[cfg(test)]
     CREATED.with(|created| created.set(created.get().saturating_add(1)));
-    let mut vm = Vm::new_shared(Arc::clone(program));
-    crate::host::bind_production_hosts(&mut vm).expect("bind ngx host registry");
-    vm
+    prepared.new_vm()
 }
 
 /// Reset through the supported pd-vm APIs. Pending host-IO close cannot be
@@ -118,10 +127,19 @@ pub(crate) fn reset_request_vm_for_pool(vm: &mut Vm, runtime: &tokio::runtime::H
 
 /// Run `program` on a leased worker-local VM until the first status.
 pub fn run(program: &Arc<Program>) -> Result<VmStatus, VmError> {
-    let mut vm = POOL.with(|pool| pool.borrow_mut().take(program));
+    let prepared = PreparedScript::prepare(Arc::clone(program), ScriptExecutionMetadata::default())
+        .map_err(VmError::HostError)?;
+    run_prepared(&prepared)
+}
+
+/// Run one prebound program on a worker-local pooled VM.
+pub(crate) fn run_prepared(prepared: &Arc<PreparedScript>) -> Result<VmStatus, VmError> {
+    let mut vm = POOL
+        .with(|pool| pool.borrow_mut().take(prepared))
+        .map_err(VmError::HostError)?;
     let result = vm.run();
     if matches!(&result, Ok(VmStatus::Halted) | Err(_)) {
-        POOL.with(|pool| pool.borrow_mut().recycle(vm));
+        POOL.with(|pool| pool.borrow_mut().recycle(Arc::clone(prepared), vm));
     }
     result
 }
@@ -210,6 +228,25 @@ mod tests {
         assert_eq!(created_count(), 1, "same program must reuse one VM");
         assert_eq!(idle_count(), 1);
         assert!(idle_count() <= MAX_IDLE_VMS);
+    }
+
+    #[test]
+    fn prepared_pool_eviction_never_reprepares_or_full_binds() {
+        let before = crate::host::binding_metrics_snapshot();
+        let program = compile("let x = 1 + 2;\n");
+        let prepared = PreparedScript::prepare(program, ScriptExecutionMetadata::default())
+            .expect("prepare pooled program");
+        let mut pool = WorkerVmPool::new();
+
+        for _ in 0..(MAX_IDLE_VMS + 8) {
+            let vm = construct(&prepared).expect("bound pool VM");
+            pool.recycle(Arc::clone(&prepared), vm);
+        }
+
+        let metrics = crate::host::binding_metrics_snapshot();
+        assert_eq!(metrics.prepared_programs - before.prepared_programs, 1);
+        assert_eq!(metrics.full_bind_fallbacks - before.full_bind_fallbacks, 0);
+        assert!(pool.idle.len() <= MAX_IDLE_VMS);
     }
 
     #[test]
