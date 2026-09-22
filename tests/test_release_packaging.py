@@ -157,6 +157,10 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertEqual(ci["on"]["push"]["branches"], ["master"])
         self.assertIn("inputs.ref || github.ref", ci["concurrency"]["group"])
         self.assertIn("inputs.ref == ''", ci["concurrency"]["cancel-in-progress"])
+        steps = {step["name"]: step for step in ci["jobs"]["test"]["steps"]}
+        for name in ("Run Clippy", "Run complete test suite"):
+            self.assertEqual(steps[name]["env"]["NGX_RUSTSCRIPT_INTEGRATION_HOOKS"], "1")
+        self.assertNotIn("NGX_RUSTSCRIPT_INTEGRATION_HOOKS", steps["Build release module"].get("env", {}))
 
         metadata = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["metadata"]["ngx-rustscript"]
         self.assertEqual(metadata["nginx-core-version"], NGINX_VERSION)
@@ -184,7 +188,7 @@ class ReleasePackagingTests(unittest.TestCase):
         for required in (
             "cargo fmt --all -- --check",
             "cargo check --locked",
-            "cargo clippy --locked --all-targets -- -D warnings",
+            "cargo clippy --locked --all-targets --all-features -- -D warnings",
             "--test-threads=1",
             "tests/nginx_integration.py",
             "tests/test_release_packaging.py",
