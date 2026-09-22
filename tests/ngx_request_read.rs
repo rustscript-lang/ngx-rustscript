@@ -22,7 +22,7 @@ use ngx_rustscript::config::{
     ConfigError, compile_rss_source, reject_program_imports, validate_program_imports_for_phase,
 };
 use ngx_rustscript::host::{
-    AllowedOps, HostCapability, HostFamily, HostSyncKind, NgxPhase, bind_ngx_hosts,
+    AllowedOps, HostCapability, HostFamily, HostSyncKind, NgxPhase, bind_registry_for_test,
     host_allowed_in_phase, manifest_entry, ngx_host_catalog, production_runtime_host_names,
     with_request_scope,
 };
@@ -74,7 +74,7 @@ fn compile_err(source: &str) -> ConfigError {
 fn eval(source: &str) -> Result<Value, String> {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     match vm.run() {
         Ok(VmStatus::Halted) => Ok(vm
             .stack()
@@ -103,7 +103,7 @@ fn eval_in_request_ops(
 ) -> Result<Value, String> {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     with_request_scope(request, identity, NgxPhase::Access, ops, || {
         match vm.run() {
             Ok(VmStatus::Halted) => Ok(vm

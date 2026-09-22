@@ -10,8 +10,8 @@ use ngx_rustscript::host::{
     NGX_SHARED_DELETE_NAME, NGX_SHARED_DICT_NAME, NGX_SHARED_EXPIRE_NAME,
     NGX_SHARED_FREE_SPACE_NAME, NGX_SHARED_GET_NAME, NGX_SHARED_GET_STALE_NAME,
     NGX_SHARED_INCR_NAME, NGX_SHARED_REPLACE_NAME, NGX_SHARED_SAFE_ADD_NAME,
-    NGX_SHARED_SAFE_SET_NAME, NGX_SHARED_SET_NAME, NGX_SHARED_TTL_NAME, NgxPhase, bind_ngx_hosts,
-    host_allowed_in_phase, manifest_entry, ngx_host_catalog,
+    NGX_SHARED_SAFE_SET_NAME, NGX_SHARED_SET_NAME, NGX_SHARED_TTL_NAME, NgxPhase,
+    bind_registry_for_test, host_allowed_in_phase, manifest_entry, ngx_host_catalog,
 };
 use ngx_rustscript::shared_dict::{
     self, DictValue, MAX_KEY_BYTES, MAX_VALUE_BYTES, MAX_ZONE_NAME_BYTES, StoreMode,
@@ -39,7 +39,7 @@ fn eval(source: &str) -> Value {
 fn eval_on_zone(source: &str) -> Value {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     match vm.run() {
         Ok(VmStatus::Halted) => vm
             .stack()
@@ -56,7 +56,7 @@ fn eval_err(source: &str) -> String {
     install_process_zone("dogs", 64 * 1024);
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     match vm.run() {
         Err(err) => err.to_string(),
         Ok(status) => panic!("expected host error, got {status:?}\n{source}"),

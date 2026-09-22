@@ -19,8 +19,8 @@ use ngx_rustscript::config::{ConfigError, compile_rss_source, compile_rss_source
 use ngx_rustscript::host::{
     HostCapability, HostFamily, HostSyncKind, NGX_SEMAPHORE_COUNT_NAME, NGX_SEMAPHORE_NEW_NAME,
     NGX_SEMAPHORE_POST_NAME, NGX_SEMAPHORE_RESOURCE_KEY, NGX_SEMAPHORE_WAIT_NAME, NgxPhase,
-    bind_ngx_hosts, host_allowed_in_phase, manifest_entry, ngx_host_catalog, ngx_host_manifest,
-    ngx_host_registry, production_runtime_host_names,
+    bind_registry_for_test, host_allowed_in_phase, manifest_entry, ngx_host_catalog,
+    ngx_host_manifest, ngx_host_registry, production_runtime_host_names,
 };
 use ngx_rustscript::notify::DEFAULT_MAX_IN_FLIGHT;
 use ngx_rustscript::request_state::{AccessStatus, IdentityRegistry, ReadyEffect};
@@ -56,14 +56,14 @@ fn compile(source: &str) -> Arc<Program> {
 fn run_sync(source: &str) -> Result<VmStatus, String> {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     vm.run().map_err(|err| err.to_string())
 }
 
 fn run_value(source: &str) -> Result<Value, String> {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     match vm.run().map_err(|err| err.to_string())? {
         VmStatus::Halted => Ok(vm.stack().last().cloned().unwrap_or(Value::Null)),
         other => Err(format!("expected Halted, got {other:?}")),
@@ -100,7 +100,7 @@ impl Driver {
     }
 
     fn from_worker(mut worker: WorkerRuntime, program: Arc<Program>) -> Self {
-        let exec = worker.bind_access_exec(program, 1).expect("bind");
+        let exec = worker.bind_access_exec_for_test(program, 1).expect("bind");
         Self {
             worker,
             exec,
@@ -267,7 +267,7 @@ fn binding_installs_the_family_and_keeps_gated_candidates_absent() {
     }
     let program = compile("let x = 1;\n");
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     for name in GATED_CANDIDATES {
         assert!(
             !vm.has_bound_function(name),
@@ -426,7 +426,7 @@ fn run_async_value(source: &str) -> Value {
         .expect("runtime");
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     vm.set_async_bridge(Box::new(ngx_rustscript::async_bridge::NgxAsyncBridge::new(
         runtime.handle().clone(),
     )))
@@ -517,7 +517,7 @@ fn semaphore_waits_share_the_in_flight_capacity_cap() {
     let mut registry = IdentityRegistry::with_capacity(4);
 
     let mut first = worker
-        .bind_access_exec(Arc::clone(&program), 1)
+        .bind_access_exec_for_test(Arc::clone(&program), 1)
         .expect("first");
     assert_eq!(
         first.handle_access(&mut registry, &worker),
@@ -527,7 +527,7 @@ fn semaphore_waits_share_the_in_flight_capacity_cap() {
     assert_eq!(worker.in_flight().unwrap(), 1);
 
     let mut second = worker
-        .bind_access_exec(Arc::clone(&program), 2)
+        .bind_access_exec_for_test(Arc::clone(&program), 2)
         .expect("second");
     assert_eq!(
         second.handle_access(&mut registry, &worker),

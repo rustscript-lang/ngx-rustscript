@@ -11,8 +11,8 @@ use std::sync::Arc;
 use nginx_sys::{NGX_LOG_DEBUG, ngx_cycle_t, ngx_log_t};
 use ngx_rustscript::config::compile_rss_source;
 use ngx_rustscript::host::{
-    AllowedOps, HostSyncKind, NgxPhase, bind_ngx_hosts, host_allowed_in_phase, ngx_host_catalog,
-    ngx_host_manifest, production_runtime_host_names, with_vm_request_scope,
+    AllowedOps, HostSyncKind, NgxPhase, bind_registry_for_test, host_allowed_in_phase,
+    ngx_host_catalog, ngx_host_manifest, production_runtime_host_names, with_vm_request_scope,
 };
 use ngx_rustscript::notify::RequestIdentity;
 use vm::{HostTypeSchema, Program, Value, Vm, VmStatus};
@@ -24,7 +24,7 @@ fn compile(source: &str) -> Arc<Program> {
 fn eval(source: &str) -> Value {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     let status = vm.run().unwrap_or_else(|err| panic!("run failed: {err}"));
     assert_eq!(status, VmStatus::Halted, "task 4 hosts are synchronous");
     vm.stack()
@@ -36,7 +36,7 @@ fn eval(source: &str) -> Value {
 fn eval_err(source: &str) -> String {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     match vm.run() {
         Err(err) => err.to_string(),
         Ok(status) => panic!("expected host failure, got {status:?}"),

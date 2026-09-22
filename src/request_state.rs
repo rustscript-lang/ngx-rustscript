@@ -23,7 +23,9 @@ use ngx::ngx_log_error;
 use tokio::runtime::Handle;
 #[cfg(test)]
 use vm::HostOpId;
-use vm::{HttpClientLease, Program, Vm, VmError, VmResult, VmStatus};
+#[cfg(test)]
+use vm::Program;
+use vm::{HttpClientLease, Vm, VmError, VmResult, VmStatus};
 
 use crate::async_bridge::NgxAsyncBridge;
 use crate::host::{
@@ -31,7 +33,9 @@ use crate::host::{
     with_vm_request_scope_full,
 };
 use crate::notify::{CompletionPermit, RequestIdentity};
-use crate::phase::{PreparedScript, ScriptExecutionMetadata};
+use crate::phase::PreparedScript;
+#[cfg(test)]
+use crate::phase::ScriptExecutionMetadata;
 
 #[cfg(ngx_rustscript_integration_hooks)]
 static WAIT_EVENTFD_ARMS: AtomicU64 = AtomicU64::new(0);
@@ -414,10 +418,8 @@ pub(crate) struct ReusableVmKey {
 
 impl ReusableVmKey {
     pub(crate) fn matches(&self, other: &Self) -> bool {
-        std::ptr::eq(
-            self.prepared.program().as_ref(),
-            other.prepared.program().as_ref(),
-        ) && self.phase == other.phase
+        std::sync::Arc::ptr_eq(&self.prepared, &other.prepared)
+            && self.phase == other.phase
             && self.policy == other.policy
             && self.ngx_catalog_abi == other.ngx_catalog_abi
             && self.standard_catalog_abi == other.standard_catalog_abi
@@ -466,63 +468,6 @@ pub struct AccessExec {
 }
 
 impl AccessExec {
-    pub fn bind_program(
-        program: std::sync::Arc<Program>,
-        request_id: u64,
-        generation: u64,
-        runtime: Handle,
-        http_client: HttpClientLease,
-    ) -> Result<Self, String> {
-        Self::bind_program_in_phase(
-            program,
-            request_id,
-            generation,
-            runtime,
-            NgxPhase::Access,
-            http_client,
-        )
-    }
-
-    pub fn bind_program_in_phase(
-        program: std::sync::Arc<Program>,
-        request_id: u64,
-        generation: u64,
-        runtime: Handle,
-        phase: NgxPhase,
-        http_client: HttpClientLease,
-    ) -> Result<Self, String> {
-        Self::bind_program_in_phase_with_policy(
-            program,
-            request_id,
-            generation,
-            runtime,
-            phase,
-            StandardHostPolicy::fail_closed(),
-            http_client,
-        )
-    }
-
-    pub fn bind_program_in_phase_with_policy(
-        program: std::sync::Arc<Program>,
-        request_id: u64,
-        generation: u64,
-        runtime: Handle,
-        phase: NgxPhase,
-        policy: StandardHostPolicy,
-        http_client: HttpClientLease,
-    ) -> Result<Self, String> {
-        let prepared = PreparedScript::prepare(program, ScriptExecutionMetadata::default())?;
-        Self::bind_prepared_program_in_phase_with_policy(
-            prepared,
-            request_id,
-            generation,
-            runtime,
-            phase,
-            policy,
-            http_client,
-        )
-    }
-
     pub(crate) fn bind_prepared_program_in_phase_with_policy(
         prepared: std::sync::Arc<PreparedScript>,
         request_id: u64,
@@ -1225,6 +1170,33 @@ mod tests {
     }
 
     #[test]
+    fn reusable_vm_key_requires_exact_prepared_script_identity() {
+        let program = compile("use ngx;\nngx::ctx::get(\"k\");\n");
+        let first =
+            PreparedScript::prepare(Arc::clone(&program), ScriptExecutionMetadata::default())
+                .expect("first preparation");
+        let second =
+            PreparedScript::prepare(Arc::clone(&program), ScriptExecutionMetadata::default())
+                .expect("second preparation");
+        let first_key = ReusableVmKey {
+            prepared: first,
+            phase: NgxPhase::Access,
+            policy: StandardHostPolicy::fail_closed(),
+            ngx_catalog_abi: crate::host::compile_host_catalog().fingerprint(),
+            standard_catalog_abi: vm::standard_host_catalog_fingerprint(),
+        };
+        let second_key = ReusableVmKey {
+            prepared: second,
+            phase: NgxPhase::Access,
+            policy: StandardHostPolicy::fail_closed(),
+            ngx_catalog_abi: crate::host::compile_host_catalog().fingerprint(),
+            standard_catalog_abi: vm::standard_host_catalog_fingerprint(),
+        };
+        assert!(!first_key.matches(&second_key));
+        assert!(first_key.matches(&first_key));
+    }
+
+    #[test]
     fn reusable_vm_key_isolates_standard_catalog_abi() {
         let program = compile("use ngx;\nngx::ctx::get(\"k\");\n");
         let prepared =
@@ -1361,7 +1333,9 @@ mod tests {
     impl Driver {
         fn new(program: Arc<Program>, request_id: u64) -> Self {
             let mut worker = WorkerRuntime::start().unwrap();
-            let exec = worker.bind_access_exec(program, request_id).expect("bind");
+            let exec = worker
+                .bind_access_exec_for_test(program, request_id)
+                .expect("bind");
             Self {
                 worker,
                 exec,
@@ -1565,7 +1539,7 @@ ngx::ctx::set("k", 1);
         let program = compile(source);
         let mut worker = WorkerRuntime::start().expect("worker");
         let mut exec = worker
-            .bind_phase_exec(program, 92, NgxPhase::Access)
+            .bind_phase_exec_for_test(program, 92, NgxPhase::Access)
             .expect("bind standard hosts");
         let mut registry = IdentityRegistry::with_capacity(8);
         let status = exec.handle_access(&mut registry, &worker);
@@ -1654,7 +1628,7 @@ ngx::ctx::set("k", 1);
         );
         let mut worker = WorkerRuntime::start().expect("worker");
         let mut exec = worker
-            .bind_phase_exec_with_policy(program, 91, NgxPhase::Access, policy)
+            .bind_phase_exec_with_policy_for_test(program, 91, NgxPhase::Access, policy)
             .expect("bind standard hosts");
         let mut registry = IdentityRegistry::with_capacity(8);
         assert_eq!(
@@ -1687,14 +1661,14 @@ ngx::ctx::set("k", 1);
         let mut worker = WorkerRuntime::start().unwrap();
         let mut shared = RequestLocalCtx::new();
         let mut access = worker
-            .bind_phase_exec(
+            .bind_phase_exec_for_test(
                 compile("use ngx;\nngx::ctx::set(\"k\", \"from-access\");\nngx::sleep_ms(5);\n"),
                 1,
                 NgxPhase::Access,
             )
             .expect("bind access");
         let mut content = worker
-            .bind_phase_exec(
+            .bind_phase_exec_for_test(
                 compile(
                     "use ngx;\nngx::ctx::set(\"c\", ngx::ctx::get(\"k\"));\nngx::sleep_ms(5);\n",
                 ),
@@ -1751,14 +1725,14 @@ ngx::ctx::set("k", 1);
         let mut worker = WorkerRuntime::start().unwrap();
         let mut shared = RequestLocalCtx::new();
         let mut access = worker
-            .bind_phase_exec(
+            .bind_phase_exec_for_test(
                 compile("use ngx;\nngx::ctx::set(\"k\", \"from-access\");\nngx::exit(403);\n"),
                 7,
                 NgxPhase::Access,
             )
             .expect("bind access");
         let mut content = worker
-            .bind_phase_exec(
+            .bind_phase_exec_for_test(
                 compile("use ngx;\nngx::ctx::set(\"c\", ngx::ctx::get(\"k\"));\n"),
                 7,
                 NgxPhase::Content,
@@ -1787,7 +1761,7 @@ ngx::ctx::set("k", 1);
     fn content_phase_cancelled_wait_is_ignored_on_stale_wake() {
         let mut worker = WorkerRuntime::start().unwrap();
         let mut exec = worker
-            .bind_phase_exec(
+            .bind_phase_exec_for_test(
                 compile("use ngx;\nngx::sleep_ms(80);\n"),
                 8,
                 NgxPhase::Content,

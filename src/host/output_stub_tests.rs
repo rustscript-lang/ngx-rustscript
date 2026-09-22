@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::config::compile_rss_source_for_phase;
 use crate::host::{
-    bind_ngx_hosts, with_request_scope, AllowedOps, NgxPhase,
+    bind_registry_for_test, with_request_scope, AllowedOps, NgxPhase,
 };
 use crate::notify::{RequestIdentity, DEFAULT_MAX_IN_FLIGHT};
 use crate::request_state::{AccessStatus, IdentityRegistry, ReadyEffect};
@@ -39,7 +39,7 @@ fn dummy_request() -> Box<ngx_http_request_t> {
 fn eval_in_content(request: *mut ngx_http_request_t, source: &str) -> Result<Value, String> {
     let program = compile_content(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     with_request_scope(
         request,
         RequestIdentity::new(1, 1),
@@ -108,7 +108,7 @@ fn flush_false_sends_flush_buf_without_waiting() {
     let program = compile_content("use ngx;\nngx::print(\"x\");\nngx::flush(false);\n");
     let mut worker = WorkerRuntime::start().unwrap();
     let mut exec = worker
-        .bind_phase_exec(program, 1, NgxPhase::Content)
+        .bind_phase_exec_for_test(program, 1, NgxPhase::Content)
         .unwrap();
     let mut registry = IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT);
     let status = with_request_scope(
@@ -133,7 +133,7 @@ fn flush_true_waits_when_connection_is_buffered() {
     let program = compile_content("use ngx;\nngx::print(\"x\");\nngx::flush(true);\n");
     let mut worker = WorkerRuntime::start().unwrap();
     let mut exec = worker
-        .bind_phase_exec(program, 1, NgxPhase::Content)
+        .bind_phase_exec_for_test(program, 1, NgxPhase::Content)
         .unwrap();
     let mut registry = IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT);
     let status = with_request_scope(
@@ -403,7 +403,7 @@ ngx::print("x");
 "#,
     );
     let mut vm = Vm::try_new((*program).clone()).expect("vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     let err = with_request_scope(
         ptr,
         RequestIdentity::new(0, 0),
@@ -440,7 +440,7 @@ ngx::print("fresh");
 "#,
     );
     let mut vm = Vm::try_new((*program).clone()).expect("vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     with_request_scope(
         ptr,
         RequestIdentity::new(2, 9),
@@ -493,7 +493,7 @@ fn run_flush_wait(
     let program = compile_content(source);
     let mut worker = WorkerRuntime::start().unwrap();
     let mut exec = worker
-        .bind_phase_exec(program, 1, NgxPhase::Content)
+        .bind_phase_exec_for_test(program, 1, NgxPhase::Content)
         .unwrap();
     let mut registry = IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT);
     let status = with_request_scope(
@@ -741,7 +741,7 @@ ngx::print("fresh");
 "#,
     );
     let mut vm = Vm::try_new((*program).clone()).expect("vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     with_request_scope(
         ptr,
         RequestIdentity::new(2, 9),

@@ -1616,7 +1616,7 @@ mod tests {
         let program =
             crate::config::compile_rss_source("use ngx;\nlet x = 1;\n").expect("compile fixture");
         let mut vm = Vm::try_new((*program).clone()).expect("vm");
-        crate::host::bind_ngx_hosts(&mut vm);
+        crate::host::bind_registry_for_test(&mut vm).expect("bind test registry");
         vm
     }
 
@@ -1928,7 +1928,7 @@ mod tests {
         let _stall = StallGuard::tcp_connect();
         let mut worker = crate::runtime::WorkerRuntime::start().unwrap();
         let mut exec = worker
-            .bind_access_exec(
+            .bind_access_exec_for_test(
                 crate::config::compile_rss_source(
                     "use ngx;\nlet sock = ngx::socket::tcp();\nngx::socket::tcp::settimeout(sock, 60000);\nngx::socket::tcp::connect(sock, \"127.0.0.1\", 1);\n",
                 )

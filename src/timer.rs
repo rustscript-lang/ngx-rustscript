@@ -317,21 +317,12 @@ fn with_timer_scope<R>(identity: RequestIdentity, f: impl FnOnce() -> R) -> R {
     )
 }
 
-/// Installs the worker timer backend on an unbound standalone test VM.
-///
-/// Configured scripts must use [`install_prepared_timer_vm`] instead; this
-/// compatibility wrapper is the only remaining legacy bind entry point.
-pub fn install_timer_vm(
-    vm: &mut Vm,
-    policy: &StandardHostPolicy,
-    http_client: HttpClientLease,
-) -> Result<(), String> {
-    crate::host::bind_production_hosts(vm)?;
-    install_prepared_timer_vm(vm, policy, http_client)
-}
-
 /// Installs timer-local state on a VM created from a prepared program.
 ///
+/// The pinned RustScript owned-callback API still performs callback VM binding
+/// through its internal registry path. Closing that callback handoff requires
+/// a newer upstream API that accepts `Arc<BoundHostProgram>`; this ngx scope
+/// leaves the dependency explicit and does not claim callback bind closure.
 /// No host descriptors or dispatch tables are resolved here.
 pub fn install_prepared_timer_vm(
     vm: &mut Vm,

@@ -21,14 +21,15 @@ use ngx_rustscript::config::{
     ConfigError, compile_rss_source, compile_rss_source_for_phase, program_requires_request_state,
 };
 use ngx_rustscript::host::{
-    NgxPhase, StandardHostPolicy, bind_ngx_hosts, manifest_entry, ngx_host_catalog,
+    NgxPhase, StandardHostPolicy, bind_registry_for_test, manifest_entry, ngx_host_catalog,
     ngx_host_manifest, ngx_host_registry, production_runtime_host_names,
 };
 use ngx_rustscript::notify::RequestIdentity;
+use ngx_rustscript::phase::{PreparedScript, ScriptExecutionMetadata};
 use ngx_rustscript::runtime::WorkerRuntime;
 use ngx_rustscript::timer::{
-    FAKE_REQUEST_ID_TAG, NgxTimerBackend, callback_error_count, install_timer_vm, live_timer_count,
-    live_timer_identities, on_worker_event, shutdown_current,
+    FAKE_REQUEST_ID_TAG, NgxTimerBackend, callback_error_count, install_prepared_timer_vm,
+    live_timer_count, live_timer_identities, on_worker_event, shutdown_current,
 };
 use vm::{TimerBackend, TimerConfig, TimerHostExt, Vm};
 
@@ -41,12 +42,20 @@ const HOSTS: [&str; 4] = [AT, EVERY, PENDING, RUNNING];
 fn timer_vm(source: &str, worker: &WorkerRuntime) -> Vm {
     let program =
         compile_rss_source(source).unwrap_or_else(|err| panic!("{source:?} must compile: {err}"));
-    let mut vm = Vm::new_shared(program);
+    let prepared = PreparedScript::prepare(
+        program,
+        ScriptExecutionMetadata {
+            requires_request_state: true,
+            ..ScriptExecutionMetadata::default()
+        },
+    )
+    .expect("prepare timer script");
+    let mut vm = prepared.new_vm().expect("construct prepared timer vm");
     let policy = StandardHostPolicy::fail_closed();
     let http_client = worker
         .http_lease_for(&policy)
         .expect("fail-closed HTTP lease");
-    install_timer_vm(&mut vm, &policy, http_client).expect("bind timer vm");
+    install_prepared_timer_vm(&mut vm, &policy, http_client).expect("install timer vm");
     vm.set_async_bridge(Box::new(NgxAsyncBridge::new(
         worker.handle().expect("worker handle"),
     )))
@@ -178,7 +187,7 @@ fn timer_imports_require_request_state() {
 fn timer_hosts_resolve_through_the_registry_not_the_name_path() {
     let compiled = vm::compile_source("let x = 1;\n").expect("import-free program");
     let mut vm = Vm::try_new(compiled.program).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     for name in HOSTS {
         assert!(
             !vm.has_bound_function(name),
@@ -558,13 +567,21 @@ ngx::timer::at(0.05, |premature| null);
     .expect("merged catalog compiles HTTP + timer");
     assert!(program_requires_request_state(&program));
 
-    let mut vm = Vm::new_shared(program);
+    let prepared = PreparedScript::prepare(
+        program,
+        ScriptExecutionMetadata {
+            requires_request_state: true,
+            ..ScriptExecutionMetadata::default()
+        },
+    )
+    .expect("prepare HTTP + timer script");
+    let mut vm = prepared.new_vm().expect("construct prepared timer vm");
     let policy = StandardHostPolicy::fail_closed();
     let http_client = worker
         .http_lease_for(&policy)
         .expect("fail-closed HTTP lease");
-    install_timer_vm(&mut vm, &policy, http_client)
-        .expect("HTTP standard import + ngx::timer must bind through the timer host registry");
+    install_prepared_timer_vm(&mut vm, &policy, http_client)
+        .expect("install HTTP standard import + ngx::timer state");
     vm.set_async_bridge(Box::new(NgxAsyncBridge::new(
         worker.handle().expect("worker handle"),
     )))

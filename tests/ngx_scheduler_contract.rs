@@ -22,8 +22,8 @@ use ngx_rustscript::config::{
     validate_program_imports_for_phase,
 };
 use ngx_rustscript::host::{
-    HostCapability, HostFamily, NgxPhase, bind_ngx_hosts, ngx_host_catalog, ngx_host_manifest,
-    ngx_host_registry, production_runtime_host_names,
+    HostCapability, HostFamily, NgxPhase, bind_registry_for_test, ngx_host_catalog,
+    ngx_host_manifest, ngx_host_registry, production_runtime_host_names,
 };
 use ngx_rustscript::notify::{CompletionSender, NgxWake, RequestIdentity};
 use vm::{
@@ -365,17 +365,17 @@ fn scheduler_candidates_are_rejected_at_configuration_compile_in_access_content_
 fn scheduler_candidates_do_not_bind_on_a_production_vm() {
     let compiled = compile_source("let x = 1;\n").expect("import-free program");
     let mut vm = Vm::try_new(compiled.program).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     for name in SCHEDULER_CANDIDATES {
         assert!(
             !vm.has_bound_function(name),
-            "bind_ngx_hosts must not install {name}"
+            "bind_registry_for_test must not install {name}"
         );
     }
 
     let md5_program = compile_rss_source("use ngx;\nngx::md5(\"x\");\n").expect("md5 program");
     let mut md5_vm = Vm::new_shared(md5_program);
-    bind_ngx_hosts(&mut md5_vm);
+    bind_registry_for_test(&mut md5_vm).expect("bind test registry");
     md5_vm
         .run()
         .expect("production bind must execute imported ngx::md5");

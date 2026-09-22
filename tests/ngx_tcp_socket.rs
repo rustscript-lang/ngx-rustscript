@@ -57,7 +57,7 @@ fn wait_readable(fd: RawFd, timeout: Duration) -> bool {
 fn run_sync(source: &str) -> Result<VmStatus, String> {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    ngx_rustscript::host::bind_ngx_hosts(&mut vm);
+    ngx_rustscript::host::bind_registry_for_test(&mut vm).expect("bind test registry");
     vm.run().map_err(|err| err.to_string())
 }
 
@@ -70,7 +70,7 @@ struct Driver {
 impl Driver {
     fn new(program: Arc<Program>) -> Self {
         let mut worker = WorkerRuntime::start().unwrap();
-        let exec = worker.bind_access_exec(program, 1).expect("bind");
+        let exec = worker.bind_access_exec_for_test(program, 1).expect("bind");
         Self {
             worker,
             exec,
@@ -749,7 +749,7 @@ fn worker_shutdown_drops_a_pending_receive() {
     });
     let mut worker = WorkerRuntime::start().unwrap();
     let mut exec = worker
-        .bind_access_exec(
+        .bind_access_exec_for_test(
             compile(&format!(
                 "use ngx;\nlet sock = ngx::socket::tcp();\nngx::socket::tcp::settimeout(sock, 60000);\nngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});\nngx::socket::tcp::receive(sock, 4);\n"
             )),

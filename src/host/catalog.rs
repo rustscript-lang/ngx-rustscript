@@ -3425,7 +3425,7 @@ pub(crate) fn ngx_timer_running_count_contract() -> HostFunctionSchema {
 /// Schemas, resource types, and named structs come from the explicit
 /// [`crate::host::ngx_host_modules`] descriptors, ordered to match
 /// [`MANIFEST`] so catalog fingerprints stay stable. Bindings stay
-/// name-compatible via [`crate::host::bind_ngx_hosts`] for tests that do not
+/// name-compatible via [`crate::host::bind_registry_for_test`] for tests that do not
 /// use owned timer dispatch.
 pub fn ngx_host_catalog() -> HostApiCatalog {
     let descriptors: Vec<HostFunctionDescriptor> = crate::host::ngx_host_modules()

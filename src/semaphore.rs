@@ -1194,9 +1194,16 @@ sentinel;
         .expect("compile pooled semaphore program");
         assert!(!crate::config::program_requires_request_state(&program));
 
+        let prepared = crate::phase::PreparedScript::prepare(
+            Arc::clone(&program),
+            crate::phase::ScriptExecutionMetadata::default(),
+        )
+        .expect("prepare pooled semaphore program");
+
         for _ in 0..2 {
             assert_eq!(
-                crate::vm_pool::run(&program).expect("pooled run"),
+                crate::vm_pool::run_prepared(&prepared, crate::host::NgxPhase::Access)
+                    .expect("pooled run"),
                 vm::VmStatus::Halted
             );
             assert_eq!(
@@ -1300,7 +1307,7 @@ sentinel;
         )
         .expect("compile semaphore wait");
         let mut vm = vm::Vm::try_new((*program).clone()).expect("vm");
-        crate::host::bind_ngx_hosts(&mut vm);
+        crate::host::bind_registry_for_test(&mut vm).expect("bind test registry");
         vm.set_async_bridge(Box::new(crate::async_bridge::NgxAsyncBridge::new(
             runtime.handle().clone(),
         )))

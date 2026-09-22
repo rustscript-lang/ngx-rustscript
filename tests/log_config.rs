@@ -470,7 +470,7 @@ fn log_runtime_ops_block_var_status_header_mutation_when_config_is_bypassed() {
     use std::mem::MaybeUninit;
 
     use nginx_sys::ngx_http_request_t;
-    use ngx_rustscript::host::{AllowedOps, bind_ngx_hosts, with_request_scope};
+    use ngx_rustscript::host::{AllowedOps, bind_registry_for_test, with_request_scope};
     use ngx_rustscript::notify::RequestIdentity;
     use vm::{Vm, VmStatus};
 
@@ -487,7 +487,7 @@ fn log_runtime_ops_block_var_status_header_mutation_when_config_is_bypassed() {
             panic!("access compile must succeed to bypass log config: {err}")
         });
         let mut vm = Vm::try_new((*program).clone()).expect("vm");
-        bind_ngx_hosts(&mut vm);
+        bind_registry_for_test(&mut vm).expect("bind test registry");
         let mut request = dummy_request();
         with_request_scope(
             (&mut *request) as *mut ngx_http_request_t,

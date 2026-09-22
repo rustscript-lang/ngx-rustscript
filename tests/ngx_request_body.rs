@@ -23,7 +23,7 @@ use ngx_rustscript::config::{
     validate_program_imports_for_phase,
 };
 use ngx_rustscript::host::{
-    AllowedOps, HostCapability, HostFamily, HostSyncKind, NgxPhase, bind_ngx_hosts,
+    AllowedOps, HostCapability, HostFamily, HostSyncKind, NgxPhase, bind_registry_for_test,
     host_allowed_in_phase, manifest_entry, ngx_host_catalog, production_runtime_host_names,
     with_request_scope,
 };
@@ -66,7 +66,7 @@ fn eval_in_request_phase(
 ) -> Result<Value, String> {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     with_request_scope(
         request,
         RequestIdentity::new(1, 1),

@@ -11,7 +11,7 @@ use ngx_rustscript::config::{
     validate_program_imports_for_phase,
 };
 use ngx_rustscript::host::{
-    AllowedOps, HostCapability, HostFamily, HostSyncKind, NgxPhase, bind_ngx_hosts,
+    AllowedOps, HostCapability, HostFamily, HostSyncKind, NgxPhase, bind_registry_for_test,
     host_allowed_in_phase, manifest_entry, ngx_host_catalog, with_request_scope,
 };
 use ngx_rustscript::notify::RequestIdentity;
@@ -36,7 +36,7 @@ fn dummy_request() -> Box<ngx_http_request_t> {
 fn eval_in_content(request: *mut ngx_http_request_t, source: &str) -> Result<Value, String> {
     let program = compile_content(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     with_request_scope(
         request,
         RequestIdentity::new(1, 1),

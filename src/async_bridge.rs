@@ -138,7 +138,7 @@ mod tests {
 
     use vm::{CallReturn, HostAsyncOpTerminal, HostFutureOutput, Vm, VmStatus};
 
-    use crate::host::{bind_ngx_hosts, bind_test_hosts};
+    use crate::host::{bind_registry_for_test, bind_test_hosts};
     use crate::notify::{NotifyBridge, RequestIdentity, eventfd_waker};
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -173,7 +173,7 @@ mod tests {
         if test_hosts {
             bind_test_hosts(&mut vm);
         } else {
-            bind_ngx_hosts(&mut vm);
+            bind_registry_for_test(&mut vm).expect("bind test registry");
         }
         vm.set_async_bridge(Box::new(NgxAsyncBridge::new(handle)))
             .expect("async bridge");

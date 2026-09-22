@@ -204,21 +204,20 @@ fn production_has_one_descriptor_binding_authority() {
         "restricted install must authorize catalogued hosts in the same transaction"
     );
 
-    let bind_ngx = extract_fn(&host_mod, "fn bind_ngx_hosts");
-    let bind_production = extract_fn(&host_mod, "fn bind_production_hosts");
+    let registry_fallback = extract_fn(&host_mod, "fn bind_registry_for_test");
     assert!(
-        (bind_ngx.contains("ngx_host_registry") && bind_ngx.contains("bind_vm_cached"))
-            || (bind_ngx.contains("bind_production_hosts")
-                && bind_production.contains("ngx_host_registry")
-                && bind_production.contains("bind_vm_cached")),
-        "bind_ngx_hosts must be a registry wrapper, not a name/arity bind loop:\n{bind_ngx}\n{bind_production}"
+        registry_fallback.contains("ngx_host_registry")
+            && registry_fallback.contains("bind_vm_cached"),
+        "the explicit test registry fallback must use the pinned registry API:\n{registry_fallback}"
     );
     assert!(
-        !bind_ngx.contains("bind_static_function")
-            && !bind_ngx.contains("bind_static_args_function")
-            && !bind_production.contains("bind_static_function")
-            && !bind_production.contains("bind_static_args_function"),
-        "bind_ngx_hosts must not name-bind wrappers:\n{bind_ngx}\n{bind_production}"
+        !host_mod.contains("fn bind_production_hosts") && !host_mod.contains("fn bind_ngx_hosts"),
+        "production must not expose ambiguous lazy-binding helper names"
+    );
+    assert!(
+        host_mod.contains("Registry fallback for standalone unit and integration fixtures")
+            && host_mod.contains("Configured production paths must prepare"),
+        "the registry fallback must document its test-only scope"
     );
 
     let request_state = read("src/request_state.rs");
@@ -227,19 +226,19 @@ fn production_has_one_descriptor_binding_authority() {
         bind_program.contains("ngx_host_registry")
             || bind_program.contains("bind_production_hosts")
             || bind_program.contains("install_timer_vm")
-            || bind_program.contains("bind_ngx_hosts"),
+            || bind_program.contains("bind_registry_for_test"),
         "request VMs must bind through the production registry:\n{bind_program}"
     );
     assert!(
-        !bind_program.contains("bind_ngx_hosts(vm)") || bind_ngx.contains("bind_vm_cached"),
-        "request VMs must not keep a second name-bind authority"
+        !bind_program.contains("bind_registry_for_test(vm)"),
+        "configured request VMs must not use the test registry fallback"
     );
 
     let vm_pool = read("src/vm_pool.rs");
     assert!(
         vm_pool.contains("ngx_host_registry")
             || vm_pool.contains("bind_production_hosts")
-            || (vm_pool.contains("bind_ngx_hosts") && bind_ngx.contains("bind_vm_cached")),
+            || vm_pool.contains("bind_registry_for_test"),
         "pool VMs must bind through the production registry"
     );
     assert!(
@@ -249,9 +248,13 @@ fn production_has_one_descriptor_binding_authority() {
 
     let timer = read("src/timer.rs");
     assert!(
-        (timer.contains("ngx_host_registry") && timer.contains("bind_vm_cached"))
-            || timer.contains("bind_production_hosts"),
-        "timer/callback VMs must bind through ngx_host_registry"
+        timer.contains("install_prepared_timer_vm"),
+        "timer roots must use the prepared VM installation path"
+    );
+    assert!(
+        timer.contains("pinned RustScript owned-callback API")
+            && timer.contains("newer upstream API"),
+        "the callback binding dependency must remain explicit until the upstream pin changes"
     );
 }
 

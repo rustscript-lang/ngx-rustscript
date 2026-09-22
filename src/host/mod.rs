@@ -5,6 +5,10 @@
 //! Nested modules below match that layout. There is no handwritten
 //! `HostFunction`, argument decode, or yield-based host re-entry.
 
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+use std::cell::RefCell;
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+use std::rc::Rc;
 use std::sync::Arc;
 
 use vm::{BoundHostProgram, Program, Vm, VmError};
@@ -173,34 +177,87 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
 pub struct BindingMetrics {
     pub prepared_programs: usize,
     pub bound_vm_instances: usize,
-    pub full_bind_fallbacks: usize,
+    /// Calls through the explicit registry fallback used by test fixtures.
+    ///
+    /// This hook does not observe direct `HostFunctionRegistry` calls made by
+    /// other components, including the pinned RustScript owned-callback path.
+    pub registry_fallback_entries: usize,
 }
 
 #[cfg(any(test, ngx_rustscript_integration_hooks))]
-static PREPARED_PROGRAMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static ACTIVE_BINDING_METRICS: RefCell<Vec<Rc<RefCell<BindingMetrics>>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Test/integration-only binding observation scope.
+///
+/// Counters belong to this scope and the current worker thread. There is no
+/// process-wide reset or snapshot interval, so concurrent tests cannot alter
+/// one another's observations. The production configured path records only at
+/// the pinned RustScript `bind_program_once` and `Vm::new_bound` boundaries.
 #[cfg(any(test, ngx_rustscript_integration_hooks))]
-static BOUND_VM_INSTANCES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-#[cfg(any(test, ngx_rustscript_integration_hooks))]
-static FULL_BIND_FALLBACKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub struct BindingMetricsScope {
+    metrics: Rc<RefCell<BindingMetrics>>,
+}
 
 #[cfg(any(test, ngx_rustscript_integration_hooks))]
-pub fn binding_metrics_snapshot() -> BindingMetrics {
-    use std::sync::atomic::Ordering;
+impl BindingMetricsScope {
+    pub fn enter() -> Self {
+        let metrics = Rc::new(RefCell::new(BindingMetrics::default()));
+        ACTIVE_BINDING_METRICS.with(|active| active.borrow_mut().push(Rc::clone(&metrics)));
+        Self { metrics }
+    }
 
-    BindingMetrics {
-        prepared_programs: PREPARED_PROGRAMS.load(Ordering::Relaxed),
-        bound_vm_instances: BOUND_VM_INSTANCES.load(Ordering::Relaxed),
-        full_bind_fallbacks: FULL_BIND_FALLBACKS.load(Ordering::Relaxed),
+    pub fn snapshot(&self) -> BindingMetrics {
+        *self.metrics.borrow()
     }
 }
 
 #[cfg(any(test, ngx_rustscript_integration_hooks))]
-pub fn reset_binding_metrics() {
-    use std::sync::atomic::Ordering;
+impl Drop for BindingMetricsScope {
+    fn drop(&mut self) {
+        ACTIVE_BINDING_METRICS.with(|active| {
+            let mut active = active.borrow_mut();
+            if let Some(index) = active
+                .iter()
+                .rposition(|metrics| Rc::ptr_eq(metrics, &self.metrics))
+            {
+                active.remove(index);
+            }
+        });
+    }
+}
 
-    PREPARED_PROGRAMS.store(0, Ordering::Relaxed);
-    BOUND_VM_INSTANCES.store(0, Ordering::Relaxed);
-    FULL_BIND_FALLBACKS.store(0, Ordering::Relaxed);
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+fn record_binding_metric(update: impl FnOnce(&mut BindingMetrics)) {
+    ACTIVE_BINDING_METRICS.with(|active| {
+        let target = active.borrow().last().cloned();
+        if let Some(target) = target {
+            update(&mut target.borrow_mut());
+        }
+    });
+}
+
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+fn record_prepared_program() {
+    record_binding_metric(|metrics| {
+        metrics.prepared_programs = metrics.prepared_programs.saturating_add(1);
+    });
+}
+
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+fn record_bound_vm_instance() {
+    record_binding_metric(|metrics| {
+        metrics.bound_vm_instances = metrics.bound_vm_instances.saturating_add(1);
+    });
+}
+
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+fn record_registry_fallback_entry() {
+    record_binding_metric(|metrics| {
+        metrics.registry_fallback_entries = metrics.registry_fallback_entries.saturating_add(1);
+    });
 }
 
 /// Prepare immutable production host dispatch for one compiled program.
@@ -211,10 +268,7 @@ pub(crate) fn prepare_bound_program(
         .bind_program_once(program)
         .map_err(|error| format!("prepare bound ngx host program: {error}"))?;
     #[cfg(any(test, ngx_rustscript_integration_hooks))]
-    {
-        use std::sync::atomic::Ordering;
-        PREPARED_PROGRAMS.fetch_add(1, Ordering::Relaxed);
-    }
+    record_prepared_program();
     Ok(bound)
 }
 
@@ -222,10 +276,7 @@ pub(crate) fn prepare_bound_program(
 pub(crate) fn instantiate_bound_vm(bound: Arc<BoundHostProgram>) -> Result<Vm, String> {
     let vm = Vm::new_bound(bound).map_err(|error| format!("instantiate bound ngx VM: {error}"))?;
     #[cfg(any(test, ngx_rustscript_integration_hooks))]
-    {
-        use std::sync::atomic::Ordering;
-        BOUND_VM_INSTANCES.fetch_add(1, Ordering::Relaxed);
-    }
+    record_bound_vm_instance();
     Ok(vm)
 }
 
@@ -235,28 +286,20 @@ pub(crate) fn ngx_host_catalog_abi() -> vm::HostApiFingerprint {
     *ABI.get_or_init(|| compile_host_catalog().fingerprint())
 }
 
-/// Bind the calling VM through the production descriptor registry.
+/// Registry fallback for standalone unit and integration fixtures.
 ///
-/// This legacy helper remains for standalone test fixtures that construct an
-/// unbound VM directly. Configured production paths use
-/// [`prepare_bound_program`] and [`instantiate_bound_vm`] instead.
-pub fn bind_production_hosts(vm: &mut Vm) -> Result<(), String> {
+/// Configured production paths must prepare a [`BoundHostProgram`] before
+/// admission and call [`instantiate_bound_vm`]. This explicit fallback is
+/// retained for fixtures that start with an unbound VM; it does not represent
+/// the authoritative bound-VM counters and does not apply to configured paths.
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+#[doc(hidden)]
+pub fn bind_registry_for_test(vm: &mut Vm) -> Result<(), String> {
     #[cfg(any(test, ngx_rustscript_integration_hooks))]
-    {
-        use std::sync::atomic::Ordering;
-        FULL_BIND_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-    }
+    record_registry_fallback_entry();
     ngx_host_registry()?
         .bind_vm_cached(vm)
-        .map_err(|error| format!("bind ngx host registry: {error}"))
-}
-
-/// Bind the calling VM through [`ngx_host_registry`].
-///
-/// Tests and examples that model production use this wrapper; the only
-/// binding authority is the restricted catalog registry.
-pub fn bind_ngx_hosts(vm: &mut Vm) {
-    bind_production_hosts(vm).expect("bind ngx host registry");
+        .map_err(|error| format!("bind ngx host registry for test fixture: {error}"))
 }
 
 /// Names of the `ngx::timer` family.
@@ -620,9 +663,9 @@ mod layout {
 /// Deterministic ngx host module composition.
 ///
 /// Catalog schemas, exact adapters, resource types, and named structs are
-/// derived from these descriptors. `bind_ngx_hosts` is a thin wrapper around
-/// [`ngx_host_registry`] so request, pool, and timer VMs share one restricted
-/// exact-descriptor install.
+/// derived from these descriptors. The test-only registry fallback is kept
+/// separate from the prepared production path, so request, pool, and timer
+/// VMs share one restricted exact-descriptor install.
 pub fn ngx_host_modules() -> Vec<vm::HostModuleDescriptor> {
     vec![
         layout::helpers::functions::functions_host_module(),
@@ -681,6 +724,32 @@ mod tests {
         assert!(catalog.function("ngx::fail").is_none());
         assert!(catalog.function("ngx::ready").is_none());
         assert!(catalog.function(NGX_NOW_NAME).is_some());
+    }
+
+    #[test]
+    fn binding_metric_scopes_are_isolated_per_test_thread() {
+        let handles = (0..2)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let scope = BindingMetricsScope::enter();
+                    let program =
+                        std::sync::Arc::new(Program::new(Vec::new(), vec![vm::OpCode::Ret as u8]));
+                    crate::phase::PreparedScript::prepare(
+                        program,
+                        crate::phase::ScriptExecutionMetadata::default(),
+                    )
+                    .expect("prepare isolated metric fixture");
+                    scope.snapshot()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            let metrics = handle.join().expect("metric scope thread");
+            assert_eq!(metrics.prepared_programs, 1);
+            assert_eq!(metrics.bound_vm_instances, 0);
+            assert_eq!(metrics.registry_fallback_entries, 0);
+        }
     }
 
     #[test]

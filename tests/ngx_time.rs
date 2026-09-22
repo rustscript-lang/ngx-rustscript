@@ -8,10 +8,11 @@ use ngx_rustscript_nginx_test_stubs as _;
 
 use std::sync::Arc;
 
-use ngx_rustscript::access::{on_async_ready, run_access_program};
+use ngx_rustscript::access::{on_async_ready, run_access_program_for_test};
 use ngx_rustscript::config::compile_rss_source;
 use ngx_rustscript::host::{
-    bind_ngx_hosts, clear_os_clock_override, notify_cached_clock_event_boundary, override_os_clock,
+    bind_registry_for_test, clear_os_clock_override, notify_cached_clock_event_boundary,
+    override_os_clock,
 };
 use vm::{Program, Value, Vm, VmStatus};
 
@@ -22,7 +23,7 @@ fn compile(source: &str) -> Arc<Program> {
 fn eval(source: &str) -> Value {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     let status = vm.run().unwrap_or_else(|err| panic!("run failed: {err}"));
     assert_eq!(status, VmStatus::Halted, "time hosts are synchronous");
     vm.stack()
@@ -34,7 +35,7 @@ fn eval(source: &str) -> Value {
 fn eval_err(source: &str) -> String {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     match vm.run() {
         Err(err) => err.to_string(),
         Ok(status) => panic!("expected host failure, got {status:?}"),
@@ -208,7 +209,7 @@ fn access_program_turn_refreshes_cached_clock_without_direct_hook() {
     );
 
     let program = compile("let x = 1;\n");
-    let status = run_access_program(&program).expect("sync access program");
+    let status = run_access_program_for_test(&program).expect("sync access program");
     assert_eq!(status, VmStatus::Halted);
 
     let after_request = expect_float(eval("use ngx;\nngx::now();\n"));

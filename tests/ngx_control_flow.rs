@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use nginx_sys::ngx_http_request_t;
 use ngx_rustscript::config::{compile_rss_source, program_requires_request_state};
 use ngx_rustscript::host::{
-    AllowedOps, HostCapability, HostFamily, HostSyncKind, NgxPhase, bind_ngx_hosts,
+    AllowedOps, HostCapability, HostFamily, HostSyncKind, NgxPhase, bind_registry_for_test,
     host_allowed_in_phase, manifest_entry, ngx_host_catalog, with_request_scope,
 };
 use ngx_rustscript::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
@@ -75,7 +75,9 @@ struct Driver {
 impl Driver {
     fn new(program: Arc<Program>, request_id: u64) -> Self {
         let mut worker = WorkerRuntime::start().unwrap();
-        let exec = worker.bind_access_exec(program, request_id).expect("bind");
+        let exec = worker
+            .bind_access_exec_for_test(program, request_id)
+            .expect("bind");
         Self {
             worker,
             exec,
@@ -259,7 +261,7 @@ fn cancel_and_stale_wake_after_disposition_are_inert() {
 fn control_requires_control_capability() {
     let program = compile("use ngx;\nngx::exit(403);\n");
     let mut vm = Vm::try_new((*program).clone()).expect("vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     let mut req = dummy_request();
     let ptr = req.as_mut() as *mut ngx_http_request_t;
     let err = with_request_scope(

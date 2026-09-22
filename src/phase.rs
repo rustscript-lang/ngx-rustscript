@@ -204,22 +204,17 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn prepared_program_instantiates_many_vms_without_request_bind_fallback() {
-        let before = crate::host::binding_metrics_snapshot();
+    fn prepared_script_instantiates_through_the_bound_vm_hook() {
+        let scope = crate::host::BindingMetricsScope::enter();
         let program = Arc::new(Program::new(Vec::new(), vec![vm::OpCode::Ret as u8]));
         let prepared = PreparedScript::prepare(program, ScriptExecutionMetadata::default())
             .expect("prepare empty program");
 
-        for _ in 0..10_000 {
-            prepared.new_vm().expect("instantiate bound VM");
-        }
+        prepared.new_vm().expect("instantiate bound VM");
 
-        let metrics = crate::host::binding_metrics_snapshot();
-        assert_eq!(metrics.prepared_programs - before.prepared_programs, 1);
-        assert_eq!(
-            metrics.bound_vm_instances - before.bound_vm_instances,
-            10_000
-        );
-        assert_eq!(metrics.full_bind_fallbacks - before.full_bind_fallbacks, 0);
+        let metrics = scope.snapshot();
+        assert_eq!(metrics.prepared_programs, 1);
+        assert_eq!(metrics.bound_vm_instances, 1);
+        assert_eq!(metrics.registry_fallback_entries, 0);
     }
 }

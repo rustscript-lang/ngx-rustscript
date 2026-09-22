@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use hmac::{Hmac, Mac};
 use ngx_rustscript::config::compile_rss_source;
-use ngx_rustscript::host::{bind_ngx_hosts, production_runtime_host_names};
+use ngx_rustscript::host::{bind_registry_for_test, production_runtime_host_names};
 use sha1::Sha1;
 use vm::{Value, Vm, VmStatus};
 
@@ -82,7 +82,7 @@ fn ngx_hmac_sha1_b64_nopad(pepper: &str, token: &str) -> String {
         format!("use ngx;\nngx::encode_base64(ngx::hmac_sha1(\"{pepper}\", \"{token}\"), true);\n");
     let program = compile_rss_source(&source).unwrap_or_else(|err| panic!("compile hmac: {err}"));
     let mut vm = Vm::try_new((*program).clone()).expect("vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     let status = vm.run().unwrap_or_else(|err| panic!("run hmac: {err}"));
     assert_eq!(status, VmStatus::Halted);
     match vm.stack().last() {

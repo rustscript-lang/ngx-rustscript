@@ -18,7 +18,7 @@ use ngx::ngx_log_error;
 use crate::Module;
 use crate::access::{
     allocate_scope_identity, ensure_shared_ngx_ctx, enter_phase_scope, enter_phase_vm,
-    next_request_id, run_prepared_access_program,
+    next_request_id, run_prepared_phase_program,
 };
 use crate::host::NgxPhase;
 use crate::request_state::fail_closed_log_status;
@@ -70,7 +70,9 @@ fn run_pooled_log(request: &mut Request, prepared: &Arc<PreparedScript>) -> Stat
     let identity = allocate_scope_identity();
     enter_phase_scope(raw, identity, NgxPhase::Log, || {
         enter_phase_vm(identity, NgxPhase::Log, || {
-            if let Err(err) = fail_closed_log_status(run_prepared_access_program(prepared)) {
+            if let Err(err) =
+                fail_closed_log_status(run_prepared_phase_program(prepared, NgxPhase::Log))
+            {
                 ngx_log_error!(NGX_LOG_ERR, request.log(), "{DIRECTIVE}: {err}");
             }
             Status::NGX_OK
@@ -173,7 +175,7 @@ mod tests {
         let mut worker = WorkerRuntime::start().unwrap();
         let program = compile_rss_source("use ngx;\nngx::sleep_ms(50);\n").expect("compile sleep");
         let mut exec = worker
-            .bind_phase_exec(program, 42, NgxPhase::Log)
+            .bind_phase_exec_for_test(program, 42, NgxPhase::Log)
             .expect("bind log");
         let err = exec.run_sync_fail_closed().expect_err("must fail closed");
         assert_eq!(err, LOG_CANNOT_WAIT);
@@ -188,7 +190,7 @@ mod tests {
         let mut worker = WorkerRuntime::start().unwrap();
         let program = compile_rss_source("let x = 1 + 2;\n").expect("compile log");
         let mut exec = worker
-            .bind_phase_exec(program, 7, NgxPhase::Log)
+            .bind_phase_exec_for_test(program, 7, NgxPhase::Log)
             .expect("bind log");
         exec.run_sync_fail_closed().expect("halted log");
         assert!(!exec.wait_permit_armed());

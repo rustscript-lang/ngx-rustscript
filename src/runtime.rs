@@ -264,30 +264,70 @@ impl WorkerRuntime {
         let _ = self.notify.forget_invalidated(identity);
     }
 
-    /// Worker-main-thread access setup: bind one request-local VM and bridge.
+    /// Bind a request VM from a configuration-time prepared script.
     pub fn bind_access_exec(
         &mut self,
-        program: Arc<Program>,
+        prepared: Arc<PreparedScript>,
         request_id: u64,
     ) -> Result<AccessExec, String> {
-        self.bind_phase_exec(program, request_id, crate::host::NgxPhase::Access)
+        self.bind_phase_exec(prepared, request_id, crate::host::NgxPhase::Access)
     }
 
+    /// Bind a request VM from a configuration-time prepared script.
     pub fn bind_phase_exec(
         &mut self,
-        program: Arc<Program>,
+        prepared: Arc<PreparedScript>,
         request_id: u64,
         phase: crate::host::NgxPhase,
     ) -> Result<AccessExec, String> {
         self.bind_phase_exec_with_policy(
-            program,
+            prepared,
             request_id,
             phase,
             crate::host::StandardHostPolicy::fail_closed(),
         )
     }
 
+    /// Bind a request VM from a configuration-time prepared script and policy.
     pub fn bind_phase_exec_with_policy(
+        &mut self,
+        prepared: Arc<PreparedScript>,
+        request_id: u64,
+        phase: crate::host::NgxPhase,
+        policy: crate::host::StandardHostPolicy,
+    ) -> Result<AccessExec, String> {
+        self.bind_prepared_phase_exec_with_policy(prepared, request_id, phase, policy)
+    }
+
+    /// Explicit lazy-preparation fallback for unit and integration fixtures.
+    #[cfg(any(test, ngx_rustscript_integration_hooks))]
+    #[doc(hidden)]
+    pub fn bind_access_exec_for_test(
+        &mut self,
+        program: Arc<Program>,
+        request_id: u64,
+    ) -> Result<AccessExec, String> {
+        let prepared = PreparedScript::prepare(program, ScriptExecutionMetadata::default())?;
+        self.bind_access_exec(prepared, request_id)
+    }
+
+    /// Explicit lazy-preparation fallback for unit and integration fixtures.
+    #[cfg(any(test, ngx_rustscript_integration_hooks))]
+    #[doc(hidden)]
+    pub fn bind_phase_exec_for_test(
+        &mut self,
+        program: Arc<Program>,
+        request_id: u64,
+        phase: crate::host::NgxPhase,
+    ) -> Result<AccessExec, String> {
+        let prepared = PreparedScript::prepare(program, ScriptExecutionMetadata::default())?;
+        self.bind_phase_exec(prepared, request_id, phase)
+    }
+
+    /// Explicit lazy-preparation fallback for unit and integration fixtures.
+    #[cfg(any(test, ngx_rustscript_integration_hooks))]
+    #[doc(hidden)]
+    pub fn bind_phase_exec_with_policy_for_test(
         &mut self,
         program: Arc<Program>,
         request_id: u64,
@@ -295,7 +335,7 @@ impl WorkerRuntime {
         policy: crate::host::StandardHostPolicy,
     ) -> Result<AccessExec, String> {
         let prepared = PreparedScript::prepare(program, ScriptExecutionMetadata::default())?;
-        self.bind_prepared_phase_exec_with_policy(prepared, request_id, phase, policy)
+        self.bind_phase_exec_with_policy(prepared, request_id, phase, policy)
     }
 
     pub(crate) fn bind_prepared_phase_exec_with_policy(
@@ -976,7 +1016,7 @@ mod tests {
     #[test]
     fn waiting_sleep_wakes_eventfd_and_resumes() {
         let mut worker = WorkerRuntime::start().unwrap();
-        let mut exec = worker.bind_access_exec(sleep_once(5), 1).unwrap();
+        let mut exec = worker.bind_access_exec_for_test(sleep_once(5), 1).unwrap();
         let mut registry = IdentityRegistry::with_capacity(8);
         assert_eq!(
             exec.handle_access(&mut registry, &worker),
@@ -1018,7 +1058,9 @@ mod tests {
     #[test]
     fn shutdown_does_not_hang_on_long_sleep() {
         let mut worker = WorkerRuntime::start().unwrap();
-        let mut exec = worker.bind_access_exec(sleep_once(60_000), 1).unwrap();
+        let mut exec = worker
+            .bind_access_exec_for_test(sleep_once(60_000), 1)
+            .unwrap();
         let mut registry = IdentityRegistry::with_capacity(8);
         assert_eq!(
             exec.handle_access(&mut registry, &worker),
@@ -1039,7 +1081,9 @@ mod tests {
     #[test]
     fn shutdown_releases_unfinished_reservation() {
         let mut worker = WorkerRuntime::start_with_capacity(1).unwrap();
-        let mut exec = worker.bind_access_exec(sleep_once(60_000), 1).unwrap();
+        let mut exec = worker
+            .bind_access_exec_for_test(sleep_once(60_000), 1)
+            .unwrap();
         let mut registry = IdentityRegistry::with_capacity(1);
         assert_eq!(
             exec.handle_access(&mut registry, &worker),
@@ -1142,8 +1186,10 @@ mod tests {
     fn two_requests_receive_distinct_identities() {
         let mut worker = WorkerRuntime::start().unwrap();
         let program = sleep_once(5);
-        let a = worker.bind_access_exec(Arc::clone(&program), 1).expect("a");
-        let b = worker.bind_access_exec(program, 2).expect("b");
+        let a = worker
+            .bind_access_exec_for_test(Arc::clone(&program), 1)
+            .expect("a");
+        let b = worker.bind_access_exec_for_test(program, 2).expect("b");
         assert_ne!(a.identity(), b.identity());
         worker.shutdown();
     }
@@ -1163,11 +1209,14 @@ ngx::exit(ngx::core::ok());
         )
         .expect("compile");
         let policy = crate::host::StandardHostPolicy::fail_closed();
+        let prepared =
+            PreparedScript::prepare(Arc::clone(&program), ScriptExecutionMetadata::default())
+                .expect("prepare reusable request VM");
 
         for request_id in 1..=32 {
             let mut exec = worker
-                .bind_reusable_phase_exec_with_policy(
-                    Arc::clone(&program),
+                .bind_reusable_prepared_phase_exec_with_policy(
+                    Arc::clone(&prepared),
                     request_id,
                     crate::host::NgxPhase::Access,
                     policy.clone(),
@@ -1212,12 +1261,15 @@ if response["status"] != 204 {{ 1 / 0; }}
         policy.http_schemes.push("http".into());
         policy.http_ports.push(port);
         policy.http_allow_private = true;
+        let prepared =
+            PreparedScript::prepare(Arc::clone(&program), ScriptExecutionMetadata::default())
+                .expect("prepare buffered HTTP VM");
 
         let mut identities = Vec::new();
         for request_id in 1..=2 {
             let mut exec = worker
-                .bind_reusable_phase_exec_with_policy(
-                    Arc::clone(&program),
+                .bind_reusable_prepared_phase_exec_with_policy(
+                    Arc::clone(&prepared),
                     request_id,
                     crate::host::NgxPhase::Access,
                     policy.clone(),
@@ -1236,8 +1288,8 @@ if response["status"] != 204 {{ 1 / 0; }}
         let mut isolated_policy = policy;
         isolated_policy.http_hosts.push("localhost".into());
         let mut isolated = worker
-            .bind_reusable_phase_exec_with_policy(
-                Arc::clone(&program),
+            .bind_reusable_prepared_phase_exec_with_policy(
+                Arc::clone(&prepared),
                 3,
                 crate::host::NgxPhase::Access,
                 isolated_policy,
@@ -1287,10 +1339,12 @@ if response["status"] != 204 {{ 1 / 0; }}
             reuses_request_vm: true,
             uses_sqlite: false,
         };
+        let prepared = PreparedScript::prepare(Arc::clone(&program), metadata)
+            .expect("prepare configured exec");
         for request_id in 1..=2 {
             let mut exec = worker
-                .bind_configured_phase_exec_with_policy(
-                    Arc::clone(&program),
+                .bind_configured_prepared_phase_exec_with_policy(
+                    Arc::clone(&prepared),
                     request_id,
                     crate::host::NgxPhase::Access,
                     crate::host::StandardHostPolicy::fail_closed(),
@@ -1421,8 +1475,10 @@ if response["status"] != 204 {{ 1 / 0; }}
     fn bounded_capacity_rejects_then_reclaims() {
         let mut worker = WorkerRuntime::start_with_capacity(1).unwrap();
         let program = sleep_once(60_000);
-        let mut a = worker.bind_access_exec(Arc::clone(&program), 1).expect("a");
-        let mut b = worker.bind_access_exec(program, 2).expect("b");
+        let mut a = worker
+            .bind_access_exec_for_test(Arc::clone(&program), 1)
+            .expect("a");
+        let mut b = worker.bind_access_exec_for_test(program, 2).expect("b");
         let mut registry = IdentityRegistry::with_capacity(8);
         assert_eq!(a.handle_access(&mut registry, &worker), AccessStatus::Again);
         assert_eq!(
@@ -1442,7 +1498,7 @@ if response["status"] != 204 {{ 1 / 0; }}
         let mut execs = Vec::new();
         for id in 1..=8 {
             let mut exec = worker
-                .bind_access_exec(Arc::clone(&program), id)
+                .bind_access_exec_for_test(Arc::clone(&program), id)
                 .expect("bind");
             assert_eq!(
                 exec.handle_access(&mut registry, &worker),
@@ -1850,20 +1906,20 @@ if summary["items"] != 4 {{ 1 / 0; }}
         assert_eq!(worker.in_flight().expect("worker in-flight count"), 0);
     }
 
-    fn run_reusable_http(
+    fn run_reusable_prepared_http(
         worker: &mut WorkerRuntime,
-        program: Arc<Program>,
+        prepared: Arc<PreparedScript>,
         request_id: u64,
         policy: crate::host::StandardHostPolicy,
     ) {
         let mut exec = worker
-            .bind_reusable_phase_exec_with_policy(
-                program,
+            .bind_reusable_prepared_phase_exec_with_policy(
+                prepared,
                 request_id,
                 crate::host::NgxPhase::Access,
                 policy,
             )
-            .expect("bind reusable HTTP VM");
+            .expect("bind reusable prepared HTTP VM");
         let status = run_async_exec_to_halt(worker, &mut exec);
         assert_eq!(
             status,
@@ -1874,6 +1930,17 @@ if summary["items"] != 4 {{ 1 / 0; }}
         assert!(exec.cleanup_wait(worker).is_none());
     }
 
+    fn run_reusable_http(
+        worker: &mut WorkerRuntime,
+        program: Arc<Program>,
+        request_id: u64,
+        policy: crate::host::StandardHostPolicy,
+    ) {
+        let prepared = PreparedScript::prepare(program, ScriptExecutionMetadata::default())
+            .expect("prepare reusable HTTP VM");
+        run_reusable_prepared_http(worker, prepared, request_id, policy);
+    }
+
     #[test]
     fn one_worker_http_client_reuses_connection_across_vm_reuse_and_eviction() {
         let (port, accepted, server) = start_keep_alive_server(10);
@@ -1882,10 +1949,13 @@ if summary["items"] != 4 {{ 1 / 0; }}
         let program = buffered_http_program(port, "reuse");
         assert!(crate::config::program_can_reuse_request_vm(&program));
 
+        let prepared =
+            PreparedScript::prepare(Arc::clone(&program), ScriptExecutionMetadata::default())
+                .expect("prepare reusable HTTP program");
         for request_id in 1..=5 {
-            run_reusable_http(
+            run_reusable_prepared_http(
                 &mut worker,
-                Arc::clone(&program),
+                Arc::clone(&prepared),
                 request_id,
                 policy.clone(),
             );
@@ -1962,8 +2032,16 @@ let boom = 1 / 0;
         ))
         .expect("compile failing HTTP program");
 
+        let ok_prepared =
+            PreparedScript::prepare(Arc::clone(&ok), ScriptExecutionMetadata::default())
+                .expect("prepare successful HTTP program");
         for request_id in 1..=2 {
-            run_reusable_http(&mut worker, Arc::clone(&ok), request_id, policy.clone());
+            run_reusable_prepared_http(
+                &mut worker,
+                Arc::clone(&ok_prepared),
+                request_id,
+                policy.clone(),
+            );
         }
         assert_eq!(worker.reusable_request_vm_created_count(), 1);
         assert_eq!(worker.observed_http_config_count(), 1);
@@ -2002,7 +2080,7 @@ let boom = 1 / 0;
 
         for request_id in 1..=VMS as u64 {
             let mut exec = worker
-                .bind_phase_exec_with_policy(
+                .bind_phase_exec_with_policy_for_test(
                     Arc::clone(&program),
                     request_id,
                     crate::host::NgxPhase::Access,
@@ -2055,7 +2133,7 @@ let boom = 1 / 0;
         let sse = sse_http_program(http_port);
         assert!(!crate::config::program_can_reuse_request_vm(&sse));
         let mut exec = worker
-            .bind_phase_exec_with_policy(sse, 2, crate::host::NgxPhase::Access, policy)
+            .bind_phase_exec_with_policy_for_test(sse, 2, crate::host::NgxPhase::Access, policy)
             .expect("bind SSE VM");
         assert_eq!(
             run_async_exec_to_halt(&mut worker, &mut exec),
@@ -2078,7 +2156,7 @@ let boom = 1 / 0;
         let mut worker = WorkerRuntime::start().unwrap();
         let policy = http_policy(port);
         let mut buffered = worker
-            .bind_phase_exec_with_policy(
+            .bind_phase_exec_with_policy_for_test(
                 buffered_http_program(port, "pending"),
                 1,
                 crate::host::NgxPhase::Access,
@@ -2086,7 +2164,7 @@ let boom = 1 / 0;
             )
             .expect("bind buffered pending HTTP");
         let mut sse = worker
-            .bind_phase_exec_with_policy(
+            .bind_phase_exec_with_policy_for_test(
                 sse_http_program(port),
                 2,
                 crate::host::NgxPhase::Access,
@@ -2130,7 +2208,7 @@ let boom = 1 / 0;
         assert!(!outcome.already_stopped);
         assert!(
             worker
-                .bind_phase_exec_with_policy(
+                .bind_phase_exec_with_policy_for_test(
                     buffered_http_program(port, "after"),
                     3,
                     crate::host::NgxPhase::Access,
@@ -2169,7 +2247,7 @@ let boom = 1 / 0;
         let mut worker = WorkerRuntime::start().unwrap();
         let policy = http_policy(port);
         let mut buffered = worker
-            .bind_phase_exec_with_policy(
+            .bind_phase_exec_with_policy_for_test(
                 buffered_http_program(port, "drop-pending"),
                 1,
                 crate::host::NgxPhase::Access,
@@ -2177,7 +2255,7 @@ let boom = 1 / 0;
             )
             .expect("bind buffered Drop HTTP");
         let mut sse = worker
-            .bind_phase_exec_with_policy(
+            .bind_phase_exec_with_policy_for_test(
                 sse_http_program(port),
                 2,
                 crate::host::NgxPhase::Access,

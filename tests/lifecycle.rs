@@ -83,7 +83,7 @@ struct Driver {
 impl Driver {
     fn new(program: Arc<Program>) -> Self {
         let mut worker = WorkerRuntime::start().unwrap();
-        let exec = worker.bind_access_exec(program, 1).expect("bind");
+        let exec = worker.bind_access_exec_for_test(program, 1).expect("bind");
         Self {
             worker,
             exec,
@@ -304,7 +304,7 @@ fn waiting_maps_to_nginx_again_unchanged() {
 fn real_vm_cancel_drops_future_and_permit() {
     let mut worker = WorkerRuntime::start().unwrap();
     let mut exec = worker
-        .bind_access_exec(sleep_once(60_000), 11)
+        .bind_access_exec_for_test(sleep_once(60_000), 11)
         .expect("bind");
     let mut registry = IdentityRegistry::with_capacity(8);
     assert_eq!(
@@ -331,7 +331,7 @@ fn real_vm_cancel_drops_future_and_permit() {
 fn close_triggered_cleanup_aborts_and_zeros_permit() {
     let mut worker = WorkerRuntime::start().unwrap();
     let mut exec = worker
-        .bind_access_exec(sleep_once(60_000), 21)
+        .bind_access_exec_for_test(sleep_once(60_000), 21)
         .expect("bind");
     let mut registry = IdentityRegistry::with_capacity(8);
     assert_eq!(
@@ -371,8 +371,12 @@ fn close_triggered_cleanup_aborts_and_zeros_permit() {
 #[test]
 fn worker_shutdown_with_in_flight_waits_is_fast_and_zeros_permits() {
     let mut worker = WorkerRuntime::start().unwrap();
-    let mut a = worker.bind_access_exec(sleep_once(60_000), 1).unwrap();
-    let mut b = worker.bind_access_exec(sleep_once(60_000), 2).unwrap();
+    let mut a = worker
+        .bind_access_exec_for_test(sleep_once(60_000), 1)
+        .unwrap();
+    let mut b = worker
+        .bind_access_exec_for_test(sleep_once(60_000), 2)
+        .unwrap();
     let mut registry = IdentityRegistry::with_capacity(8);
     assert_eq!(a.handle_access(&mut registry, &worker), AccessStatus::Again);
     assert_eq!(b.handle_access(&mut registry, &worker), AccessStatus::Again);

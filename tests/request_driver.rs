@@ -58,7 +58,7 @@ struct Driver {
 impl Driver {
     fn new(program: Arc<Program>) -> Self {
         let mut worker = WorkerRuntime::start().unwrap();
-        let exec = worker.bind_access_exec(program, 1).expect("bind");
+        let exec = worker.bind_access_exec_for_test(program, 1).expect("bind");
         Self {
             worker,
             exec,
@@ -242,8 +242,10 @@ fn same_key_same_value_insert_is_idempotent() {
 fn two_requests_receive_distinct_identities() {
     let mut worker = WorkerRuntime::start().unwrap();
     let program = sleep_once(5);
-    let a = worker.bind_access_exec(Arc::clone(&program), 1).expect("a");
-    let b = worker.bind_access_exec(program, 2).expect("b");
+    let a = worker
+        .bind_access_exec_for_test(Arc::clone(&program), 1)
+        .expect("a");
+    let b = worker.bind_access_exec_for_test(program, 2).expect("b");
     assert_ne!(a.identity(), b.identity());
     worker.shutdown();
 }

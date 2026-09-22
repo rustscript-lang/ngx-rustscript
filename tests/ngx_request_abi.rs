@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use nginx_sys::{ngx_http_request_body_t, ngx_http_request_t};
 use ngx_rustscript::config::compile_rss_source;
-use ngx_rustscript::host::{AllowedOps, NgxPhase, bind_ngx_hosts, with_request_scope};
+use ngx_rustscript::host::{AllowedOps, NgxPhase, bind_registry_for_test, with_request_scope};
 use ngx_rustscript::notify::RequestIdentity;
 use ngx_rustscript_nginx_test_stubs as nginx_stubs;
 use vm::{Program, Value, Vm, VmStatus};
@@ -19,7 +19,7 @@ fn compile(source: &str) -> Arc<Program> {
 fn eval_in_request(request: *mut ngx_http_request_t, source: &str) -> Result<Value, String> {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     with_request_scope(
         request,
         RequestIdentity::new(1, 1),

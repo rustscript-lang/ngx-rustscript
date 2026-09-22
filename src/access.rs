@@ -28,7 +28,7 @@ use crate::host::{
     AllowedOps, NgxPhase, RequestLocalCtx, with_request_scope, with_vm_request_scope,
 };
 use crate::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
-use crate::phase::{PhaseSlot, PreparedScript};
+use crate::phase::{PhaseSlot, PreparedScript, ScriptExecutionMetadata};
 use crate::request_state::{AccessExec, AccessStatus, IdentityRegistry, ReadyEffect};
 use crate::vm_pool;
 
@@ -389,17 +389,27 @@ pub(crate) fn allocate_scope_identity() -> RequestIdentity {
     })
 }
 
-/// Run a compiled program on a worker-local pooled VM until the first status.
-pub fn run_access_program(program: &Arc<Program>) -> Result<VmStatus, VmError> {
+/// Run one prebound program on a worker-local pooled VM until the first status.
+pub fn run_access_program(prepared: &Arc<PreparedScript>) -> Result<VmStatus, VmError> {
     mark_cached_clock_event_boundary();
-    vm_pool::run(program)
+    vm_pool::run_prepared(prepared, NgxPhase::Access)
 }
 
-pub(crate) fn run_prepared_access_program(
+/// Explicit lazy-preparation fallback for unit and integration fixtures.
+#[cfg(any(test, ngx_rustscript_integration_hooks))]
+#[doc(hidden)]
+pub fn run_access_program_for_test(program: &Arc<Program>) -> Result<VmStatus, VmError> {
+    let prepared = PreparedScript::prepare(Arc::clone(program), ScriptExecutionMetadata::default())
+        .map_err(VmError::HostError)?;
+    run_access_program(&prepared)
+}
+
+pub(crate) fn run_prepared_phase_program(
     prepared: &Arc<PreparedScript>,
+    phase: NgxPhase,
 ) -> Result<VmStatus, VmError> {
     mark_cached_clock_event_boundary();
-    vm_pool::run_prepared(prepared)
+    vm_pool::run_prepared(prepared, phase)
 }
 
 /// Map VM termination onto the access-phase continuation / error codes.
@@ -455,7 +465,7 @@ fn run_configured_phase(request: &mut Request, conf: &LocationConf, slot: PhaseS
         let identity = allocate_scope_identity();
         return enter_phase_scope(raw, identity, phase, || {
             enter_phase_vm(identity, phase, || {
-                match run_prepared_access_program(prepared) {
+                match run_prepared_phase_program(prepared, phase) {
                     Ok(VmStatus::Halted) => complete_sync_ok(raw, slot),
                     Ok(status) => {
                         ngx_log_error!(

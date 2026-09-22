@@ -20,7 +20,7 @@ use ngx_rustscript::host::{
     NGX_HOST_CATALOG_SCHEMA_VERSION, NGX_MD5_BIN_NAME, NGX_MD5_NAME, NGX_NOW_NAME,
     NGX_QUOTE_SQL_STR_NAME, NGX_SHA1_BIN_NAME, NGX_SLEEP_MS_NAME, NGX_SLEEP_NAME,
     NGX_STATUS_GET_NAME, NGX_TIME_NAME, NGX_UNESCAPE_URI_NAME, NGX_UPDATE_TIME_NAME, NgxPhase,
-    StandardHostPolicy, bind_ngx_hosts, compile_host_catalog, host_allowed_in_phase,
+    StandardHostPolicy, bind_registry_for_test, compile_host_catalog, host_allowed_in_phase,
     http_config_from_policy, install_standard_runtime, is_standard_host_import, ngx_host_catalog,
     ngx_host_manifest, ngx_host_registry, production_runtime_host_names,
 };
@@ -834,7 +834,7 @@ fn bound_vm_has_every_catalogued_runtime_host_and_no_test_hosts() {
 
     let program = compile("let x = 1;\n");
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     for banned in [
         "ngx::probe",
         "ngx::fail",
@@ -850,7 +850,7 @@ fn bound_vm_has_every_catalogued_runtime_host_and_no_test_hosts() {
 
     let now_program = compile_rss_source("use ngx;\nngx::now();\n").expect("ngx::now program");
     let mut now_vm = Vm::new_shared(now_program);
-    bind_ngx_hosts(&mut now_vm);
+    bind_registry_for_test(&mut now_vm).expect("bind test registry");
     now_vm
         .run()
         .expect("production bind must execute imported ngx::now");

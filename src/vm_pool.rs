@@ -1,15 +1,9 @@
 //! Worker-thread-local synchronous VM pool.
 //!
-//! pd-vm at `b14f7d2edddbe23e996b953c7cc7ff6de2c0a809` stores `Arc<Program>`
-//! internally and exposes:
-//!
-//! - [`Vm::new_shared`] — shared-program constructor (this pin has no
-//!   `try_new_shared`; [`Vm::try_new`] only wraps owned [`Vm::new`])
-//! - [`Vm::reset_for_reuse`] — starts execution-scope close, rewinds IP,
-//!   clears stack/locals through the drop contract
-//! - [`Vm::poll_reset_for_reuse`] — completes a pending generic scope close
-//! - [`Vm::is_reusable`] — supported pool-return predicate (scope Active,
-//!   no pending reset, interpreter state parked)
+//! pd-vm at `b14f7d2edddbe23e996b953c7cc7ff6de2c0a809` exposes the bound
+//! constructor through [`PreparedScript::new_vm`], which delegates to
+//! `Vm::new_bound`. This pool therefore receives a configuration-time
+//! [`PreparedScript`] and never prepares or fully binds on checkout.
 //!
 //! This pool is strictly worker-thread-local and synchronous. It does not
 //! implement `Send`, use a process-global mutex, store a request pointer, or
@@ -23,9 +17,14 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
-use vm::{Program, Vm, VmError, VmStatus};
+#[cfg(test)]
+use vm::Program;
+use vm::{Vm, VmError, VmStatus};
 
-use crate::phase::{PreparedScript, ScriptExecutionMetadata};
+use crate::host::NgxPhase;
+use crate::phase::PreparedScript;
+#[cfg(test)]
+use crate::phase::ScriptExecutionMetadata;
 
 /// Maximum idle VMs retained on one worker thread.
 pub const MAX_IDLE_VMS: usize = 4;
@@ -40,6 +39,7 @@ struct WorkerVmPool {
 
 struct PooledVm {
     prepared: Arc<PreparedScript>,
+    phase: NgxPhase,
     vm: Vm,
 }
 
@@ -48,12 +48,11 @@ impl WorkerVmPool {
         Self { idle: Vec::new() }
     }
 
-    fn take(&mut self, prepared: &Arc<PreparedScript>) -> Result<Vm, String> {
+    fn take(&mut self, prepared: &Arc<PreparedScript>, phase: NgxPhase) -> Result<Vm, String> {
         if let Some(idx) = self.idle.iter().position(|entry| {
-            std::ptr::eq(
-                entry.prepared.program().as_ref(),
-                prepared.program().as_ref(),
-            ) && entry.prepared.ngx_catalog_abi() == prepared.ngx_catalog_abi()
+            Arc::ptr_eq(&entry.prepared, prepared)
+                && entry.phase == phase
+                && entry.prepared.ngx_catalog_abi() == prepared.ngx_catalog_abi()
                 && entry.prepared.standard_catalog_abi() == prepared.standard_catalog_abi()
         }) {
             return Ok(self.idle.swap_remove(idx).vm);
@@ -61,12 +60,16 @@ impl WorkerVmPool {
         construct(prepared)
     }
 
-    fn recycle(&mut self, prepared: Arc<PreparedScript>, mut vm: Vm) {
+    fn recycle(&mut self, prepared: Arc<PreparedScript>, phase: NgxPhase, mut vm: Vm) {
         if self.idle.len() >= MAX_IDLE_VMS {
             return;
         }
         if reset_for_pool(&mut vm) {
-            self.idle.push(PooledVm { prepared, vm });
+            self.idle.push(PooledVm {
+                prepared,
+                phase,
+                vm,
+            });
         }
     }
 }
@@ -125,21 +128,17 @@ pub(crate) fn reset_request_vm_for_pool(vm: &mut Vm, runtime: &tokio::runtime::H
     vm.is_reusable()
 }
 
-/// Run `program` on a leased worker-local VM until the first status.
-pub fn run(program: &Arc<Program>) -> Result<VmStatus, VmError> {
-    let prepared = PreparedScript::prepare(Arc::clone(program), ScriptExecutionMetadata::default())
-        .map_err(VmError::HostError)?;
-    run_prepared(&prepared)
-}
-
 /// Run one prebound program on a worker-local pooled VM.
-pub(crate) fn run_prepared(prepared: &Arc<PreparedScript>) -> Result<VmStatus, VmError> {
+pub(crate) fn run_prepared(
+    prepared: &Arc<PreparedScript>,
+    phase: NgxPhase,
+) -> Result<VmStatus, VmError> {
     let mut vm = POOL
-        .with(|pool| pool.borrow_mut().take(prepared))
+        .with(|pool| pool.borrow_mut().take(prepared, phase))
         .map_err(VmError::HostError)?;
     let result = vm.run();
     if matches!(&result, Ok(VmStatus::Halted) | Err(_)) {
-        POOL.with(|pool| pool.borrow_mut().recycle(Arc::clone(prepared), vm));
+        POOL.with(|pool| pool.borrow_mut().recycle(Arc::clone(prepared), phase, vm));
     }
     result
 }
@@ -222,8 +221,13 @@ mod tests {
     fn sequential_runs_of_one_program_create_one_vm() {
         reset_test_state();
         let program = compile("let x = 1 + 2;\n");
+        let prepared =
+            PreparedScript::prepare(program, ScriptExecutionMetadata::default()).expect("prepare");
         for _ in 0..32 {
-            assert_eq!(run(&program).expect("run"), VmStatus::Halted);
+            assert_eq!(
+                run_prepared(&prepared, NgxPhase::Access).expect("run"),
+                VmStatus::Halted
+            );
         }
         assert_eq!(created_count(), 1, "same program must reuse one VM");
         assert_eq!(idle_count(), 1);
@@ -231,33 +235,128 @@ mod tests {
     }
 
     #[test]
-    fn prepared_pool_eviction_never_reprepares_or_full_binds() {
-        let before = crate::host::binding_metrics_snapshot();
+    fn prepared_pool_checkout_reuse_and_capacity_use_bound_construction() {
+        reset_test_state();
+        let scope = crate::host::BindingMetricsScope::enter();
         let program = compile("let x = 1 + 2;\n");
-        let prepared = PreparedScript::prepare(program, ScriptExecutionMetadata::default())
-            .expect("prepare pooled program");
-        let mut pool = WorkerVmPool::new();
+        let prepared = (0..=MAX_IDLE_VMS)
+            .map(|_| {
+                PreparedScript::prepare(Arc::clone(&program), ScriptExecutionMetadata::default())
+                    .expect("prepare pooled program")
+            })
+            .collect::<Vec<_>>();
 
-        for _ in 0..(MAX_IDLE_VMS + 8) {
-            let vm = construct(&prepared).expect("bound pool VM");
-            pool.recycle(Arc::clone(&prepared), vm);
+        // Each checkout goes through the production `take` miss path. The
+        // fifth entry is over capacity and is dropped on recycle.
+        for prepared in &prepared {
+            assert_eq!(
+                run_prepared(prepared, NgxPhase::Access).expect("bound pool VM"),
+                VmStatus::Halted
+            );
+        }
+        assert_eq!(created_count(), MAX_IDLE_VMS + 1);
+        assert_eq!(idle_count(), MAX_IDLE_VMS);
+
+        // The first entry was retained and hits the pool. The over-capacity
+        // entry was evicted and must be constructed again on its next miss.
+        assert_eq!(
+            run_prepared(&prepared[0], NgxPhase::Access).expect("retained VM reuse"),
+            VmStatus::Halted
+        );
+        assert_eq!(created_count(), MAX_IDLE_VMS + 1);
+        assert_eq!(
+            run_prepared(&prepared[MAX_IDLE_VMS], NgxPhase::Access)
+                .expect("evicted VM replacement"),
+            VmStatus::Halted
+        );
+        assert_eq!(created_count(), MAX_IDLE_VMS + 2);
+
+        let metrics = scope.snapshot();
+        assert_eq!(metrics.prepared_programs, MAX_IDLE_VMS + 1);
+        assert_eq!(metrics.bound_vm_instances, MAX_IDLE_VMS + 2);
+        assert_eq!(metrics.registry_fallback_entries, 0);
+        assert_eq!(idle_count(), MAX_IDLE_VMS);
+    }
+
+    #[test]
+    fn distinct_preparations_sharing_one_program_never_share_an_idle_vm() {
+        reset_test_state();
+        let scope = crate::host::BindingMetricsScope::enter();
+        let program = compile("let x = 1 + 2;\n");
+        let first =
+            PreparedScript::prepare(Arc::clone(&program), ScriptExecutionMetadata::default())
+                .expect("first preparation");
+        let second =
+            PreparedScript::prepare(Arc::clone(&program), ScriptExecutionMetadata::default())
+                .expect("second preparation");
+
+        for prepared in [&first, &second, &first, &second] {
+            assert_eq!(
+                run_prepared(prepared, NgxPhase::Access).expect("prepared pool checkout"),
+                VmStatus::Halted
+            );
         }
 
-        let metrics = crate::host::binding_metrics_snapshot();
-        assert_eq!(metrics.prepared_programs - before.prepared_programs, 1);
-        assert_eq!(metrics.full_bind_fallbacks - before.full_bind_fallbacks, 0);
-        assert!(pool.idle.len() <= MAX_IDLE_VMS);
+        assert_eq!(
+            created_count(),
+            2,
+            "prepared identity must isolate idle VMs"
+        );
+        assert_eq!(idle_count(), 2);
+        let metrics = scope.snapshot();
+        assert_eq!(metrics.prepared_programs, 2);
+        assert_eq!(metrics.bound_vm_instances, 2);
+        assert_eq!(metrics.registry_fallback_entries, 0);
+    }
+
+    #[test]
+    fn prepared_pool_phase_identity_is_isolated() {
+        reset_test_state();
+        let program = compile("let x = 1 + 2;\n");
+        let prepared =
+            PreparedScript::prepare(program, ScriptExecutionMetadata::default()).expect("prepare");
+
+        assert_eq!(
+            run_prepared(&prepared, NgxPhase::Access).expect("access run"),
+            VmStatus::Halted
+        );
+        assert_eq!(
+            run_prepared(&prepared, NgxPhase::Content).expect("content run"),
+            VmStatus::Halted
+        );
+        assert_eq!(created_count(), 2);
+        assert_eq!(
+            run_prepared(&prepared, NgxPhase::Content).expect("content reuse"),
+            VmStatus::Halted
+        );
+        assert_eq!(created_count(), 2);
     }
 
     #[test]
     fn different_programs_do_not_share_a_vm() {
         reset_test_state();
-        let first = compile("let x = 1;\n");
-        let second = compile("let y = 2;\n");
-        assert_eq!(run(&first).expect("first"), VmStatus::Halted);
-        assert_eq!(run(&second).expect("second"), VmStatus::Halted);
-        assert_eq!(run(&first).expect("first reuse"), VmStatus::Halted);
-        assert_eq!(run(&second).expect("second reuse"), VmStatus::Halted);
+        let first_program = compile("let x = 1;\n");
+        let second_program = compile("let y = 2;\n");
+        let first = PreparedScript::prepare(first_program, ScriptExecutionMetadata::default())
+            .expect("first preparation");
+        let second = PreparedScript::prepare(second_program, ScriptExecutionMetadata::default())
+            .expect("second preparation");
+        assert_eq!(
+            run_prepared(&first, NgxPhase::Access).expect("first"),
+            VmStatus::Halted
+        );
+        assert_eq!(
+            run_prepared(&second, NgxPhase::Access).expect("second"),
+            VmStatus::Halted
+        );
+        assert_eq!(
+            run_prepared(&first, NgxPhase::Access).expect("first reuse"),
+            VmStatus::Halted
+        );
+        assert_eq!(
+            run_prepared(&second, NgxPhase::Access).expect("second reuse"),
+            VmStatus::Halted
+        );
         assert_eq!(created_count(), 2);
         assert!(idle_count() <= MAX_IDLE_VMS);
     }
@@ -265,9 +364,13 @@ mod tests {
     #[test]
     fn runtime_error_vm_resets_and_cannot_contaminate_next_run() {
         reset_test_state();
-        let bad = compile("1 / 0;\n");
-        let good = compile("let x = 1 + 2;\n");
-        let first_err = run(&bad).expect_err("division by zero");
+        let bad_program = compile("1 / 0;\n");
+        let good_program = compile("let x = 1 + 2;\n");
+        let bad = PreparedScript::prepare(bad_program, ScriptExecutionMetadata::default())
+            .expect("bad preparation");
+        let good = PreparedScript::prepare(good_program, ScriptExecutionMetadata::default())
+            .expect("good preparation");
+        let first_err = run_prepared(&bad, NgxPhase::Access).expect_err("division by zero");
         assert!(
             first_err.to_string().to_ascii_lowercase().contains("zero")
                 || first_err
@@ -276,8 +379,12 @@ mod tests {
                     .contains("division"),
             "{first_err}"
         );
-        assert_eq!(run(&good).expect("good after error"), VmStatus::Halted);
-        let second_err = run(&bad).expect_err("error program must still fail after reset");
+        assert_eq!(
+            run_prepared(&good, NgxPhase::Access).expect("good after error"),
+            VmStatus::Halted
+        );
+        let second_err = run_prepared(&bad, NgxPhase::Access)
+            .expect_err("error program must still fail after reset");
         assert!(
             second_err.to_string().to_ascii_lowercase().contains("zero")
                 || second_err
@@ -287,7 +394,7 @@ mod tests {
             "{second_err}"
         );
         assert_eq!(
-            run(&good).expect("good after second error"),
+            run_prepared(&good, NgxPhase::Access).expect("good after second error"),
             VmStatus::Halted
         );
         assert_eq!(created_count(), 2);
@@ -326,8 +433,18 @@ mod tests {
         for i in 0..(MAX_IDLE_VMS + 3) {
             programs.push(compile(&format!("let x = {i};\n")));
         }
-        for program in &programs {
-            assert_eq!(run(program).expect("run"), VmStatus::Halted);
+        let prepared = programs
+            .into_iter()
+            .map(|program| {
+                PreparedScript::prepare(program, ScriptExecutionMetadata::default())
+                    .expect("prepare bounded-pool program")
+            })
+            .collect::<Vec<_>>();
+        for prepared in &prepared {
+            assert_eq!(
+                run_prepared(prepared, NgxPhase::Access).expect("run"),
+                VmStatus::Halted
+            );
         }
         assert_eq!(created_count(), MAX_IDLE_VMS + 3);
         assert!(idle_count() <= MAX_IDLE_VMS);

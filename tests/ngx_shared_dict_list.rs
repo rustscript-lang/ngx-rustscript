@@ -9,7 +9,7 @@ use ngx_rustscript::host::{
     HostCapability, HostFamily, HostSyncKind, NGX_SHARED_FLUSH_ALL_NAME,
     NGX_SHARED_FLUSH_EXPIRED_NAME, NGX_SHARED_GET_KEYS_NAME, NGX_SHARED_LLEN_NAME,
     NGX_SHARED_LPOP_NAME, NGX_SHARED_LPUSH_NAME, NGX_SHARED_RPOP_NAME, NGX_SHARED_RPUSH_NAME,
-    NgxPhase, bind_ngx_hosts, host_allowed_in_phase, manifest_entry, ngx_host_catalog,
+    NgxPhase, bind_registry_for_test, host_allowed_in_phase, manifest_entry, ngx_host_catalog,
     production_runtime_host_names,
 };
 use ngx_rustscript::shared_dict::{
@@ -38,7 +38,7 @@ fn eval(source: &str) -> Value {
 fn eval_on_zone(source: &str) -> Value {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     match vm.run() {
         Ok(VmStatus::Halted) => vm
             .stack()

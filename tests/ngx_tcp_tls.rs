@@ -61,7 +61,7 @@ impl Session {
         self.next_id += 1;
         let mut exec = self
             .worker
-            .bind_access_exec(compile(source), self.next_id)
+            .bind_access_exec_for_test(compile(source), self.next_id)
             .expect("bind");
         let mut registry = IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT);
         let deadline = Instant::now() + timeout;
@@ -455,7 +455,7 @@ fn tls_handshake_cancel_does_not_leak_inflight() {
     });
     let mut worker = WorkerRuntime::start().unwrap();
     let mut exec = worker
-        .bind_access_exec(
+        .bind_access_exec_for_test(
             compile(&format!(
                 "use ngx;
 let sock = ngx::socket::tcp();

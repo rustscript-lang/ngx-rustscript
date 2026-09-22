@@ -48,7 +48,7 @@ fn wait_readable(fd: RawFd, timeout: Duration) -> bool {
 
 fn run_waiting_program_to_halt(program: Arc<Program>, timeout: Duration) {
     let mut worker = WorkerRuntime::start().unwrap();
-    let mut exec = worker.bind_access_exec(program, 1).unwrap();
+    let mut exec = worker.bind_access_exec_for_test(program, 1).unwrap();
     let mut registry = IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT);
     assert_eq!(
         exec.handle_access(&mut registry, &worker),
@@ -79,7 +79,9 @@ fn catalog_and_wrapper_are_macro_sleep_ms() {
     assert_eq!(schema.params[0].ty, HostTypeSchema::Int);
     assert_eq!(schema.return_type, HostTypeSchema::Null);
     let mut worker = WorkerRuntime::start().unwrap();
-    let mut exec = worker.bind_access_exec(sleep_ms_once(1), 1).unwrap();
+    let mut exec = worker
+        .bind_access_exec_for_test(sleep_ms_once(1), 1)
+        .unwrap();
     let mut registry = IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT);
     assert_eq!(
         exec.handle_access(&mut registry, &worker),
@@ -135,7 +137,9 @@ fn no_legacy_sleep_coordinator_in_tracked_sources() {
 #[test]
 fn waiting_initial_pending_ready_poll_resume() {
     let mut worker = WorkerRuntime::start().unwrap();
-    let mut exec = worker.bind_access_exec(sleep_ms_once(8), 1).unwrap();
+    let mut exec = worker
+        .bind_access_exec_for_test(sleep_ms_once(8), 1)
+        .unwrap();
     let mut registry = IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT);
     assert_eq!(
         exec.handle_access(&mut registry, &worker),
@@ -158,7 +162,9 @@ fn waiting_initial_pending_ready_poll_resume() {
 #[test]
 fn two_consecutive_async_calls() {
     let mut worker = WorkerRuntime::start().unwrap();
-    let mut exec = worker.bind_access_exec(two_sleep_ms(1, 1), 1).unwrap();
+    let mut exec = worker
+        .bind_access_exec_for_test(two_sleep_ms(1, 1), 1)
+        .unwrap();
     let mut registry = IdentityRegistry::with_capacity(8);
     assert_eq!(
         exec.handle_access(&mut registry, &worker),
@@ -210,7 +216,9 @@ fn sleep_seconds_integer_executes_through_real_vm() {
 #[test]
 fn negative_duration_is_host_error() {
     let mut worker = WorkerRuntime::start().unwrap();
-    let mut exec = worker.bind_access_exec(sleep_ms_once(-1), 1).unwrap();
+    let mut exec = worker
+        .bind_access_exec_for_test(sleep_ms_once(-1), 1)
+        .unwrap();
     let mut registry = IdentityRegistry::with_capacity(8);
     assert_eq!(
         exec.handle_access(&mut registry, &worker),
@@ -223,7 +231,7 @@ fn negative_duration_is_host_error() {
 fn negative_sleep_seconds_is_host_error() {
     let mut worker = WorkerRuntime::start().unwrap();
     let mut exec = worker
-        .bind_access_exec(compile("use ngx;\nngx::sleep(-1);\n"), 1)
+        .bind_access_exec_for_test(compile("use ngx;\nngx::sleep(-1);\n"), 1)
         .unwrap();
     let mut registry = IdentityRegistry::with_capacity(8);
     assert_eq!(
@@ -242,7 +250,9 @@ fn nan_infinity_and_overflow_sleep_seconds_are_host_errors() {
         "use ngx;\nlet huge = 10000000000.0;\nngx::sleep(huge * huge * huge);\n",
     ] {
         let mut worker = WorkerRuntime::start().unwrap();
-        let mut exec = worker.bind_access_exec(compile(source), 1).unwrap();
+        let mut exec = worker
+            .bind_access_exec_for_test(compile(source), 1)
+            .unwrap();
         let mut registry = IdentityRegistry::with_capacity(8);
         assert_eq!(
             exec.handle_access(&mut registry, &worker),

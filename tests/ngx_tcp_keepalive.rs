@@ -61,7 +61,7 @@ impl Session {
         self.next_id += 1;
         let mut exec = self
             .worker
-            .bind_access_exec(compile(source), self.next_id)
+            .bind_access_exec_for_test(compile(source), self.next_id)
             .expect("bind");
         let mut registry = IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT);
         let deadline = Instant::now() + timeout;

@@ -49,7 +49,7 @@ struct Driver {
 impl Driver {
     fn new(program: Arc<Program>) -> Self {
         let mut worker = WorkerRuntime::start().unwrap();
-        let exec = worker.bind_access_exec(program, 1).expect("bind");
+        let exec = worker.bind_access_exec_for_test(program, 1).expect("bind");
         Self {
             worker,
             exec,

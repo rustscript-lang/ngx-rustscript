@@ -10,8 +10,8 @@ use ngx_rustscript::config::compile_rss_source;
 use ngx_rustscript::host::{
     AllowedOps, HostCapability, HostFamily, HostSyncKind, MAX_CTX_KEY_BYTES, NGX_CTX_CLEAR_NAME,
     NGX_CTX_DELETE_NAME, NGX_CTX_GET_NAME, NGX_CTX_SET_NAME, NgxPhase, RequestLocalCtx, ScopeError,
-    bind_ngx_hosts, capture_vm_entries, current_identity, host_allowed_in_phase, manifest_entry,
-    ngx_host_catalog, with_current_ctx, with_request_scope, with_request_scope_ctx,
+    bind_registry_for_test, capture_vm_entries, current_identity, host_allowed_in_phase,
+    manifest_entry, ngx_host_catalog, with_current_ctx, with_request_scope, with_request_scope_ctx,
 };
 use ngx_rustscript::notify::{DEFAULT_MAX_IN_FLIGHT, RequestIdentity};
 use ngx_rustscript::request_state::{
@@ -27,7 +27,7 @@ fn compile(source: &str) -> Arc<Program> {
 fn run_vm(source: &str, ctx: &mut RequestLocalCtx, ops: AllowedOps) -> Result<Value, String> {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     let identity = RequestIdentity::new(1, 1);
     with_request_scope_ctx(
         std::ptr::null_mut(),
@@ -99,7 +99,9 @@ struct Driver {
 impl Driver {
     fn new(program: Arc<Program>, request_id: u64) -> Self {
         let mut worker = WorkerRuntime::start().unwrap();
-        let exec = worker.bind_access_exec(program, request_id).expect("bind");
+        let exec = worker
+            .bind_access_exec_for_test(program, request_id)
+            .expect("bind");
         Self {
             worker,
             exec,
@@ -286,7 +288,7 @@ fn no_scope_wrong_capability_stale_generation_nested_and_panic() {
     let err = {
         let program = compile("use ngx;\nngx::ctx::get(\"k\");\n");
         let mut vm = Vm::try_new((*program).clone()).expect("vm");
-        bind_ngx_hosts(&mut vm);
+        bind_registry_for_test(&mut vm).expect("bind test registry");
         match vm.run() {
             Err(err) => err.to_string(),
             Ok(status) => panic!("expected no-scope error, got {status:?}"),

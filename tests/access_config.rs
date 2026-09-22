@@ -14,7 +14,7 @@ use ngx::core::Status;
 use ngx::http::Merge;
 use vm::{VmStatus, compile_source};
 
-use ngx_rustscript::access::{run_access_program, status_from_vm_run};
+use ngx_rustscript::access::{run_access_program_for_test, status_from_vm_run};
 use ngx_rustscript::config::{
     ConfigError, LocationConf, compile_rss_source, load_and_compile_rss_file, load_rss_file,
     reject_program_imports, resolve_rss_path,
@@ -387,7 +387,7 @@ fn explicit_child_overrides_parent_program() {
     child.set_access_program(child_program).unwrap();
     child.merge(&parent).unwrap();
     let child_program = child.access_program().expect("override kept");
-    run_access_program(child_program).expect("override script must halt");
+    run_access_program_for_test(child_program).expect("override script must halt");
 }
 
 #[test]
@@ -462,7 +462,7 @@ fn unconfigured_location_has_no_program() {
 #[test]
 fn vm_normal_halt() {
     let program = compile_rss_source(include_str!("fixtures/ok.rss")).unwrap();
-    let status = run_access_program(&program).expect("run");
+    let status = run_access_program_for_test(&program).expect("run");
     assert_eq!(status, VmStatus::Halted);
     assert_eq!(status_from_vm_run(Ok(status)), Status::NGX_OK);
 }
@@ -470,7 +470,7 @@ fn vm_normal_halt() {
 #[test]
 fn vm_runtime_error() {
     let program = compile_rss_source(include_str!("fixtures/runtime_error.rss")).unwrap();
-    let err = run_access_program(&program).expect_err("division by zero");
+    let err = run_access_program_for_test(&program).expect_err("division by zero");
     let rendered = err.to_string().to_ascii_lowercase();
     assert!(
         rendered.contains("division") || rendered.contains("zero"),

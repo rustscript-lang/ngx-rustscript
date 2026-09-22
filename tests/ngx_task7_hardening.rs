@@ -12,7 +12,7 @@ use nginx_sys::{
 };
 use ngx_rustscript::config::compile_rss_source;
 use ngx_rustscript::host::{
-    AllowedOps, NgxPhase, RequestDisposition, ScopeError, bind_ngx_hosts,
+    AllowedOps, NgxPhase, RequestDisposition, ScopeError, bind_registry_for_test,
     with_current_disposition_mut, with_current_request_mut, with_request_scope,
     with_request_scope_full,
 };
@@ -102,7 +102,7 @@ fn eval_in_request_ops(
 ) -> Result<Value, String> {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     with_request_scope(
         request,
         RequestIdentity::new(1, 1),
@@ -398,7 +398,7 @@ fn redirect_without_disposition_does_not_mutate_location_or_status() {
     let ptr = req.as_mut() as *mut ngx_http_request_t;
     let program = compile("use ngx;\nngx::redirect(\"/x\", null);\n");
     let mut vm = Vm::try_new((*program).clone()).expect("vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     let err = with_request_scope(
         ptr,
         RequestIdentity::new(3, 3),
@@ -428,7 +428,7 @@ fn redirect_first_wins_leaves_previous_disposition_and_location() {
     let mut disposition = RequestDisposition::Finalize(403);
     let program = compile("use ngx;\nngx::redirect(\"/later\", 302);\n");
     let mut vm = Vm::try_new((*program).clone()).expect("vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     let _ = with_request_scope_full(
         ptr,
         std::ptr::null_mut(),

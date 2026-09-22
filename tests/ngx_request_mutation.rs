@@ -15,7 +15,7 @@ use std::time::Duration;
 use nginx_sys::{NGX_HTTP_GET, NGX_HTTP_POST, ngx_http_request_t, ngx_str_t, ngx_uint_t};
 use ngx_rustscript::config::{ConfigError, compile_rss_source, program_requires_request_state};
 use ngx_rustscript::host::{
-    AllowedOps, HostCapability, HostFamily, HostSyncKind, NgxPhase, bind_ngx_hosts,
+    AllowedOps, HostCapability, HostFamily, HostSyncKind, NgxPhase, bind_registry_for_test,
     host_allowed_in_phase, manifest_entry, ngx_host_catalog, production_runtime_host_names,
     with_request_scope,
 };
@@ -88,7 +88,7 @@ fn eval_in_request_ops(
 ) -> Result<Value, String> {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     with_request_scope(request, identity, NgxPhase::Access, ops, || {
         match vm.run() {
             Ok(VmStatus::Halted) => Ok(vm

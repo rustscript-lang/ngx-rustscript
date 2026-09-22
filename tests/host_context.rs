@@ -312,7 +312,9 @@ fn bind_exec(
     request_id: u64,
 ) -> (WorkerRuntime, ngx_rustscript::request_state::AccessExec) {
     let mut worker = WorkerRuntime::start().unwrap();
-    let exec = worker.bind_access_exec(program, request_id).expect("bind");
+    let exec = worker
+        .bind_access_exec_for_test(program, request_id)
+        .expect("bind");
     (worker, exec)
 }
 

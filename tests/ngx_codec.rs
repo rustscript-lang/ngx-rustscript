@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use ngx_rustscript::config::compile_rss_source;
-use ngx_rustscript::host::bind_ngx_hosts;
+use ngx_rustscript::host::bind_registry_for_test;
 use vm::{Program, Value, Vm, VmStatus};
 
 const MAX_CODEC_INPUT_BYTES: usize = 65_536;
@@ -22,7 +22,7 @@ fn compile(source: &str) -> Arc<Program> {
 fn eval(source: &str) -> Value {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     let status = vm.run().unwrap_or_else(|err| panic!("run failed: {err}"));
     assert_eq!(status, VmStatus::Halted, "codec hosts are synchronous");
     vm.stack()
@@ -34,7 +34,7 @@ fn eval(source: &str) -> Value {
 fn eval_err(source: &str) -> String {
     let program = compile(source);
     let mut vm = Vm::try_new((*program).clone()).expect("construct vm");
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     match vm.run() {
         Err(err) => err.to_string(),
         Ok(status) => panic!("expected host failure, got {status:?}"),

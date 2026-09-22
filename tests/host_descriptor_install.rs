@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use ngx_rustscript::config::compile_rss_source;
 use ngx_rustscript::host::catalog::ngx_host_catalog;
-use ngx_rustscript::host::{bind_ngx_hosts, ngx_host_modules, ngx_host_registry};
+use ngx_rustscript::host::{bind_registry_for_test, ngx_host_modules, ngx_host_registry};
 use vm::{
     HostApiBuilder, HostBindingDescriptor, HostBindingKind, HostFunctionDescriptor,
     HostFunctionRegistry, HostFunctionSchema, HostParamSchema, HostResourceTypeMeta,
@@ -98,7 +98,7 @@ fn request_pool_and_timer_bind_through_the_same_descriptor_registry() {
 
     let pool_program = compile_rss_source(r#"use ngx; ngx::md5("x");"#).expect("md5 program");
     let mut pool_vm = Vm::new_shared(pool_program);
-    ngx_rustscript::host::bind_ngx_hosts(&mut pool_vm);
+    ngx_rustscript::host::bind_registry_for_test(&mut pool_vm).expect("bind test registry");
     pool_vm.run().expect("pool VM executes ngx::md5");
 
     let timer_program = compile_rss_source(
@@ -391,7 +391,7 @@ fn first_bind_after_registry_install_stays_off_the_request_path() {
     let program = compile_rss_source(r#"use ngx; ngx::sleep_ms(1);"#).expect("compile");
     let mut vm = Vm::new_shared(program);
     let started = Instant::now();
-    bind_ngx_hosts(&mut vm);
+    bind_registry_for_test(&mut vm).expect("bind test registry");
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_millis(20),
