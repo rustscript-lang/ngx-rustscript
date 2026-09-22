@@ -77,10 +77,11 @@ ngx-rustscript runs one RustScript program per configured phase slot
 ```
 nginx worker main thread
   AccessHandler / ContentHandler / LogHandler
-    LocationConf.program : Arc<Program>          // config-time, shared
+    LocationConf.{access,content,log}_prepared : Arc<PreparedScript>
+                                      // config-time, bound once
     no request-state imports (pure-sync, including semaphore new/post/count)
         -> worker VM pool
-                                             // Vm::new_shared, reset_for_reuse
+                         // PreparedScript::new_vm -> Vm::new_bound, reset_for_reuse
     async / ctx / cosocket / semaphore wait / mutation / control
                          -> request-owned AccessExec
                               Vm on worker main thread
@@ -122,6 +123,14 @@ work):
 Root execution is `Vm::run` / `Vm::resume`. The module does not use
 `ScriptCallback`, `Store`, `Invocation`, or `Vm::invoke_callable` for
 production request handling.
+
+Configured production binding has one authority: configuration prepares each
+`PreparedScript`, which retains its exact `Arc<BoundHostProgram>` from the
+restricted `ngx_host_registry()`. Request and pool VM creation uses
+`PreparedScript::new_vm()` -> `Vm::new_bound`; the owned timer path passes the
+same bound artifact to its callback VM. `bind_vm_cached` is retained only as a
+test/integration-gated fallback for standalone unbound fixtures and is not a
+configured production binding path.
 
 ## Evidence matrix (pinned `pd-vm` 5bd2788b620980e1d2ae6a146e4f7548c68d1882)
 
@@ -202,10 +211,11 @@ child VM, and only for a callable the calling VM owns.
 
 | Item | Vis | Path |
 | --- | --- | --- |
-| `Vm::new_shared(Arc<Program>)` | P | `src/vm/mod.rs` |
+| `PreparedScript::prepare` / `PreparedScript::new_vm` | P | `src/phase.rs`, `src/host/mod.rs` | Configuration prepares one `Arc<BoundHostProgram>`; VM creation delegates to `Vm::new_bound`. |
+| `BoundHostProgram` | P | pinned `pd-vm` | Immutable host dispatch shared by configured VM instances and owned timer dispatch. |
 | `Vm::reset_for_reuse` / `is_reusable` / `poll_reset_for_reuse` | P | `src/vm/mod.rs` |
 | `Vm::shutdown` | P | `src/vm/mod.rs` | Invalidates callback registries, cancels waiting ops, begins resource close, clears frames. |
-| `Program` | P | `src/bytecode.rs` | Immutable; `Arc<Program>` is the shareable artifact. |
+| `Program` | P | `src/bytecode.rs` | Immutable compiled artifact retained by `PreparedScript`; configured VM authority is its bound host artifact. |
 | `CapabilityProfile` | P | `src/vm/capability.rs` | VM-level capability profile; ngx uses its own `AllowedOps` thread-local scope (`src/host/context.rs`). |
 
 There is **no** public:
@@ -324,7 +334,7 @@ validated by `tests/ngx_timer.rs` and `tests/timer_nginx.rs`:
 | Registration failure | Invalid seconds, a missing/foreign/non-callable callback, a pending-limit or registry-full rejection returns a `HostError` to the script and restores the callback argument; nothing is retained. |
 | Client abort | Timers hold no `r`; a 499 or any other request end leaves every registration untouched. A parked semaphore wait still drops with its request (drop guard leaves the FIFO queue). |
 | Worker `exit_process` | `WorkerRuntime::shutdown` runs, in order: socket pool shutdown, `semaphore::shutdown_current()` (closes live semaphores and wakes their waiters), `timer::shutdown_current()` (run pending callbacks once with `premature=true`, a pending `every` round is **not** rescheduled; cancel live callbacks, releasing their parked async step exactly once; release every callback VM), then stops acceptance and reclaims queued wakes, then drops the Tokio runtime; the eventfd closes once. |
-| Config reload | Nothing is cancelled or migrated: the timer registry is worker-`thread_local`, old workers keep their registrations (their callback VMs hold their own `Arc<Program>`), and new workers start with zero timers. Identities and generations are worker-local, so no registration is reused across workers or programs. |
+| Config reload | Nothing is cancelled or migrated: the timer registry is worker-`thread_local`, old workers keep their registrations (their callback VMs hold their bound host artifacts), and new workers start with zero timers. Identities and generations are worker-local, so no registration is reused across workers or programs. |
 | Limits | `TimerConfig` ships `max_pending` 1024 / `max_running` 256; both travel in every `TimerRegistration` and the backend enforces them atomically with insertion (pending) and round start (running, a parked callback still counted). The worker fake-request registry itself is capped at 1024 (`MAX_LIVE_TIMER_REQUESTS`, the `IdentityRegistry` capacity), and fake request ids fail closed on exhaustion instead of wrapping. |
 
 Still blocked for the remaining callable families
@@ -340,7 +350,7 @@ implemented) is:
 | Panic in host future | Existing `catch_unwind` guards in the content handler, the log handler, and the eventfd read handler (`src/content.rs`, `src/log.rs`, `src/runtime.rs`); a child must not unwind the worker. |
 | Request abort | Request-owned children die with the request (see `on_abort`). |
 | Worker `exit_process` | Cancel request children; drop Tokio runtime; close eventfd once. |
-| Config reload | New `Arc<Program>` identity. Old callable handles must fail closed. In-flight work bound to the old Program is cancelled, never rebound. |
+| Config reload | New `PreparedScript` identity. Old callable handles must fail closed. In-flight work bound to the old prepared artifact is cancelled, never rebound. |
 | Limits | Live threads still have no worker cap; that is part of the gate. Live semaphores are capped at 1024 (`MAX_LIVE_SEMAPHORES`); in-flight waits at 1024 (`DEFAULT_MAX_IN_FLIGHT`). |
 
 Public API gap (remaining families): no task handle, no
@@ -440,8 +450,8 @@ table):
   semaphore, wakes every waiter, empties the registry, and only then drops
   the Tokio runtime. Ids are never reused across a worker restart.
 - Configuration reload does not touch semaphores: they are worker objects
-  with no `Program` identity, and a new `Arc<Program>` cannot rebind a
-  live handle. Handles die with their VM table.
+  with no `Program` identity, and a new `PreparedScript` cannot rebind a live
+  handle. Handles die with their VM table.
 Validation, phases, the negative-depth `count` mapping, budgets, and the
 full event table are in [docs/api/semaphore.md](../api/semaphore.md) and
 [Out of scope](../ngx-api-compatibility.md#out-of-scope).
@@ -467,8 +477,9 @@ Needs:
   subset).
 - No request `raw` / ctx / VM on the pool thread.
 
-`Arc<Program>` is shareable. `Vm` is request/worker-main policy even
-if some internals happen to be `Send`. `Value::Callable` is not a
+`PreparedScript` and its underlying `Arc<Program>` are shareable. `Vm` is
+request/worker-main policy even if some internals happen to be `Send`.
+`Value::Callable` is not a
 pool ABI. A resource `i64` is only ever meaningful against the VM table
 that minted it (the semaphore and cosocket families both validate that
 way), and a pool thread has no such table, so request handles cannot be
@@ -593,11 +604,11 @@ callable families stay fail-closed.
    request's `AllowedOps::for_phase`. The landed timer scope is
    `NgxPhase::Timer` + `AllowedOps::LOG`; abort and worker-thread
    scopes would have to be at least as narrow.
-7. **Reload.** No in-flight work is rebound to a new `Arc<Program>`.
+7. **Reload.** No in-flight work is rebound to a new `PreparedScript`.
    Landed timers are not cancelled at all: old workers keep their
-   registrations against their own immutable program, and new workers
+   registrations against their own immutable bound artifact, and new workers
    start empty. A future family that resolves callables by name must
-   fail closed on a stale-Program handle.
+   fail closed on a stale prepared-artifact handle.
 8. **Exactly-once.** Spawned work completes, errors, or cancels once.
    `on_abort` runs at most once. Timer `every` cancellations do not
    deliver a trailing tick after cancel acknowledgement.
@@ -622,7 +633,7 @@ rejected in Log (10).
 ### Request-owned async host (existing; sleep/cosocket)
 
 ```
-config: Arc<Program> ──────────────────────────────────────────┐
+config: Arc<PreparedScript> ──────────────────────────────────┐
                                                                │
 request begin  AccessExec { vm, identity(gen,id), bridge }     │
      │  run()                                                  │
@@ -657,7 +668,7 @@ timer fires  callback.call(&mut Store) ── registry invalidated
 ### Landed detached timer path (owned dispatch → timer-owned VM → eventfd → per-round identity rotation)
 
 ```
-config Program P0 (immutable, shared by Arc) ────────────────┐
+config PreparedScript P0 (immutable; bound artifact shared by Arc) ───┐
                                                              │
 request VM (AccessExec)  ngx::timer::at(seconds, callback)   │
     │ TakeOwned transfer of the callback                     │
@@ -695,8 +706,8 @@ worker main thread, NgxPhase::Timer + AllowedOps::LOG:       │
       re-arms                                                │
 shutdown  pending → run once premature=true (no reschedule)  │
           live → cancel once (releases the parked async step)│
-          → release every callback VM (P0 stays alive via its│
-            own Arc<Program> until the VM is dropped)       │
+          → release every callback VM (P0's bound artifact stays alive via │
+            its Arc<BoundHostProgram> until the VM is dropped)             │
 ```
 
 ### Light thread (not implemented; blocked)
@@ -739,7 +750,7 @@ and drop paths reuse this contract rather than adding a second one
 | Deadline wake | only the registration's **current** identity is a deadline; a stale or duplicate wake matches no live entry and is ignored | ignore by generation (required) |
 | `every` round terminal | next deadline scheduled only after terminal completion, under a fresh monotonically advancing generation for the same fake request id; rounds never overlap; capture cells persist | n/a |
 | Worker shutdown | pending → run once with `premature=true`, never rescheduled; live → cancelled once (releases the parked async step); every callback VM released | cancel children / unregister |
-| Reload | registrations stay with the old worker and its old `Arc<Program>`; new workers start empty; no migration, no rebinding | old-Program handles must fail closed (not implemented) |
+| Reload | registrations stay with the old worker and its old bound artifact; new workers start empty; no migration, no rebinding | old-prepared handles must fail closed (not implemented) |
 | Panic | `catch_unwind` in the callback driver; reported once through the backend; `at` retires, `every` stays eligible; worker not unwound | fail the child once (not implemented) |
 
 Exactly-once rule: a given task identity delivers at most one terminal
@@ -754,8 +765,8 @@ invocation.
 | --- | --- | --- |
 | Immediate-ready transitions | 64 per NGINX event turn (`MAX_IMMEDIATE_TRANSITIONS`) | A progress-making chain posts its identity to `ngx_posted_next_events` and continues across arbitrarily many turns. Posted continuations reserve no pending-wait permit. Zero-progress and reentrant continuations fail closed. |
 | In-flight HostFuture waits | 1024 / worker (`DEFAULT_MAX_IN_FLIGHT`) | A real `Pending` request wait reserves this permit exactly once through `AccessExec`. Immediately-ready rollover does not. Timer callback concurrency is bounded by `max_running`, independently of this request-wait permit pool. |
-| Synchronous idle VM pool | 4 (`MAX_IDLE_VMS`) | Import-free and pure synchronous programs are keyed by exact `Arc<Program>` identity. |
-| Reusable request VM pool | 4 (`MAX_IDLE_REUSABLE_REQUEST_VMS`) | Buffered HTTP and eligible synchronous request-state classes, including key-auth/control, `ngx.ctx`, `RequestWrite`, and `ResponseWrite`, may enter only after successful halt and complete runtime quiescence. The exact key isolates program identity + phase + complete standard-host policy + ngx catalog fingerprint + standard catalog fingerprint. Async hosts, resource-bearing schemas, timers, SSE, SQLite, standard I/O, cosockets, failure, cancel, timeout, pending cleanup, and excess returns are excluded or dropped. Fresh request context, bridge, and runtime policy are installed at checkout. Callback VMs never use either request pool. |
+| Synchronous idle VM pool | 4 (`MAX_IDLE_VMS`) | Import-free and pure synchronous programs are keyed by exact `Arc<PreparedScript>` identity, phase, and both catalog fingerprints. |
+| Reusable request VM pool | 4 (`MAX_IDLE_REUSABLE_REQUEST_VMS`) | Buffered HTTP and eligible synchronous request-state classes, including key-auth/control, `ngx.ctx`, `RequestWrite`, and `ResponseWrite`, may enter only after successful halt and complete runtime quiescence. The exact key isolates `Arc<PreparedScript>` identity + phase + complete standard-host policy + ngx catalog fingerprint + standard catalog fingerprint. Async hosts, resource-bearing schemas, timers, SSE, SQLite, standard I/O, cosockets, failure, cancel, timeout, pending cleanup, and excess returns are excluded or dropped. Fresh request context, bridge, and runtime policy are installed at checkout. Callback VMs never use either request pool. |
 | Resource table | pd-vm default 1024 | A callback VM gets its own **empty** table. A request handle cannot resolve in it (wrong table, fails closed); never insert a parent socket into it. |
 | `ngx.ctx` | keys/depth/bytes caps | Callables rejected. Detached timer rounds have no request ctx (no ctx pointer in the round's scope). |
 | Script call depth | `DEFAULT_MAX_SCRIPT_CALL_DEPTH` 1024 | A callback VM has its own depth; a timer round is not a recursive same-stack call. |
@@ -767,12 +778,14 @@ invocation.
 
 ## Worker generation, reload, Program ownership
 
-- Config compile produces `Arc<Program>` stored on `LocationConf`
-  (`src/config.rs`). Nested locations inherit or override slots.
-- Reload builds new Programs. Old location confs are dropped with the
-  old cycle.
-- `Vm::new_shared(Arc<Program>)` shares bytecode. Callable **runtime
-  instances** are per VM (`owned_callables`).
+- Config compile prepares each configured phase slot and stores its
+  `Arc<PreparedScript>` on `LocationConf` (`src/config.rs`). Nested locations
+  inherit or override slots. Each prepared script retains the exact immutable
+  `Arc<BoundHostProgram>` used for VM construction.
+- Reload builds new prepared scripts and bound host artifacts. Old location
+  confs are dropped with the old cycle.
+- `PreparedScript::new_vm()` delegates to `Vm::new_bound`; callable
+  **runtime instances** are per VM (`owned_callables`).
 - Request identities are `(generation, request_id)` (`src/notify.rs`).
   Stale wakes are ignored. The landed timer family reuses exactly that
   type: every registration owns a worker-unique, never-reused
@@ -780,12 +793,13 @@ invocation.
   request-id half (`FAKE_REQUEST_ID_TAG`), and every `every` re-arm
   rotates the generation.
 - A future callable handle for the **still-blocked** families must
-  carry `program_generation` (or `Arc::ptr_eq` on the Program plus a
-  retired-set). Reload retires the old Arc. The landed timer family
-  does not need one: the callback VM is created by the owned dispatch
-  against the creating VM's `Arc<Program>` and holds that Arc for its
-  whole lifetime, so an old-worker timer keeps running against the old
-  immutable program and is never rebound to a reload's new Program. A
+  carry a prepared-script generation (or `Arc::ptr_eq` on the
+  `PreparedScript` plus a retired-set). Reload retires the old prepared
+  artifact. The landed timer family does not need one: the callback VM is
+  created by owned dispatch from the creating script's bound artifact and
+  holds that artifact for its whole lifetime, so an old-worker timer keeps
+  running against the old immutable host dispatch and is never rebound to a
+  reload's new prepared script. A
   new worker starts with an empty `thread_local` timer registry.
 - Worker `init_process` starts Tokio + eventfd and installs the timer
   runtime (`install_worker_timers`); `exit_process` invalidates
@@ -1054,10 +1068,11 @@ families.
 
 | Check | Expected |
 | --- | --- |
-| `ngx_host_manifest().len()` | 199 (191 callable baseline + 4 semaphore + 4 timer hosts) |
-| catalog / manifest name lists | same 199 in the same order |
-| `production_runtime_host_names` (per-name bind list) | 195; the four timer hosts resolve through the timer-host registry because the owned `ngx::timer::{at,every}` entries have no name-binding API |
-| `bind_ngx_hosts` | installs the 4 semaphore hosts; no callable scheduler functions |
+| `ngx_host_manifest().len()` | 199 production runtime hosts |
+| catalog / manifest / `production_runtime_host_names()` lists | same 199 names in the same order |
+| `ngx_host_registry()` and `PreparedScript::prepare` | restricted production registry; each configured program is bound once into an `Arc<BoundHostProgram>` |
+| `PreparedScript::new_vm()` / `Vm::new_bound` | configured request and pool VM construction from the prepared artifact; owned timer dispatch uses the same artifact |
+| `bind_vm_cached` | test/integration-gated fallback for standalone unbound fixtures; not configured production authority |
 | `src/scheduler.rs`, `src/host/scheduler.rs` | absent |
 | `src/lib.rs`, `src/host/mod.rs` | no `mod scheduler` |
 | `HostFamily` / `HostCapability` | no `Scheduler` variant; the reviewed `Timer` and `Semaphore` variants are the only scheduler-family variants |

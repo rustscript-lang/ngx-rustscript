@@ -11,9 +11,12 @@ context; generic host futures return `NGX_AGAIN` only when they are genuinely pe
 and resume through the worker eventfd callback. Statically quiescent
 request-state programs, including buffered `http::client::request`, key-auth
 control flows, and `ngx.ctx`, may reuse a VM after successful `Halted` cleanup.
-Their pool key contains the exact compiled `Arc<Program>` identity, phase,
-complete standard-host policy, ngx catalog fingerprint, and standard catalog
-fingerprint. SQLite, standard I/O, SSE, timers, sleep, cosockets, resource or
+Configured phase slots retain an `Arc<PreparedScript>` whose immutable
+`BoundHostProgram` is prepared at configuration time. VM creation follows
+`PreparedScript::new_vm()` -> `Vm::new_bound`. Their pool key contains the
+exact `Arc<PreparedScript>` identity, phase, complete standard-host policy,
+ngx catalog fingerprint, and standard catalog fingerprint. SQLite, standard
+I/O, SSE, timers, sleep, cosockets, resource or
 unknown host schemas, failures, cancellation, timeouts, pending cleanup, and
 over-capacity returns are excluded. The worker retains at most four reusable
 request VMs, installs a fresh `NgxAsyncBridge` and runtime policy on checkout,

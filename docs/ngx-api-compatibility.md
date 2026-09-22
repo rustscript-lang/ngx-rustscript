@@ -172,13 +172,14 @@ Not production hosts in this matrix (do not import them):
   `ngx::timer::{at,every,pending_count,running_count}`. The registration
   hosts consume their callback through `HostParamPassing::TakeOwned` and run
   it later on a timer-owned VM that outlives the creating request. The family
-  is bound through the timer-host registry (owned dispatch has no name-binding
-  API) and is therefore not part of the 195-name per-name bind list. Each
-  registration owns one ordinary `RequestIdentity` whose fake request id is
-  tagged out of the request-id space, and every `every` round re-arms under a
-  fresh generation so stale wakes cannot start a round early. Access and
-  content only; Log fails configuration compile. Registered count **199**
-  (191 + 4 semaphore + 4 timer). See [timer](api/timer.md) and
+  is included in the full production manifest and is prepared at configuration
+  time in the location's `PreparedScript`/`BoundHostProgram`. Owned dispatch
+  carries that exact bound artifact to the timer-owned VM. Each registration
+  owns one ordinary `RequestIdentity` whose fake request id is tagged out of
+  the request-id space, and every `every` round re-arms under a fresh
+  generation so stale wakes cannot start a round early. Access and content
+  only; Log fails configuration compile. Registered count **199**. See
+  [timer](api/timer.md) and
   [docs/design/ngx-scheduler.md](design/ngx-scheduler.md).
 - Stream subsystem, `ndk.set_var.*`, Lua `coroutine.*`
 - `tcpsock:getsslpointer` / `tcpsock:getsslctx` (no NGINX SSL FFI)

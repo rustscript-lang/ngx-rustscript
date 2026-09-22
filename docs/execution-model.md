@@ -42,8 +42,17 @@ implicit queue is created.
 
 ## Execution paths
 
+Each configured phase slot retains an `Arc<PreparedScript>`. Configuration
+calls `PreparedScript::prepare`, which uses the restricted production
+`ngx_host_registry()` to prepare one immutable `Arc<BoundHostProgram>`.
+Configured request and pool paths instantiate fresh VM-local state with
+`PreparedScript::new_vm()` -> `Vm::new_bound`, then install mutable request,
+policy, bridge, or timer state. The `bind_vm_cached` registry helper is
+test/integration-gated for standalone fixtures; it is not the configured
+production binding authority.
+
 On each request the access (or content) handler leases a
-worker-thread-local VM via `Vm::new_shared(Arc<Program>)`.
+worker-thread-local VM from that prepared artifact.
 
 **Pooled programs without request-state requirements** run to
 `VmStatus::Halted` and return `NGX_OK` so the next phase proceeds. This
@@ -80,17 +89,19 @@ request identity, raw request pointer scope, empty `RequestLocalCtx`, and
 runtime policy.
 
 The reusable-request pool retains at most four idle VMs per worker. Its exact
-key is `(Arc<Program> identity, NGINX phase, complete StandardHostPolicy,
-ngx catalog fingerprint, standard catalog fingerprint)`. Equal source text in
-distinct compiled programs does not share a VM. Access/content phases and
-locations with different HTTP, I/O, or SQLite grants remain isolated. Policy
-is installed from the selected key on every newly created VM and remains part
-of every checkout match.
+key is `(exact Arc<PreparedScript> identity, NGINX phase, complete
+StandardHostPolicy, ngx catalog fingerprint, standard catalog fingerprint)`.
+Equal source text in distinct prepared scripts does not share a VM.
+Access/content phases and locations with different HTTP, I/O, or SQLite grants
+remain isolated. Policy is installed from the selected key on every newly
+created VM and remains part of every checkout match.
 
-`pd-vm` pin (see the crate README) provides `Vm::new_shared(Arc<Program>)`,
+The pinned `pd-vm` (see the crate README) provides `Vm::new_bound`,
 `HostAsyncBridge`, `Vm::set_async_bridge`, `VmStatus::Waiting`,
-`Vm::poll_waiting_host_op`, and `Vm::resume`. `try_new` only wraps owned
-`Vm::new` after frame-limit validation. Normal termination is
+`Vm::poll_waiting_host_op`, and `Vm::resume`; `PreparedScript::new_vm()` is
+the ngx-rustscript wrapper that supplies the prepared bound artifact.
+`try_new` only wraps owned `Vm::new` after frame-limit validation. Normal
+termination is
 `Ok(VmStatus::Halted)`. Drop of `Vm` owns cancellation and resource
 closure.
 

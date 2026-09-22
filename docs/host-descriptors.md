@@ -15,10 +15,13 @@ adapter, guest resource effects, and private state.
 4. Install through `HostModuleDescriptor::install_from_catalog`. Do not
    add parallel `HostApiBuilder::function` / `register_exact_*` loops.
 
-Timer `at`/`every` use `HostAdapterDescriptor::Owned`. Request, pool, and
-timer VMs install through `ngx_host_registry()` (restricted transactional
-exact catalog). `bind_ngx_hosts` is a thin wrapper around that registry
-and is not a second name/arity binding authority.
+Timer `at`/`every` use `HostAdapterDescriptor::Owned`. The restricted
+`ngx_host_registry()` is the production descriptor source. At configuration
+time, `PreparedScript::prepare` binds the compiled program once into an
+`Arc<BoundHostProgram>`. Configured request and pool VMs instantiate from it
+through `PreparedScript::new_vm()` -> `Vm::new_bound`; owned timer dispatch
+uses the same bound artifact. The registry's `bind_vm_cached` helper is gated
+to test/integration fixtures and is not a configured production path.
 
 ## Typed resources
 

@@ -5,18 +5,19 @@
 This matrix is the authoritative current ngx host surface for
 `ngx-rustscript`. It is derived from the production manifest
 (`src/host/catalog.rs` `ngx_host_manifest()`), the compiler catalog
-(`ngx_host_catalog()`), and the runtime bind list
-(`src/host/mod.rs` `production_runtime_host_names()` / `bind_ngx_hosts`).
-The manifest and the compiler catalog contain the same **199** names in the
-same order; the per-name runtime bind list has **195** ordered non-timer
-entries.
+(`ngx_host_catalog()`), and the production runtime names
+(`src/host/mod.rs` `production_runtime_host_names()`). The source manifest,
+catalog, and runtime names contain the same **199** entries in the same order;
+`tests/ngx_scheduler_contract.rs` and the inventory tests lock this production
+count and ordering.
 
-The owned `ngx::timer::{at,every}` registrations have no name-binding API, so
-the four timer names resolve through the timer-host registry
-(`ngx_host_registry`) instead of the per-name bind list; the manifest/catalog
-add them on top of the 191 callable baseline and the four semaphore entries
-(191 + 4 semaphore = 195 per-name, + 4 timer = 199 total). See
-[timer](timer.md).
+Configuration calls `PreparedScript::prepare` through the restricted
+`ngx_host_registry()`, which binds each compiled program once into an exact
+`Arc<BoundHostProgram>`. Configured request and pool VMs use
+`PreparedScript::new_vm()` -> `Vm::new_bound`; owned timer dispatch receives
+the same bound artifact. The registry's `bind_vm_cached` path is gated to
+tests/integration fixtures and is not the authority for configured production
+paths. See [timer](timer.md).
 
 ngx-rustscript provides an OpenResty-*oriented* RustScript API. It does
 does not run Lua and documents only the hosts in this matrix (including UDP
@@ -98,7 +99,7 @@ argument.
 | **Production total** | **199** | |
 
 Test-only hosts `ngx::probe`, `ngx::ready`, and `ngx::fail` are not in
-the production manifest, catalog, or `bind_ngx_hosts`.
+the production manifest, catalog, or configuration-time bound programs.
 
 Every production host except the five content-phase output hosts
 (`ngx::send_headers`, `ngx::print`, `ngx::say`, `ngx::flush`, `ngx::eof`)

@@ -26,8 +26,8 @@ description: Use when developing, debugging, reviewing, or testing ngx-rustscrip
 surface and checklist. Update it whenever a production manifest API,
 callable signature, allowed phase, limit, yield behavior (sync versus
 Waiting), or semantic adaptation changes. Cross-check the handwritten
-manifest, compiler catalog, and `bind_ngx_hosts` / runtime name list so
-the matrix stays complete.
+manifest, compiler catalog, `production_runtime_host_names()`, and the
+restricted `ngx_host_registry()` so the matrix stays complete.
 
 Keep the Tokio external-I/O constraints above: outbound TCP, UDP, DNS,
 HTTP client, and TLS hosts use Tokio I/O drivers only. Do not route them
