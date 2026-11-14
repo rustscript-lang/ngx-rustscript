@@ -102,12 +102,17 @@ fn schema_contains_callable(schema: &HostTypeSchema) -> bool {
         HostTypeSchema::Callable { .. } => true,
         HostTypeSchema::Array(inner)
         | HostTypeSchema::Map(inner)
-        | HostTypeSchema::Optional(inner) => schema_contains_callable(inner),
+        | HostTypeSchema::Optional(inner)
+        | HostTypeSchema::Option(inner) => schema_contains_callable(inner),
+        HostTypeSchema::Result { ok, err } => {
+            schema_contains_callable(ok) || schema_contains_callable(err)
+        }
         HostTypeSchema::Named { fields, .. } => fields
             .iter()
             .any(|field| schema_contains_callable(&field.ty)),
         HostTypeSchema::Unknown
         | HostTypeSchema::Null
+        | HostTypeSchema::Unit
         | HostTypeSchema::Int
         | HostTypeSchema::Float
         | HostTypeSchema::Number
