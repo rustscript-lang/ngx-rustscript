@@ -5,16 +5,16 @@
 `ngx.ctx` is adapted as four explicit hosts rather than a Lua table. The map
 is owned by `AccessExec` (request lifetime). Values are `string`; a callable
 or any non-string value is rejected. Empty and embedded-NUL keys are
-rejected. `delete` returns `Option<string>`: `Option::Some(removed)` or
-`Option::None` when the key is missing (OpenResty uses `ngx.ctx.key = nil`).
+rejected. `delete` returns `Option<string>`: `Some(removed)` or
+`None` when the key is missing (OpenResty uses `ngx.ctx.key = nil`).
 Configuration phases cannot import these hosts. Capability is `RequestCtx`
 only — ctx hosts do not read the request pointer.
 
 | OpenResty API | RustScript callable | Status | Phases | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ngx.ctx` | `ngx::ctx::get(key: string) -> Option<string>` | adapted | `PHASE_CTX` | missing → `Option::None` | Explicit get; missing is `Option::None`, a stored empty string is `Option::Some("")`. | `tests/ngx_request_ctx.rs` |
+| `ngx.ctx` | `ngx::ctx::get(key: string) -> Option<string>` | adapted | `PHASE_CTX` | missing → `None` | Explicit get; missing is `None`, a stored empty string is `Some("")`. | `tests/ngx_request_ctx.rs` |
 | `ngx.ctx` | `ngx::ctx::set(key: string, value: string) -> ()` | adapted | `PHASE_CTX` | 256 keys; 256-byte key; 8192-byte value | Failed set leaves the previous value intact. | `tests/ngx_request_ctx.rs` |
-| `ngx.ctx` | `ngx::ctx::delete(key: string) -> Option<string>` | adapted | `PHASE_CTX` | same key policy | Returns `Option::Some(removed)` or `Option::None` if missing. | `tests/ngx_request_ctx.rs` |
+| `ngx.ctx` | `ngx::ctx::delete(key: string) -> Option<string>` | adapted | `PHASE_CTX` | same key policy | Returns `Some(removed)` or `None` if missing. | `tests/ngx_request_ctx.rs` |
 | `ngx.ctx` | `ngx::ctx::clear() -> ()` | adapted | `PHASE_CTX` | — | Drops every entry. OpenResty would assign a new table. | `tests/ngx_request_ctx.rs` |
 
 `PHASE_CTX` (OpenResty v0.10.29 `ngx.ctx` contexts): `set`, `rewrite`,

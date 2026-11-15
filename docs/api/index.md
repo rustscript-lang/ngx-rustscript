@@ -67,13 +67,13 @@ pd-vm I/O, HTTP, and SQLite hosts are not part of the 199 ngx names; see
 | Acceptance | Tests that exercise the host or family |
 
 Catalog type labels: `number` (int or float), `int`, `string`, `bytes`,
-`bool`, `()`, `array<T>`, `Option<T>` (`Option::Some(T)` or `Option::None`),
+`bool`, `()`, `array<T>`, `Option<T>` (`Some(T)` or `None`),
 `Result<T, E>`, named records, and `resource` (typed VM handle). A host
 output never carries `unknown`, `null`, or the legacy `optional<T>` schema.
 
 The pinned compiler matches host arity exactly. OpenResty optional
 trailing arguments are explicit arguments: pass `()` where the default is
-wanted. Absence in a result is `Option::None`, never `null`.
+wanted. Absence in a result is `None`, never `null`.
 
 ## Inventory
 
@@ -186,13 +186,13 @@ host adds a further difference.
    `ArgEntry { name: string, value: Option<string> }`. `max_args` of `()`
    defaults to 100; `0` is clamped to the hard max 1024 (not unbounded);
    values above 1024 are rejected. A key without `=` carries
-   `Option::None`; a present empty value is `Option::Some("")`. Repeated
+   `None`; a present empty value is `Some("")`. Repeated
    keys repeat the entry. Empty keys are skipped. Invalid `%` sequences are
    left as-is.
 5. **Byte versus string results.** Hex `ngx::md5` returns `string`.
    `ngx::md5_bin`, `ngx::sha1_bin`, and `ngx::hmac_sha1` return `bytes`.
    `ngx::decode_base64` / `ngx::decode_base64mime` return
-   `Option<bytes>` (`Option::None` on invalid input). `ngx::unescape_uri` returns a string even
+   `Option<bytes>` (`None` on invalid input). `ngx::unescape_uri` returns a string even
    when decoded bytes are not UTF-8 (each byte becomes `char::from`).
 6. **Time cache / update boundary.** Time hosts use a process-local
    cached clock, not nginx `ngx_time` / `ngx_timeofday`. Reads reuse the

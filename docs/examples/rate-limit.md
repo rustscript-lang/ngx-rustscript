@@ -34,7 +34,7 @@ The zone name `"ratelimit"` in the script must match `rss_shared_dict ratelimit 
 
 ## Algorithm
 
-1. Read `$rate_limit_key` via `ngx::var::get(...).unwrap_or("")`. Missing (`Option::None`) or empty fails closed with 503.
+1. Read `$rate_limit_key` via `ngx::var::get(...).unwrap_or("")`. Missing (`None`) or empty fails closed with 503.
 2. Resolve `ngx::shared::dict("ratelimit")`. An unknown zone is a host error (500).
 3. Establish a new window with `ngx::shared::safe_add(dict, key, 1, WINDOW_SECONDS, ())` so capacity pressure never evicts a live quota:
    - `ok` → this is count `1` for a new window;

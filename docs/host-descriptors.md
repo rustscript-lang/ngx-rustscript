@@ -61,7 +61,7 @@ Fixed envelopes are catalog `HostTypeSchema::Named` and Rust
 | `SharedNumberResult` | `ngx::shared::{ttl,lpush,rpush,llen}` |
 
 Guest scripts use the host named types. Shared dictionary values are tagged
-`SharedValue` records and absence is `Option::None`.
+`SharedValue` records and absence is `None`.
 
 ## Intentional dynamic parameters
 

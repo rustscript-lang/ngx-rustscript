@@ -21,7 +21,7 @@ A builder that is mutated must be declared `let mut` and passed as
 
 The pinned contract uses the guest types, not the VM's internal null value:
 
-- `Option<T>` is a tagged value: `Option::Some(payload)` or `Option::None`.
+- `Option<T>` is a tagged value: `Some(payload)` or `None`.
   Absence is never `null`.
 - `Result<T, E>` is a tagged value: `Result::Ok(payload)` or
   `Result::Err(error)`. `?` propagates inside a `Result`-returning function.
@@ -170,8 +170,8 @@ SqliteOpenOptions {
 }
 ```
 
-Omitted `Option` fields normalize to `Option::None`. A present value is
-`Option::Some(...)`.
+Omitted `Option` fields normalize to `None`. A present value is
+`Some(...)`.
 
 | Field | Values | Default |
 | --- | --- | --- |

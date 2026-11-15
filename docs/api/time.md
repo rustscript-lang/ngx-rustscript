@@ -15,7 +15,7 @@ in cross-cutting item 6.
 | `ngx.utctime` | `ngx::utctime() -> string` | adapted | cached clock | UTC `yyyy-mm-dd hh:mm:ss`. | `tests/ngx_time.rs` (`today_localtime_and_utctime_use_fixed_formats`) |
 | `ngx.cookie_time` | `ngx::cookie_time(sec: int) -> string` | supported | none beyond conversion | `Thu, 18-Nov-10 11:27:35 GMT`. | `tests/ngx_time.rs` (`http_cookie_and_parse_time_are_fixed`) |
 | `ngx.http_time` | `ngx::http_time(sec: int) -> string` | supported | none beyond conversion | `Thu, 18 Nov 2010 11:27:35 GMT`. | `tests/ngx_time.rs` (`http_cookie_and_parse_time_are_fixed`) |
-| `ngx.parse_http_time` | `ngx::parse_http_time(text: string) -> Option<int>` | adapted | 128-byte input | RFC 822 / RFC 850 / asctime. Invalid or pre-1970 is `Option::None`. Over 128 bytes is a host error, not `null`. | `tests/ngx_time.rs` (`parse_http_time_*`) |
+| `ngx.parse_http_time` | `ngx::parse_http_time(text: string) -> Option<int>` | adapted | 128-byte input | RFC 822 / RFC 850 / asctime. Invalid or pre-1970 is `None`. Over 128 bytes is a host error, not `null`. | `tests/ngx_time.rs` (`parse_http_time_*`) |
 
 
 ---
