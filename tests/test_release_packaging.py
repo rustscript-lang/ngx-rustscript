@@ -89,7 +89,7 @@ def directory_payload(path: Path) -> dict[str, bytes]:
     }
 
 
-FROZEN_RUSTSCRIPT_REV = "fc8b0c8179640a8ffe460a64b3690e35c2f7eb73"
+FROZEN_RUSTSCRIPT_REV = "2f433edab3f1907e8cb060e901357d7e2af016ce"
 STALE_RUSTSCRIPT_PINS = (
     "f5f71eb",
     "f5f71ebc2f38e276c35f2aebaf63f4e2780efe99",

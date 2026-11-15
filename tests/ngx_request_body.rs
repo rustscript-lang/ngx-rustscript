@@ -741,7 +741,7 @@ if file == "" {
         r#"
 use ngx;
 fn arg_pair(entries: [ArgEntry], i: int) -> string {
-    entries[i]?.name.unwrap_or("") + "=" + entries[i]?.value.unwrap_or(Option::None).unwrap_or("")
+    entries[i]?.name.unwrap_or("") + "=" + entries[i]?.value.unwrap_or(None).unwrap_or("")
 }
 ngx::req::read_body();
 let parsed: RequestArgsResult = ngx::req::get_post_args(());

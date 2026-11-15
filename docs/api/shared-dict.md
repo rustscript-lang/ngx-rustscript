@@ -75,8 +75,8 @@ if added.ok {
 }
 let stored: SharedGetResult = ngx::shared::get(dict, key);
 let text = match stored.value {
-    Option::Some(entry) => entry.text_value.unwrap_or(""),
-    Option::None => ""
+    Some(entry) => entry.text_value.unwrap_or(""),
+    None => ""
 };
 ```
 Keys are at most 65535 bytes; values at most 65536 bytes.

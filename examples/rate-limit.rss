@@ -19,16 +19,16 @@ if added.ok {
     }
 } else {
     let added_error = match added.error {
-        Option::Some(message) => message,
-        Option::None => ""
+        Some(message) => message,
+        None => ""
     };
     if added_error != "exists" {
         ngx::exit(ngx::http::status_service_unavailable());
     }
     let counted: SharedIncrResult = ngx::shared::incr(dict, key, 1, (), ());
     let counted_error = match counted.error {
-        Option::Some(message) => message,
-        Option::None => ""
+        Some(message) => message,
+        None => ""
     };
     if counted_error != "" {
         ngx::exit(ngx::http::status_service_unavailable());

@@ -27,8 +27,8 @@ Pinned `pd-vm` evidence in this file is taken from:
 | Pin | Value |
 | --- | --- |
 | Crate metadata | `Cargo.toml` `rustscript-rev` / `vm` git `rev` |
-| `Cargo.lock` | `pd-vm` `source = "git+https://github.com/rustscript-lang/rustscript?rev=fc8b0c8179640a8ffe460a64b3690e35c2f7eb73#fc8b0c8179640a8ffe460a64b3690e35c2f7eb73"` |
-| Local Cargo git checkout | `$CARGO_HOME/git/checkouts/rustscript-ab116a0775a56744/87d8c5d` |
+| `Cargo.lock` | `pd-vm` `source = "git+https://github.com/rustscript-lang/rustscript?rev=2f433edab3f1907e8cb060e901357d7e2af016ce#2f433edab3f1907e8cb060e901357d7e2af016ce"` |
+| Local Cargo git checkout | `$CARGO_HOME/git/checkouts/rustscript-ab116a0775a56744/2f433ed` |
 
 Public versus crate-private is taken from that checkout's `src/lib.rs`
 re-exports and item visibility. Do not treat crate-private helpers as
@@ -123,7 +123,7 @@ Root execution is `Vm::run` / `Vm::resume`. The module does not use
 `ScriptCallback`, `Store`, `Invocation`, or `Vm::invoke_callable` for
 production request handling.
 
-## Evidence matrix (pinned `pd-vm` fc8b0c8179640a8ffe460a64b3690e35c2f7eb73)
+## Evidence matrix (pinned `pd-vm` 2f433edab3f1907e8cb060e901357d7e2af016ce)
 
 Legend: **P** = public (`src/lib.rs` re-export or `pub` item on a public
 type). **C** = crate-private / `pub(super)` / `pub(crate)`.

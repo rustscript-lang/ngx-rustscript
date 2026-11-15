@@ -1579,7 +1579,7 @@ ngx::ctx::set("k", "1");
     #[test]
     fn default_standard_host_policy_denies_sqlite() {
         assert_default_policy_denies(
-            "use sqlite;\nlet db = sqlite::open({path: Option::Some(\"state.db\"), mode: Option::Some(\"read_write_create\")});\nsqlite::close(db);\n",
+            "use sqlite;\nlet db = sqlite::open({path: Some(\"state.db\"), mode: Some(\"read_write_create\")});\nsqlite::close(db);\n",
             "database root is not configured",
         );
     }

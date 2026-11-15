@@ -188,36 +188,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -241,36 +241,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -294,36 +294,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -347,36 +347,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -415,36 +415,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -479,36 +479,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -545,36 +545,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -603,36 +603,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -859,36 +859,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -921,36 +921,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -1079,36 +1079,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -1135,36 +1135,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -1193,36 +1193,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -1249,36 +1249,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -1319,36 +1319,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -1412,36 +1412,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -1466,36 +1466,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -1525,36 +1525,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -1785,36 +1785,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -1960,36 +1960,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -2036,36 +2036,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -2110,36 +2110,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 
@@ -2170,36 +2170,36 @@ use ngx;
 
 fn sv_text(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn sv_number(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 
 fn sv_some(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(_) => true,
-        Option::None => false
+        Some(_) => true,
+        None => false
     }
 }
 
 fn sv_bool(value: Option<SharedValue>) -> bool {
     match value {
-        Option::Some(entry) => entry.bool_value.unwrap_or(false),
-        Option::None => false
+        Some(entry) => entry.bool_value.unwrap_or(false),
+        None => false
     }
 }
 
 fn sv_float(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
-        Option::None => 0.0
+        Some(entry) => entry.float_value.unwrap_or(0.0),
+        None => 0.0
     }
 }
 

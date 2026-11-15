@@ -930,7 +930,7 @@ fn nginx_denies_in_memory_sqlite_without_sqlite_root() {
         &script,
         r#"
 use sqlite;
-let db = sqlite::open({path: Option::Some(":memory:"), mode: Option::Some("memory")});
+let db = sqlite::open({path: Some(":memory:"), mode: Some("memory")});
 sqlite::close(db);
 "#,
     )

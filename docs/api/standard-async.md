@@ -279,8 +279,8 @@ Example:
 use sqlite;
 
 let db = sqlite::open({
-    path: Option::Some("pipeline.db"),
-    mode: Option::Some("read_write_create")
+    path: Some("pipeline.db"),
+    mode: Some("read_write_create")
 });
 let created: SqliteExecuteResult = sqlite::execute(
     db,
@@ -290,13 +290,13 @@ let created: SqliteExecuteResult = sqlite::execute(
 let inserted: SqliteExecuteResult = sqlite::execute(
     db,
     "INSERT INTO events(body) VALUES (?1)",
-    [{ kind: "text", text_value: Option::Some("payload") }]
+    [{ kind: "text", text_value: Some("payload") }]
 );
 let rows: SqliteQueryResult = sqlite::query(
     db,
     "SELECT body FROM events ORDER BY rowid DESC LIMIT 10",
     [],
-    { max_rows: Option::Some(10) }
+    { max_rows: Some(10) }
 );
 sqlite::close(db);
 ```
