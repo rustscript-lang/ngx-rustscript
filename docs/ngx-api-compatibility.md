@@ -34,7 +34,7 @@ helpers as part of this module.
 | Status | Meaning |
 | --- | --- |
 | `supported` | Same call shape and result kind as lua-nginx-module v0.10.29 |
-| `adapted` | Intentional RustScript mapping (namespacing, fixed structs, `null` optionals, bytes vs string) |
+| `adapted` | Intentional RustScript mapping (namespacing, fixed structs, `()` optional arguments, bytes vs string) |
 
 The pinned compiler matches host arity exactly. OpenResty optional
 trailing arguments are explicit arguments: pass `()` where OpenResty

@@ -1703,7 +1703,9 @@ fn semaphore_param() -> HostParamSchema {
 ///
 /// The callback observes the OpenResty-compatible `premature` flag and its
 /// return value is discarded, so the declared result is the logical Unit. This
-/// is the only catalogued callable parameter.
+/// is the only catalogued callable parameter. Core permits `unknown` when a
+/// callback result is discarded, but ngx recursively rejects `Unknown` in
+/// output schemas, so Unit provides the stricter consistent contract.
 pub fn timer_callback_schema() -> HostTypeSchema {
     HostTypeSchema::Callable {
         params: vec![HostTypeSchema::Bool],
