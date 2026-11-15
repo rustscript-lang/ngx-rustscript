@@ -1,22 +1,30 @@
 use ngx;
 
 fn header_value(entries: [HeaderEntry], name: string) -> string {
-    let a = match entries[0]?.name.unwrap_or("") == name {
-        true => entries[0]?.value.unwrap_or(""),
-        false => ""
-    };
-    let b = match entries[1]?.name.unwrap_or("") == name {
-        true => entries[1]?.value.unwrap_or(""),
-        false => ""
-    };
-    let c = match entries[2]?.name.unwrap_or("") == name {
-        true => entries[2]?.value.unwrap_or(""),
-        false => ""
-    };
-    let d = match entries[3]?.name.unwrap_or("") == name {
-        true => entries[3]?.value.unwrap_or(""),
-        false => ""
-    };
+    let mut a = "";
+    if entries.length > 0 && entries[0]?.name.unwrap_or("") == name {
+        a = entries[0]?.value.unwrap_or("");
+    } else {
+        a = "";
+    }
+    let mut b = "";
+    if entries.length > 1 && entries[1]?.name.unwrap_or("") == name {
+        b = entries[1]?.value.unwrap_or("");
+    } else {
+        b = "";
+    }
+    let mut c = "";
+    if entries.length > 2 && entries[2]?.name.unwrap_or("") == name {
+        c = entries[2]?.value.unwrap_or("");
+    } else {
+        c = "";
+    }
+    let mut d = "";
+    if entries.length > 3 && entries[3]?.name.unwrap_or("") == name {
+        d = entries[3]?.value.unwrap_or("");
+    } else {
+        d = "";
+    }
     let mut found = "";
     if a != "" {
         found = a;

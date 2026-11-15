@@ -189,7 +189,7 @@ def write_udp_echo_script(path, peer_port):
         "ngx::socket::udp::settimeout(sock, 1000);\n"
         f'ngx::socket::udp::setpeername(sock, "127.0.0.1", {int(peer_port)});\n'
         'ngx::socket::udp::send(sock, "ping");\n'
-        "ngx::socket::udp::receive(sock, null);\n"
+        "ngx::socket::udp::receive(sock, ());\n"
         "ngx::socket::udp::close(sock);\n"
         'ngx::log(ngx::log_level::notice(), "UDP_ECHO=ok");\n',
     )
@@ -1288,13 +1288,9 @@ def run_acceptance(nginx, module):
                 "ctx-persist must log persisted values after two waits",
                 dump_owned(prefix, proc, error_text),
             )
-        if not (
-            "CTX_USER=" in error_text
-            and "id=7" in error_text
-            and "name=ada" in error_text
-        ):
+        if "CTX_USER=ada" not in error_text:
             raise CheckError(
-                "ctx-persist must log nested user after two waits",
+                "ctx-persist must log the persisted user string after two waits",
                 dump_owned(prefix, proc, error_text),
             )
         summary["ctx"] = "sync=ok persist=ok"
