@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -17,6 +18,9 @@ use support::nginx::{
     terminate_process_group,
 };
 use support::temp::{OwnedTempDir, isolated_prefix};
+
+// Multi-worker servers compete for runtime initialization resources when started together.
+static SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct RunningNginx {
     child: Child,
@@ -680,6 +684,9 @@ ngx::exit(200);
 
 #[test]
 fn multi_worker_set_is_visible_on_get() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let (_nginx, port, _tmp, _running) = setup_real();
     let (status, body) = http_get(port, "/set");
     assert_eq!(status, 200, "set failed: {body}\n{}", error_log(&_tmp));
@@ -694,6 +701,9 @@ fn multi_worker_set_is_visible_on_get() {
 
 #[test]
 fn multi_worker_incr_is_atomic() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let (_nginx, port, _tmp, _running) = setup_real();
     let n = 40;
     let done = AtomicUsize::new(0);
@@ -716,6 +726,9 @@ fn multi_worker_incr_is_atomic() {
 
 #[test]
 fn reload_preserves_zone() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let (nginx, port, tmp, _running) = setup_real();
     let (status, body) = http_get(port, "/set");
     assert_eq!(status, 200, "set failed: {body}");
@@ -751,6 +764,9 @@ fn reload_preserves_zone() {
 
 #[test]
 fn production_shm_covers_types_flags_add_replace_ttl_space_two_zones_and_empty_key() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let (_nginx, port, tmp, _running) = setup_real();
     let (status, body) = http_get(port, "/types");
     assert_eq!(status, 200, "types failed: {body}\n{}", error_log(&tmp));
@@ -815,6 +831,9 @@ fn production_shm_covers_types_flags_add_replace_ttl_space_two_zones_and_empty_k
 
 #[test]
 fn production_shm_stale_ttl_and_tiny_zone_lru() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let tmp = isolated_prefix("sd-tiny");
@@ -1043,6 +1062,9 @@ http {{
 
 #[test]
 fn two_workers_list_flush_keys_reload_and_pressure() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let tmp = isolated_prefix("shared-dict-list-nginx");
@@ -1898,6 +1920,9 @@ fn rss_seed_numbered(dict: &str, prefix: &str, count: usize, exptime: &str) -> S
 
 #[test]
 fn shm_get_keys_flush_all_visit_caps_and_list_pop() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let tmp = isolated_prefix("shared-dict-shm-caps");
