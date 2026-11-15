@@ -803,14 +803,18 @@ fn send_and_receive_caps_are_rejected() {
 
 #[test]
 fn dns_host_over_the_length_cap_is_rejected() {
+    // Pay the lazy catalog initialization before the clock starts: this test
+    // measures the connect path, not the first compile in the process.
+    let _ = ngx_host_catalog();
     let host = "a".repeat(256);
+    let program = compile(&format!(
+        "use ngx;\nlet sock = ngx::socket::tcp();\nngx::socket::tcp::settimeout(sock, 1000);\nngx::socket::tcp::connect(sock, \"{host}\", 80);\n"
+    ));
+    // The worker runtime start is harness cost, not connect latency: build it
+    // before the clock so the bound measures the rejected lookup only.
+    let driver = Driver::new(program);
     let started = Instant::now();
-    let status = pump(
-        &format!(
-            "use ngx;\nlet sock = ngx::socket::tcp();\nngx::socket::tcp::settimeout(sock, 1000);\nngx::socket::tcp::connect(sock, \"{host}\", 80);\n"
-        ),
-        Duration::from_secs(3),
-    );
+    let status = driver.pump_until(Duration::from_secs(3));
     let elapsed = started.elapsed();
     assert_eq!(status, AccessStatus::Error500);
     assert!(
