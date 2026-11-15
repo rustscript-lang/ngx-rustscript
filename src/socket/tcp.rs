@@ -63,6 +63,14 @@ static TEST_STALL_DNS: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static STALL_LOCK: Mutex<()> = Mutex::new(());
 
+/// Serialize the socket tests that assert poll ordering: they only mutate their
+/// own listener sockets, but a loaded machine can flip a Pending poll to Ready
+/// when several of them run at once.
+#[cfg(test)]
+pub(crate) fn serial_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    lock(&STALL_LOCK)
+}
+
 #[cfg(test)]
 struct StallGuard {
     flag: &'static AtomicBool,
@@ -1714,6 +1722,7 @@ mod tests {
 
     #[test]
     fn pending_read_and_write_run_concurrently_on_a_live_socket() {
+        let _serial = super::serial_test_lock();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let addr = listener.local_addr().expect("addr");
         let peer = std::thread::spawn(move || {

@@ -102,14 +102,15 @@ fn http_cookie_and_parse_time_are_fixed() {
         "Thu, 18-Nov-10 11:27:35 GMT"
     );
     assert_eq!(
-        expect_int(eval(
+        expect_option_int(eval(
             "use ngx;\nngx::parse_http_time(\"Thu, 18 Nov 2010 11:27:35 GMT\");\n"
         )),
-        1290079655
+        Some(1290079655)
     );
     assert_eq!(
-        eval("use ngx;\nngx::parse_http_time(\"not a date\");\n"),
-        Value::Null
+        expect_option_int(eval("use ngx;\nngx::parse_http_time(\"not a date\");\n")),
+        None,
+        "an unparsable date is Option::None, not a physical Null"
     );
 }
 
