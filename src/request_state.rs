@@ -1586,6 +1586,7 @@ ngx::ctx::set("k", "1");
 
     #[test]
     fn request_owned_vm_runs_pd_vm_async_io_under_location_policy() {
+        let _serial = crate::socket::tcp::serial_test_lock();
         let root = std::env::temp_dir().join(format!(
             "ngx-rustscript-standard-io-{}-{}",
             std::process::id(),
