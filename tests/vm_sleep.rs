@@ -46,10 +46,11 @@ fn wait_readable(fd: RawFd, timeout: Duration) -> bool {
     false
 }
 
-fn run_waiting_program_to_halt(program: Arc<Program>, timeout: Duration) {
+fn run_waiting_program_to_halt(program: Arc<Program>, timeout: Duration) -> Duration {
     let mut worker = WorkerRuntime::start().unwrap();
     let mut exec = worker.bind_access_exec(program, 1).unwrap();
     let mut registry = IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT);
+    let started = Instant::now();
     assert_eq!(
         exec.handle_access(&mut registry, &worker),
         AccessStatus::Again,
@@ -66,7 +67,9 @@ fn run_waiting_program_to_halt(program: Arc<Program>, timeout: Duration) {
         ReadyEffect::Halted
     );
     assert_eq!(exec.handle_access(&mut registry, &worker), AccessStatus::Ok);
+    let elapsed = started.elapsed();
     worker.shutdown();
+    elapsed
 }
 
 #[test]
@@ -183,12 +186,10 @@ fn two_consecutive_async_calls() {
 
 #[test]
 fn sleep_seconds_float_executes_through_real_vm() {
-    let started = Instant::now();
-    run_waiting_program_to_halt(
+    let elapsed = run_waiting_program_to_halt(
         compile("use ngx;\nngx::sleep(0.03);\n"),
         Duration::from_secs(2),
     );
-    let elapsed = started.elapsed();
     assert!(
         elapsed >= Duration::from_millis(20),
         "ngx::sleep(0.03) should wait about 30ms, elapsed {elapsed:?}"
