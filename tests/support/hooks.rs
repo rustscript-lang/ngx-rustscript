@@ -326,18 +326,19 @@ fn list_package_build_outputs(target_dir: &Path, profile: &str) -> Vec<OutputSta
             continue;
         };
         for dir in dirs {
-            let output = dir.join("output");
-            let Ok(meta) = fs::metadata(&output) else {
-                continue;
-            };
-            if !meta.is_file() {
-                continue;
+            for output in [dir.join("output"), dir.join("run/stdout")] {
+                let Ok(meta) = fs::metadata(&output) else {
+                    continue;
+                };
+                if !meta.is_file() {
+                    continue;
+                }
+                stamps.push(OutputStamp {
+                    path: output,
+                    modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    len: meta.len(),
+                });
             }
-            stamps.push(OutputStamp {
-                path: output,
-                modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                len: meta.len(),
-            });
         }
     }
     stamps.sort_by(|a, b| a.path.cmp(&b.path));
@@ -427,10 +428,10 @@ fn invoked_mtime(output_path: &Path) -> SystemTime {
 }
 
 fn cargo_ran_build_script(stderr: &str, stdout: &str) -> bool {
-    stderr
-        .lines()
-        .chain(stdout.lines())
-        .any(|line| line.contains("Running") && line.contains("build-script-build"))
+    stderr.lines().chain(stdout.lines()).any(|line| {
+        line.contains("Running")
+            && (line.contains("/build-script-build") || line.contains("/build_script_build"))
+    })
 }
 
 fn kill_process_group(pid: u32) {
@@ -911,6 +912,33 @@ fn list_package_build_outputs_recognizes_both_cargo_layouts() {
         assert_eq!(stamp.modified, metadata.modified().unwrap());
         assert_eq!(stamp.len, metadata.len());
     }
+}
+
+#[test]
+fn list_package_build_outputs_recognizes_cargo_run_stdout() {
+    let target = super::temp::unique_temp_dir("build-run-stdout");
+    let output = target.join("debug/build/ngx-rustscript/0123456789abcdef/run/stdout");
+    fs::create_dir_all(output.parent().unwrap()).unwrap();
+    fs::write(&output, b"fingerprint").unwrap();
+    let stamps = list_package_build_outputs(&target, "debug");
+    assert_eq!(stamps.len(), 1);
+    assert_eq!(stamps[0].path, output);
+}
+
+#[test]
+fn detects_cargo_build_script_executable_names() {
+    assert!(cargo_ran_build_script(
+        "Running `/target/debug/build/ngx-rustscript-0123456789abcdef/build-script-build`",
+        ""
+    ));
+    assert!(cargo_ran_build_script(
+        "Running `/target/debug/build/ngx-rustscript/0123456789abcdef/out/build_script_build`",
+        ""
+    ));
+    assert!(!cargo_ran_build_script(
+        "Running `rustc --crate-name build_script_build build.rs`",
+        ""
+    ));
 }
 
 #[test]
