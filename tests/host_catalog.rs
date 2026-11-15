@@ -242,7 +242,7 @@ fn standard_async_imports_compile_and_require_request_owned_execution() {
         };
         let mut request = http::request::new("GET", url);
         http::client::request(request);
-        let db = sqlite::open({ path: Option::Some("state.db"), mode: Option::Some("read_write_create") });
+        let db = sqlite::open({ path: Some("state.db"), mode: Some("read_write_create") });
         sqlite::query(db, "SELECT value FROM events", [], {});
         sqlite::close(db);
         "#,
@@ -310,12 +310,12 @@ fn documented_standard_async_interfaces_compile() {
 
         fn sqlite_round_trip() -> int {
             let db = sqlite::open({
-                path: Option::Some("state.db"),
-                mode: Option::Some("read_write_create"),
-                limits: Option::Some({})
+                path: Some("state.db"),
+                mode: Some("read_write_create"),
+                limits: Some({})
             });
             let executed: SqliteExecuteResult = sqlite::execute(db, "CREATE TABLE t (v TEXT)", []);
-            let queried: SqliteQueryResult = sqlite::query(db, "SELECT v FROM t", [], { max_rows: Option::Some(10) });
+            let queried: SqliteQueryResult = sqlite::query(db, "SELECT v FROM t", [], { max_rows: Some(10) });
             let transaction_results = sqlite::transaction(db, []);
             sqlite::close(db);
             transaction_results;
@@ -393,12 +393,12 @@ fn shared_fixed_results_compile_as_explicit_struct_types() {
         let got: SharedGetResult = ngx::shared::get(dict, "key");
         let shared_value = got.value.copy();
         let kind = match shared_value {
-            Option::Some(entry) => entry.kind,
-            Option::None => ""
+            Some(entry) => entry.kind,
+            None => ""
         };
         let text = match shared_value.copy() {
-            Option::Some(entry) => entry.text_value.unwrap_or(""),
-            Option::None => ""
+            Some(entry) => entry.text_value.unwrap_or(""),
+            None => ""
         };
         kind;
         text;

@@ -269,7 +269,7 @@ http::client::sse(request, on_event);
         ),
         (
             "sqlite",
-            "use sqlite;\nlet db = sqlite::open({path: Option::Some(\":memory:\"), mode: Option::Some(\"memory\")});\nsqlite::close(db);\n",
+            "use sqlite;\nlet db = sqlite::open({path: Some(\":memory:\"), mode: Some(\"memory\")});\nsqlite::close(db);\n",
         ),
     ];
     for (label, source) in retained_or_async_cases {
@@ -403,7 +403,7 @@ fn compiled_slot_caches_request_routing_and_sqlite_usage() {
     let sqlite = compile_rss_source(
         r#"
         use sqlite;
-        let db = sqlite::open({path: Option::Some(":memory:"), mode: Option::Some("memory")});
+        let db = sqlite::open({path: Some(":memory:"), mode: Some("memory")});
         sqlite::close(db);
         "#,
     )

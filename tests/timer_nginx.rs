@@ -217,15 +217,15 @@ use ngx;
 
 fn text_of(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn number_of(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 let d = ngx::shared::dict("timers");
@@ -433,15 +433,15 @@ use ngx;
 
 fn text_of(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn number_of(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 let d = ngx::shared::dict("timers");
@@ -765,15 +765,15 @@ use ngx;
 
 fn text_of(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn number_of(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 let d = ngx::shared::dict("timers");
@@ -902,15 +902,15 @@ use ngx;
 
 fn text_of(value: Option<SharedValue>) -> string {
     match value {
-        Option::Some(entry) => entry.text_value.unwrap_or(""),
-        Option::None => ""
+        Some(entry) => entry.text_value.unwrap_or(""),
+        None => ""
     }
 }
 
 fn number_of(value: Option<SharedValue>) -> number {
     match value {
-        Option::Some(entry) => entry.int_value.unwrap_or(0),
-        Option::None => 0
+        Some(entry) => entry.int_value.unwrap_or(0),
+        None => 0
     }
 }
 let d = ngx::shared::dict("timers");

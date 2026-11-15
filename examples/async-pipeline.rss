@@ -6,12 +6,12 @@ use json;
 use bytes as builtin_bytes;
 
 let url_file: string = match ngx::var::get("rss_pipeline_url_file") {
-    Option::Some(value) => value,
-    Option::None => ""
+    Some(value) => value,
+    None => ""
 };
 let database_file: string = match ngx::var::get("rss_pipeline_database") {
-    Option::Some(value) => value,
-    Option::None => ""
+    Some(value) => value,
+    None => ""
 };
 
 fn read_url(path: string) -> Result<string, string> {
@@ -44,20 +44,20 @@ let upstream_json = {
 };
 
 let database = sqlite::open({
-    path: Option::Some(database_file),
-    mode: Option::Some("read_write_create")
+    path: Some(database_file),
+    mode: Some("read_write_create")
 });
 let database_result: SqliteQueryResult = sqlite::query(
     database,
     "SELECT 'sqlite-ok' AS source, 42 AS value",
     [],
-    {max_rows: Option::Some(8), max_result_bytes: Option::Some(65536)}
+    {max_rows: Some(8), max_result_bytes: Some(65536)}
 );
 let database_truncated: bool = database_result.truncated;
 let database_column: string = database_result.columns[0];
 let database_first_cell: string = match database_result.rows[0].cells[0].text_value {
-    Option::Some(text) => text,
-    Option::None => ""
+    Some(text) => text,
+    None => ""
 };
 sqlite::close(database);
 
@@ -70,8 +70,8 @@ let shared: SharedStoreResult = ngx::shared::set(
     ()
 );
 let shared_error = match shared.error {
-    Option::Some(message) => message,
-    Option::None => ""
+    Some(message) => message,
+    None => ""
 };
 
 ngx::status::set(200);

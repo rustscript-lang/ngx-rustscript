@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-const FROZEN_REV: &str = "fc8b0c8179640a8ffe460a64b3690e35c2f7eb73";
+const FROZEN_REV: &str = "2f433edab3f1907e8cb060e901357d7e2af016ce";
 const STALE_PINS: &[&str] = &["f5f71eb", "f5f71ebc2f38e276c35f2aebaf63f4e2780efe99"];
 
 fn repo_root() -> PathBuf {
