@@ -238,11 +238,13 @@ unsafe extern "C" {
     ) -> *mut std::ffi::c_void;
 }
 
+fn is_package_build_hash(name: &str) -> bool {
+    name.len() == PACKAGE_BUILD_HASH_LEN && name.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 fn is_ngx_rustscript_package_build_dir(name: &str) -> bool {
-    let Some(rest) = name.strip_prefix(PACKAGE_BUILD_DIR_PREFIX) else {
-        return false;
-    };
-    rest.len() == PACKAGE_BUILD_HASH_LEN && rest.bytes().all(|b| b.is_ascii_hexdigit())
+    name.strip_prefix(PACKAGE_BUILD_DIR_PREFIX)
+        .is_some_and(is_package_build_hash)
 }
 
 fn parse_build_script_output(text: &str) -> Result<(u8, bool), String> {
@@ -305,21 +307,38 @@ fn list_package_build_outputs(target_dir: &Path, profile: &str) -> Vec<OutputSta
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !is_ngx_rustscript_package_build_dir(name) {
-            continue;
-        }
-        let output = entry.path().join("output");
-        let Ok(meta) = fs::metadata(&output) else {
+        let dirs: Vec<PathBuf> = if is_ngx_rustscript_package_build_dir(name) {
+            vec![entry.path()]
+        } else if name == "ngx-rustscript" {
+            fs::read_dir(entry.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|child| {
+                    child
+                        .file_name()
+                        .to_str()
+                        .is_some_and(is_package_build_hash)
+                })
+                .map(|child| child.path())
+                .collect()
+        } else {
             continue;
         };
-        if !meta.is_file() {
-            continue;
+        for dir in dirs {
+            let output = dir.join("output");
+            let Ok(meta) = fs::metadata(&output) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            stamps.push(OutputStamp {
+                path: output,
+                modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                len: meta.len(),
+            });
         }
-        stamps.push(OutputStamp {
-            path: output,
-            modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            len: meta.len(),
-        });
     }
     stamps.sort_by(|a, b| a.path.cmp(&b.path));
     stamps
@@ -858,6 +877,40 @@ cargo::rustc-cfg=ngx_rustscript_integration_hooks
             .unwrap_err()
             .contains("inconsistent")
     );
+}
+
+#[test]
+fn list_package_build_outputs_recognizes_both_cargo_layouts() {
+    let target = super::temp::unique_temp_dir("build-outputs");
+    let build = target.join("debug/build");
+    let old = build.join("ngx-rustscript-0123456789abcdef/output");
+    let new = build.join("ngx-rustscript/0123456789ABCDEF/output");
+    for path in [&old, &new] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"fingerprint").unwrap();
+    }
+    for relative in [
+        "ngx-rustscript-nginx-test-stubs-0123456789abcdef/output",
+        "ngx-rustscript-0123456789abcde/output",
+        "ngx-rustscript-0123456789abcdeg/output",
+        "ngx-rustscript/0123456789abcde/output",
+        "ngx-rustscript/0123456789abcdeg/output",
+        "ngx-rustscript/0123456789abcdef/out/output",
+        "ngx-rustscript-nginx-test-stubs/0123456789abcdef/output",
+    ] {
+        let path = build.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"invalid").unwrap();
+    }
+
+    let stamps = list_package_build_outputs(&target, "debug");
+    let paths: Vec<_> = stamps.iter().map(|stamp| &stamp.path).collect();
+    assert_eq!(paths, vec![&new, &old]);
+    for stamp in stamps {
+        let metadata = fs::metadata(&stamp.path).unwrap();
+        assert_eq!(stamp.modified, metadata.modified().unwrap());
+        assert_eq!(stamp.len, metadata.len());
+    }
 }
 
 #[test]
