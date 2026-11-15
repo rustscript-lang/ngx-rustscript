@@ -249,16 +249,16 @@ fn catalog_declares_tls_hosts() {
     assert_eq!(handshake.params[2].name, "server_name");
     assert_eq!(handshake.params[3].name, "ssl_verify");
     assert_eq!(handshake.params[4].name, "send_status_req");
-    assert_eq!(handshake.return_type, HostTypeSchema::Null);
+    assert_eq!(handshake.return_type, HostTypeSchema::Unit);
 
     let store = catalog.function(SETTRUSTEDSTORE).expect("settrustedstore");
     assert_eq!(store.params.len(), 2);
-    assert_eq!(store.return_type, HostTypeSchema::Null);
+    assert_eq!(store.return_type, HostTypeSchema::Unit);
 
     let cert = catalog.function(SETCLIENTCERT).expect("setclientcert");
     assert_eq!(cert.params.len(), 2);
     assert_eq!(cert.params[1].name, "cert");
-    assert_eq!(cert.return_type, HostTypeSchema::Null);
+    assert_eq!(cert.return_type, HostTypeSchema::Unit);
 
     let trustedstore = catalog
         .function("ngx::socket::tcp::trustedstore")

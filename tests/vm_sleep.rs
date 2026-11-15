@@ -77,7 +77,7 @@ fn catalog_and_wrapper_are_macro_sleep_ms() {
     assert_eq!(schema.params.len(), 1);
     assert_eq!(schema.params[0].name, "ms");
     assert_eq!(schema.params[0].ty, HostTypeSchema::Int);
-    assert_eq!(schema.return_type, HostTypeSchema::Null);
+    assert_eq!(schema.return_type, HostTypeSchema::Unit);
     let mut worker = WorkerRuntime::start().unwrap();
     let mut exec = worker.bind_access_exec(sleep_ms_once(1), 1).unwrap();
     let mut registry = IdentityRegistry::with_capacity(DEFAULT_MAX_IN_FLIGHT);
@@ -98,7 +98,7 @@ fn catalog_sleep_is_seconds_number() {
     assert_eq!(schema.params.len(), 1);
     assert_eq!(schema.params[0].name, "seconds");
     assert_eq!(schema.params[0].ty, HostTypeSchema::Number);
-    assert_eq!(schema.return_type, HostTypeSchema::Null);
+    assert_eq!(schema.return_type, HostTypeSchema::Unit);
 }
 
 #[test]

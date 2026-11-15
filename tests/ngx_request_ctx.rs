@@ -182,13 +182,13 @@ fn ctx_hosts_are_catalogued_sync_request_ctx() {
         HostTypeSchema::Unknown
     );
     let set = schema(NGX_CTX_SET_NAME);
-    assert_eq!(set.return_type, HostTypeSchema::Null);
+    assert_eq!(set.return_type, HostTypeSchema::Unit);
     assert_eq!(set.params[1].ty, HostTypeSchema::Unknown);
     assert_eq!(
         schema(NGX_CTX_DELETE_NAME).return_type,
         HostTypeSchema::Unknown
     );
-    assert_eq!(schema(NGX_CTX_CLEAR_NAME).return_type, HostTypeSchema::Null);
+    assert_eq!(schema(NGX_CTX_CLEAR_NAME).return_type, HostTypeSchema::Unit);
 }
 
 #[test]

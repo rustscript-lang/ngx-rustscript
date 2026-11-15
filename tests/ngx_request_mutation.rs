@@ -165,18 +165,18 @@ fn mutation_schemas_match_vm_types() {
     let set_method = schema(SET_METHOD);
     assert_eq!(set_method.params.len(), 1);
     assert_eq!(set_method.params[0].ty, HostTypeSchema::Int);
-    assert_eq!(set_method.return_type, HostTypeSchema::Null);
+    assert_eq!(set_method.return_type, HostTypeSchema::Unit);
 
     let set_uri = schema(SET_URI);
     assert_eq!(set_uri.params.len(), 2);
     assert_eq!(set_uri.params[0].ty, HostTypeSchema::String);
     assert_eq!(set_uri.params[1].ty, HostTypeSchema::Unknown);
-    assert_eq!(set_uri.return_type, HostTypeSchema::Null);
+    assert_eq!(set_uri.return_type, HostTypeSchema::Unit);
 
     let set_args = schema(SET_URI_ARGS);
     assert_eq!(set_args.params.len(), 1);
     assert_eq!(set_args.params[0].ty, HostTypeSchema::Unknown);
-    assert_eq!(set_args.return_type, HostTypeSchema::Null);
+    assert_eq!(set_args.return_type, HostTypeSchema::Unit);
 
     let set_header = schema(SET_HEADER);
     assert_eq!(set_header.params.len(), 2);

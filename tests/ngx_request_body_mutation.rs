@@ -231,25 +231,25 @@ fn body_mutation_catalog_schemas_phases_and_capabilities() {
 
     assert_eq!(param_names(SET_BODY_DATA), ["data"]);
     assert_eq!(param_types(SET_BODY_DATA), [HostTypeSchema::String]);
-    assert_eq!(schema(SET_BODY_DATA).return_type, HostTypeSchema::Null);
+    assert_eq!(schema(SET_BODY_DATA).return_type, HostTypeSchema::Unit);
 
     assert_eq!(param_names(SET_BODY_FILE), ["path", "auto_clean"]);
     assert_eq!(
         param_types(SET_BODY_FILE),
         [HostTypeSchema::String, HostTypeSchema::Unknown]
     );
-    assert_eq!(schema(SET_BODY_FILE).return_type, HostTypeSchema::Null);
+    assert_eq!(schema(SET_BODY_FILE).return_type, HostTypeSchema::Unit);
 
     assert_eq!(param_names(INIT_BODY), ["buffer_size"]);
     assert_eq!(param_types(INIT_BODY), [HostTypeSchema::Unknown]);
-    assert_eq!(schema(INIT_BODY).return_type, HostTypeSchema::Null);
+    assert_eq!(schema(INIT_BODY).return_type, HostTypeSchema::Unit);
 
     assert_eq!(param_names(APPEND_BODY), ["data"]);
     assert_eq!(param_types(APPEND_BODY), [HostTypeSchema::String]);
-    assert_eq!(schema(APPEND_BODY).return_type, HostTypeSchema::Null);
+    assert_eq!(schema(APPEND_BODY).return_type, HostTypeSchema::Unit);
 
     assert!(param_names(FINISH_BODY).is_empty());
-    assert_eq!(schema(FINISH_BODY).return_type, HostTypeSchema::Null);
+    assert_eq!(schema(FINISH_BODY).return_type, HostTypeSchema::Unit);
 }
 
 #[test]

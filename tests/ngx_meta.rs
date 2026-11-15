@@ -568,7 +568,7 @@ fn log_and_constant_schemas_are_exact() {
     assert_eq!(log.params[0].ty, HostTypeSchema::Int);
     assert_eq!(log.params[1].name, "message");
     assert_eq!(log.params[1].ty, HostTypeSchema::String);
-    assert_eq!(log.return_type, HostTypeSchema::Null);
+    assert_eq!(log.return_type, HostTypeSchema::Unit);
 
     assert!(catalog_params("ngx::get_phase").is_empty());
     assert_eq!(catalog_schema("ngx::get_phase"), HostTypeSchema::String);
@@ -631,7 +631,7 @@ fn worker_only_log_rejects_invalid_level_and_embedded_nul() {
     assert_eq!(params[0].1, HostTypeSchema::Int);
     assert_eq!(params[1].0, "message");
     assert_eq!(params[1].1, HostTypeSchema::String);
-    assert_eq!(catalog_schema("ngx::log"), HostTypeSchema::Null);
+    assert_eq!(catalog_schema("ngx::log"), HostTypeSchema::Unit);
 
     let log_entry = manifest_named("ngx::log");
     assert_eq!(format!("{:?}", log_entry.family), "Log");

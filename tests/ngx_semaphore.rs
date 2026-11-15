@@ -230,7 +230,7 @@ fn semaphore_catalog_is_typed_and_phase_closed() {
     assert_eq!(post.params[0].passing, HostParamPassing::Borrow);
     assert_eq!(post.params[1].name, "count");
     assert_eq!(post.params[1].ty, HostTypeSchema::Unknown);
-    assert_eq!(post.return_type, HostTypeSchema::Null);
+    assert_eq!(post.return_type, HostTypeSchema::Unit);
 
     let count = catalog.function(COUNT).expect("count schema");
     assert_eq!(count.params.len(), 1);
