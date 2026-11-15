@@ -7,17 +7,20 @@
 //! reload isolation, and graceful worker shutdown.
 //!
 //! All cases use the shared typed harness (`tests/support/nginx_harness.rs`)
-//! and run serially with `--test-threads=1`. Each case owns an isolated prefix
+//! and serialize their server fixtures. Each case owns an isolated prefix
 //! and process group; the harness Drop removes both.
 
 mod support;
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use support::nginx_harness::{HttpRequest, NginxConfig, NginxHarness, RunningNginx};
+
+static SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 const ERROR_LOG: &str = "logs/error.log";
 const READY: Duration = Duration::from_secs(8);
@@ -184,6 +187,9 @@ fn location(path: &str, script: &str) -> String {
 
 #[test]
 fn timer_at_fires_after_the_creating_request_completed() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-at-fire");
     write_script(
         &harness,
@@ -263,6 +269,9 @@ ngx::say(text_of(r.value));
 
 #[test]
 fn timer_at_passes_premature_false_on_normal_expiry() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-premature-false");
     write_script(
         &harness,
@@ -295,6 +304,9 @@ ngx::exit(200);
 
 #[test]
 fn timer_callback_resumes_after_ngx_sleep() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-sleep");
     write_script(
         &harness,
@@ -319,6 +331,9 @@ ngx::exit(200);
 
 #[test]
 fn timer_callback_performs_outbound_async_work() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let listener = TcpListener::bind("127.0.0.1:0").expect("echo listener");
     let port = listener.local_addr().expect("listener addr").port();
     let echo = thread::spawn(move || {
@@ -360,6 +375,9 @@ ngx::exit(200);
 
 #[test]
 fn timer_callback_cannot_use_request_hosts_and_keeps_serving() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-denied");
     write_script(
         &harness,
@@ -388,6 +406,9 @@ ngx::exit(200);
 
 #[test]
 fn timer_every_serializes_rounds_with_a_persistent_capture() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-every");
     write_script(
         &harness,
@@ -458,6 +479,9 @@ if number_of(r.value) == 3 { ngx::say("ROUNDS_3"); } else { ngx::say("ROUNDS_OTH
 
 #[test]
 fn timer_every_never_overlaps_a_slow_callback() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-no-overlap");
     write_script(
         &harness,
@@ -499,6 +523,9 @@ ngx::exit(200);
 
 #[test]
 fn timer_counts_change_at_registration_start_and_completion() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-counts");
     write_script(
         &harness,
@@ -526,6 +553,9 @@ ngx::exit(200);
 
 #[test]
 fn reload_leaves_old_workers_with_their_timers_and_new_workers_empty() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-reload");
     write_script(
         &harness,
@@ -593,6 +623,9 @@ ngx::exit(200);
 
 #[test]
 fn timer_callback_uses_the_worker_semaphore_family() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-semaphore");
     write_script(
         &harness,
@@ -637,6 +670,9 @@ ngx::exit(200);
 
 #[test]
 fn graceful_worker_exit_runs_a_pending_every_round_once_with_premature_true() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-every-exit");
     write_script(
         &harness,
@@ -686,6 +722,9 @@ ngx::exit(200);
 
 #[test]
 fn timer_counts_track_registration_waiting_completion_and_every_rearm() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-counts-boundaries");
     write_script(
         &harness,
@@ -812,6 +851,9 @@ if ngx::timer::pending_count() == 1 {
 
 #[test]
 fn http_standard_import_and_ngx_timer_run_together_through_the_registry() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let listener = TcpListener::bind("127.0.0.1:0").expect("upstream listener");
     let port = listener.local_addr().expect("listener addr").port();
     let upstream = thread::spawn(move || {
@@ -910,6 +952,9 @@ ngx::say(text_of(r.value));
 
 #[test]
 fn timer_callback_does_not_inherit_the_registering_location_http_policy() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-callback-http-policy");
     write_script(
         &harness,
@@ -958,6 +1003,9 @@ ngx::exit(200);
 
 #[test]
 fn graceful_worker_exit_runs_pending_callbacks_with_premature_true() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let harness = NginxHarness::new("timer-nginx-exit");
     write_script(
         &harness,
