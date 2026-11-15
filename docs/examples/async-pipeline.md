@@ -37,7 +37,7 @@ $NGX_RUSTSCRIPT_NGINX -p /absolute/path/to/prefix \
 curl --fail http://127.0.0.1:8080/pipeline
 ```
 
-The response contains the URL read by I/O, the HTTP status/final URL/UTF-8 body, SQLite rows, and the typed shared-dict store result. The SQLite database is created as `pipeline.db` under `rss_sqlite_root`.
+The response contains the URL read by I/O, the HTTP status/final URL/UTF-8 body, the typed SQLite query envelope, and the typed shared-dict store result. The SQLite database is created as `pipeline.db` under `rss_sqlite_root`.
 
 ## Capability policy
 
@@ -53,4 +53,15 @@ These directives inherit by field into nested locations. A child location that s
 
 ## Value shapes
 
-The example uses an explicit `SharedStoreResult` struct for the fixed shared-dict result. HTTP request and response values follow pd-vm's published map API at the pinned revision. Before JSON encoding, the example narrows fixed response members to `int`, `string`, and `bytes`, then converts the body with `bytes::to_utf8`; raw bytes cannot be encoded by `json::encode`.
+The example uses explicit host named types throughout. `io::open` and
+`io::read_all` return `Result`, so the read is a small `Result`-returning
+helper; `http::request::new` builds an owned request resource and
+`http::client::request` consumes it into a response resource whose typed
+accessors are `http::response::{status,url,body}`. `sqlite::open` takes
+`SqliteOpenOptions` with `Option` fields, and `sqlite::query` returns a
+`SqliteQueryResult` whose cells are tagged `SqliteValue` records. The shared
+store result is `SharedStoreResult` with `Option<string>` error.
+
+Before JSON encoding, the example narrows each value to `int`, `string`, or
+`bool`, and converts the HTTP body with `bytes::to_utf8`; `json::encode`
+cannot encode `bytes`, so `SqliteValue.blob_value` is projected away.

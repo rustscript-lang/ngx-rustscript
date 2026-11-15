@@ -49,8 +49,10 @@ imports or builtins may suspend or retain VM state. This admits buffered
 `http::client::request` and synchronous request-context programs, including
 key-auth/control flows and programs using `ngx.ctx`, `RequestWrite`, or
 `ResponseWrite`. Standard I/O, SQLite, SSE, timers, sleep, cosockets, every
-other standard host import, async ngx hosts, resource-bearing host schemas,
-and unknown host schemas are excluded. These checks are closed over the whole
+other standard host import, async ngx hosts, and dynamic host schemas are
+excluded. The buffered HTTP builder/accessor family is admitted: its request,
+response, and header resources are created and released inside one
+synchronous call chain. These checks are closed over the whole
 compiled program; adding any excluded import disables reuse.
 
 Static admission only selects the reusable request path. A successful
@@ -145,10 +147,10 @@ the VM, and never arms eventfd, a timer, or `r->main->count`. See
 
 ## Sleep hosts
 
-`ngx::sleep` is a `pd-host-function` async host (`seconds:number -> null`).
+`ngx::sleep` is a `pd-host-function` async host (`seconds:number -> ()`).
 `seconds` is an OpenResty-style integer or float; negative, NaN,
 infinity, and duration overflow are rejected. `ngx::sleep_ms` is the
-millisecond integer form (`ms:int -> null`). The generated wrapper
+millisecond integer form (`ms:int -> ()`). The generated wrapper
 submits an owned host future; the impl validates the duration and
 awaits Tokio. The first host entry returns `VmStatus::Waiting`. Two
 sequential sleeps reuse the same generation-safe request identity and

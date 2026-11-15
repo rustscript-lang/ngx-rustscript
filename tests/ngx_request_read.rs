@@ -284,6 +284,50 @@ fn expect_string(value: Value) -> String {
     }
 }
 
+/// `(name, value)` pairs from a typed header entry array.
+/// Unwraps a canonical guest `Option` carrier.
+fn option_string(value: &Value) -> Option<String> {
+    let (some, payload) = vm::option::payload(value).expect("Option carrier");
+    if !some {
+        return None;
+    }
+    Some(expect_string(payload.expect("Some payload").clone()))
+}
+
+/// `(name, value)` pairs from a typed argument entry array; a bare key carries
+/// `None`.
+fn header_pairs_of(root: &Value) -> Vec<(String, String)> {
+    let Value::Array(items) = map_get(expect_map(root), "headers") else {
+        panic!("headers must be a typed entry array");
+    };
+    items
+        .iter()
+        .map(|entry| {
+            let entry = expect_map(entry);
+            (
+                expect_string(map_get(entry, "name").clone()),
+                expect_string(map_get(entry, "value").clone()),
+            )
+        })
+        .collect()
+}
+
+fn arg_pairs_of(root: &Value) -> Vec<(String, Option<String>)> {
+    let Value::Array(items) = map_get(expect_map(root), "args") else {
+        panic!("args must be a typed entry array");
+    };
+    items
+        .iter()
+        .map(|entry| {
+            let entry = expect_map(entry);
+            (
+                expect_string(map_get(entry, "name").clone()),
+                option_string(map_get(entry, "value")),
+            )
+        })
+        .collect()
+}
+
 fn expect_map(value: &Value) -> &VmMap {
     match value {
         Value::Map(map) => map,
@@ -351,7 +395,7 @@ fn request_read_schemas_match_callable_namespaces() {
     assert!(version.params.is_empty());
     assert_eq!(
         version.return_type,
-        HostTypeSchema::Optional(Box::new(HostTypeSchema::Float))
+        HostTypeSchema::Option(Box::new(HostTypeSchema::Float))
     );
 
     let raw = schema_named(RAW_HEADER);
@@ -399,7 +443,7 @@ fn request_read_schemas_match_callable_namespaces() {
     assert_eq!(var.params[0].ty, HostTypeSchema::String);
     assert_eq!(
         var.return_type,
-        HostTypeSchema::Optional(Box::new(HostTypeSchema::String))
+        HostTypeSchema::Option(Box::new(HostTypeSchema::String))
     );
 }
 
@@ -453,10 +497,10 @@ fn request_read_hosts_fail_without_request_scope() {
     for source in [
         "use ngx;\nngx::req::get_method();\n",
         "use ngx;\nngx::req::http_version();\n",
-        "use ngx;\nngx::req::raw_header(null);\n",
-        "use ngx;\nngx::req::get_headers(null, null);\n",
-        "use ngx;\nngx::req::get_uri_args(null);\n",
-        "use ngx;\nngx::req::get_post_args(null);\n",
+        "use ngx;\nngx::req::raw_header(());\n",
+        "use ngx;\nngx::req::get_headers((), ());\n",
+        "use ngx;\nngx::req::get_uri_args(());\n",
+        "use ngx;\nngx::req::get_post_args(());\n",
         "use ngx;\nngx::req::is_internal();\n",
         "use ngx;\nngx::req::start_time();\n",
         "use ngx;\nngx::is_subrequest();\n",
@@ -520,26 +564,37 @@ fn get_method_copies_custom_and_standard_names() {
 }
 
 #[test]
-fn http_version_maps_enums_and_unknown_is_null() {
+fn http_version_maps_enums_and_unknown_is_none() {
+    fn option_float(value: &Value) -> Option<f64> {
+        let (some, payload) = vm::option::payload(value).expect("Option carrier");
+        if !some {
+            return None;
+        }
+        match payload.expect("Some payload") {
+            Value::Float(number) => Some(*number),
+            other => panic!("expected float payload, got {other:?}"),
+        }
+    }
+
     let mut req = dummy_request();
     req.http_version = NGX_HTTP_VERSION_11 as _;
     let ptr = (&mut *req) as *mut ngx_http_request_t;
-    match eval_in_request(ptr, "use ngx;\nngx::req::http_version();\n").expect("1.1") {
-        Value::Float(value) => assert!((value - 1.1).abs() < 1e-9, "got {value}"),
-        other => panic!("expected 1.1 float, got {other:?}"),
-    }
+    let version = eval_in_request(ptr, "use ngx;\nngx::req::http_version();\n").expect("1.1");
+    let version = option_float(&version).expect("version is Some");
+    assert!((version - 1.1).abs() < 1e-9, "got {version}");
 
     req.http_version = NGX_HTTP_VERSION_10 as _;
-    match eval_in_request(ptr, "use ngx;\nngx::req::http_version();\n").expect("1.0") {
-        Value::Float(value) => assert!((value - 1.0).abs() < 1e-9, "got {value}"),
-        other => panic!("expected 1.0 float, got {other:?}"),
-    }
+    let version = eval_in_request(ptr, "use ngx;\nngx::req::http_version();\n").expect("1.0");
+    let version = option_float(&version).expect("version is Some");
+    assert!((version - 1.0).abs() < 1e-9, "got {version}");
 
     req.http_version = 1234;
-    match eval_in_request(ptr, "use ngx;\nngx::req::http_version();\n").expect("unknown") {
-        Value::Null => {}
-        other => panic!("unrecognized HTTP version must be null, got {other:?}"),
-    }
+    let unknown = eval_in_request(ptr, "use ngx;\nngx::req::http_version();\n").expect("unknown");
+    assert_eq!(
+        option_float(&unknown),
+        None,
+        "unrecognized HTTP version is Option::None"
+    );
 }
 
 #[test]
@@ -592,27 +647,29 @@ fn get_uri_args_uses_request_args_with_decode_args_shape() {
     let mut args = b"a=1&b=2&a=3&flag&empty=".to_vec();
     req.args = ngx_str(&mut args);
     let ptr = (&mut *req) as *mut ngx_http_request_t;
-    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_uri_args(null);\n").expect("args");
+    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_uri_args(());\n").expect("args");
     let root = expect_map(&decoded);
     assert_eq!(map_get(root, "truncated"), &Value::Bool(false));
-    let parsed = expect_map(map_get(root, "args"));
-    assert_eq!(map_get(parsed, "b"), &Value::string("2"));
-    assert_eq!(map_get(parsed, "flag"), &Value::Bool(true));
-    assert_eq!(map_get(parsed, "empty"), &Value::string(""));
-    match map_get(parsed, "a") {
-        Value::Array(values) => {
-            assert_eq!(values.as_slice(), &[Value::string("1"), Value::string("3")]);
-        }
-        other => panic!("repeated keys must become an array, got {other:?}"),
-    }
+    let parsed = arg_pairs_of(&decoded);
+    assert_eq!(
+        parsed,
+        vec![
+            ("a".to_string(), Some("1".to_string())),
+            ("b".to_string(), Some("2".to_string())),
+            ("a".to_string(), Some("3".to_string())),
+            ("flag".to_string(), None),
+            ("empty".to_string(), Some(String::new())),
+        ],
+        "repeated keys repeat the entry; a bare key is Option::None"
+    );
 
     let truncated = eval_in_request(ptr, "use ngx;\nngx::req::get_uri_args(2);\n").expect("cap");
     let truncated_root = expect_map(&truncated);
     assert_eq!(map_get(truncated_root, "truncated"), &Value::Bool(true));
-    let truncated_args = expect_map(map_get(truncated_root, "args"));
-    assert!(truncated_args.get(&Value::string("a")).is_some());
-    assert!(truncated_args.get(&Value::string("b")).is_some());
-    assert!(truncated_args.get(&Value::string("flag")).is_none());
+    let truncated_args = arg_pairs_of(&truncated);
+    assert_eq!(truncated_args.len(), 2, "cap stops before the third entry");
+    assert_eq!(truncated_args[0].0, "a");
+    assert_eq!(truncated_args[1].0, "b");
 }
 
 #[test]
@@ -630,15 +687,15 @@ fn get_uri_args_matches_decode_args_trailing_amp_invalid_percent_nul_empty_keys_
 
     let mut args = b"a=%ZZb&b=%00c&=skip&ok=1".to_vec();
     req.args = ngx_str(&mut args);
-    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_uri_args(null);\n").expect("pct");
-    let parsed = expect_map(map_get(expect_map(&decoded), "args"));
-    assert_eq!(map_get(parsed, "a"), &Value::string("%ZZb"));
-    assert_eq!(map_get(parsed, "b"), &Value::string("\0c"));
-    assert!(parsed.get(&Value::string("")).is_none());
-    assert_eq!(map_get(parsed, "ok"), &Value::string("1"));
+    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_uri_args(());\n").expect("pct");
+    let parsed = arg_pairs_of(&decoded);
+    assert_eq!(parsed[0], ("a".to_string(), Some("%ZZb".to_string())));
+    assert_eq!(parsed[1], ("b".to_string(), Some("\0c".to_string())));
+    assert!(parsed.iter().all(|(name, _)| !name.is_empty()));
+    assert_eq!(parsed[2], ("ok".to_string(), Some("1".to_string())));
 
     let codec =
-        eval("use ngx;\nngx::decode_args(\"a=%ZZb&b=%00c&=skip&ok=1\", null);\n").expect("codec");
+        eval("use ngx;\nngx::decode_args(\"a=%ZZb&b=%00c&=skip&ok=1\", ());\n").expect("codec");
     assert_eq!(
         decoded, codec,
         "get_uri_args must share decode_args behavior"
@@ -655,7 +712,7 @@ fn get_uri_args_matches_decode_args_trailing_amp_invalid_percent_nul_empty_keys_
         map_get(expect_map(&at_cap), "truncated"),
         &Value::Bool(false)
     );
-    assert_eq!(expect_map(map_get(expect_map(&at_cap), "args")).len(), 1024);
+    assert_eq!(arg_pairs_of(&at_cap).len(), 1024);
 }
 
 #[test]
@@ -681,41 +738,36 @@ fn get_headers_canonical_raw_duplicates_empty_and_truncation() {
     let ptr = (&mut *req) as *mut ngx_http_request_t;
 
     let decoded =
-        eval_in_request(ptr, "use ngx;\nngx::req::get_headers(null, null);\n").expect("headers");
+        eval_in_request(ptr, "use ngx;\nngx::req::get_headers((), ());\n").expect("headers");
     let root = expect_map(&decoded);
     assert_eq!(map_get(root, "truncated"), &Value::Bool(false));
-    let headers = expect_map(map_get(root, "headers"));
-    assert_eq!(map_get(headers, "host"), &Value::string("example.test"));
-    assert_eq!(map_get(headers, "x-empty"), &Value::string(""));
-    match map_get(headers, "x-foo") {
-        Value::Array(values) => {
-            assert_eq!(
-                values.as_slice(),
-                &[Value::string("one"), Value::string("two")]
-            );
-        }
-        other => panic!("duplicate headers must become an array, got {other:?}"),
-    }
-    assert!(
-        headers.get(&Value::string("Host")).is_none(),
-        "canonical mode must not keep mixed-case keys"
+    let headers = header_pairs_of(&decoded);
+    assert_eq!(
+        headers,
+        vec![
+            ("host".to_string(), "example.test".to_string()),
+            ("x-foo".to_string(), "one".to_string()),
+            ("x-foo".to_string(), "two".to_string()),
+            ("x-empty".to_string(), String::new()),
+        ],
+        "duplicate names repeat the entry; empty values are kept"
     );
 
-    let raw = eval_in_request(ptr, "use ngx;\nngx::req::get_headers(null, true);\n")
-        .expect("raw headers");
-    let raw_headers = expect_map(map_get(expect_map(&raw), "headers"));
-    assert_eq!(map_get(raw_headers, "Host"), &Value::string("example.test"));
-    assert!(raw_headers.get(&Value::string("host")).is_none());
+    let raw =
+        eval_in_request(ptr, "use ngx;\nngx::req::get_headers((), true);\n").expect("raw headers");
+    let raw_headers = header_pairs_of(&raw);
+    assert_eq!(
+        raw_headers[0],
+        ("Host".to_string(), "example.test".to_string())
+    );
 
-    let truncated =
-        eval_in_request(ptr, "use ngx;\nngx::req::get_headers(1, null);\n").expect("cap");
+    let truncated = eval_in_request(ptr, "use ngx;\nngx::req::get_headers(1, ());\n").expect("cap");
     let truncated_root = expect_map(&truncated);
     assert_eq!(map_get(truncated_root, "truncated"), &Value::Bool(true));
-    let truncated_headers = expect_map(map_get(truncated_root, "headers"));
-    assert_eq!(truncated_headers.len(), 1);
+    assert_eq!(header_pairs_of(&truncated).len(), 1);
 
     let restored =
-        eval_in_request(ptr, "use ngx;\nngx::req::get_headers(null, null);\n").expect("restore");
+        eval_in_request(ptr, "use ngx;\nngx::req::get_headers((), ());\n").expect("restore");
     assert_eq!(
         map_get(expect_map(&restored), "truncated"),
         &Value::Bool(false)
@@ -751,12 +803,13 @@ fn get_headers_multipart_count_and_byte_caps_set_truncated_without_partial_false
     req.headers_in.headers.size = std::mem::size_of::<ngx_table_elt_t>();
     req.headers_in.headers.nalloc = 2;
     let ptr = (&mut *req) as *mut ngx_http_request_t;
-    let capped = eval_in_request(ptr, "use ngx;\nngx::req::get_headers(3, null);\n").expect("cap");
+    let capped = eval_in_request(ptr, "use ngx;\nngx::req::get_headers(3, ());\n").expect("cap");
     let root = expect_map(&capped);
     assert_eq!(map_get(root, "truncated"), &Value::Bool(true));
-    let headers = expect_map(map_get(root, "headers"));
+    let headers = header_pairs_of(&capped);
     assert_eq!(headers.len(), 3);
-    assert!(headers.get(&Value::string("x-d")).is_none());
+    assert_eq!(headers[2].0, "x-c");
+    assert!(headers.iter().all(|(name, _)| name != "x-d"));
 }
 
 #[test]
@@ -775,14 +828,16 @@ fn get_headers_skips_hash_zero_and_stops_on_corrupt_lists() {
     install_headers(&mut req, &mut tables);
     let ptr = (&mut *req) as *mut ngx_http_request_t;
     let decoded =
-        eval_in_request(ptr, "use ngx;\nngx::req::get_headers(null, null);\n").expect("headers");
-    let headers = expect_map(map_get(expect_map(&decoded), "headers"));
-    assert!(headers.get(&Value::string("x-dead")).is_none());
-    assert_eq!(map_get(headers, "x-live"), &Value::string("ok"));
+        eval_in_request(ptr, "use ngx;\nngx::req::get_headers((), ());\n").expect("headers");
+    assert_eq!(
+        header_pairs_of(&decoded),
+        vec![("x-live".to_string(), "ok".to_string())],
+        "hash==0 entries are skipped"
+    );
 
     req.headers_in.headers.part.elts = std::ptr::null_mut();
     req.headers_in.headers.part.nelts = 8;
-    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_headers(null, null);\n")
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_headers((), ());\n")
         .expect_err("null elts with nelts>0 must be a host error");
     assert!(
         err.to_ascii_lowercase().contains("header")
@@ -798,7 +853,7 @@ fn get_headers_skips_hash_zero_and_stops_on_corrupt_lists() {
     };
     cycle.next = &mut cycle;
     req.headers_in.headers.part = cycle;
-    let cycle_err = eval_in_request(ptr, "use ngx;\nngx::req::get_headers(null, null);\n")
+    let cycle_err = eval_in_request(ptr, "use ngx;\nngx::req::get_headers((), ());\n")
         .expect_err("cyclic list must be a host error");
     assert!(
         cycle_err.to_ascii_lowercase().contains("header")
@@ -816,9 +871,8 @@ fn raw_header_copies_request_line_and_optional_skip() {
     let line_len = b"GET /t HTTP/1.1".len();
     let _live = install_single_header_buffer(&mut req, &mut buf, line_len);
     let ptr = (&mut *req) as *mut ngx_http_request_t;
-    let raw = expect_string(
-        eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n").expect("raw"),
-    );
+    let raw =
+        expect_string(eval_in_request(ptr, "use ngx;\nngx::req::raw_header(());\n").expect("raw"));
     assert!(raw.contains("GET /t HTTP/1.1"), "{raw:?}");
     assert!(raw.contains("Host: localhost"), "{raw:?}");
     assert!(
@@ -841,9 +895,8 @@ fn raw_header_restores_parser_nuls_to_colon_and_crlf() {
     let line_len = b"GET /t HTTP/1.1".len();
     let _live = install_single_header_buffer(&mut req, &mut buf, line_len);
     let ptr = (&mut *req) as *mut ngx_http_request_t;
-    let raw = expect_string(
-        eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n").expect("raw"),
-    );
+    let raw =
+        expect_string(eval_in_request(ptr, "use ngx;\nngx::req::raw_header(());\n").expect("raw"));
     assert!(
         raw.contains("Host: example.test\r\n"),
         "parser NULs must become colon/CRLF, got {raw:?}"
@@ -868,9 +921,8 @@ fn raw_header_walks_busy_buffers_and_strips_preread_body() {
     let line_len = b"GET /t HTTP/1.1".len();
     let _live = install_busy_header_buffers(&mut req, &mut chunks, line_len);
     let ptr = (&mut *req) as *mut ngx_http_request_t;
-    let raw = expect_string(
-        eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n").expect("raw"),
-    );
+    let raw =
+        expect_string(eval_in_request(ptr, "use ngx;\nngx::req::raw_header(());\n").expect("raw"));
     assert!(raw.contains("GET /t HTTP/1.1\r\n"), "{raw:?}");
     assert!(raw.contains("Host: x\r\n"), "{raw:?}");
     assert!(raw.contains("X-Foo: y\r\n"), "{raw:?}");
@@ -894,7 +946,7 @@ fn raw_header_rejects_http2_and_http3_on_main_not_current_stream() {
     let child_ptr = (&mut *child) as *mut ngx_http_request_t;
 
     main.stream = std::ptr::dangling_mut::<ngx_http_v2_stream_t>();
-    let err = eval_in_request(child_ptr, "use ngx;\nngx::req::raw_header(null);\n")
+    let err = eval_in_request(child_ptr, "use ngx;\nngx::req::raw_header(());\n")
         .expect_err("HTTP/2 on MAIN must reject");
     assert!(
         err.to_ascii_lowercase().contains("http/2") || err.to_ascii_lowercase().contains("http2"),
@@ -904,7 +956,7 @@ fn raw_header_rejects_http2_and_http3_on_main_not_current_stream() {
     main.stream = std::ptr::null_mut();
     main.http_version = NGX_HTTP_VERSION_30 as _;
     child.http_version = NGX_HTTP_VERSION_11 as _;
-    let err = eval_in_request(child_ptr, "use ngx;\nngx::req::raw_header(null);\n")
+    let err = eval_in_request(child_ptr, "use ngx;\nngx::req::raw_header(());\n")
         .expect_err("HTTP/3 on MAIN must reject");
     assert!(
         err.to_ascii_lowercase().contains("http/3") || err.to_ascii_lowercase().contains("http3"),
@@ -921,7 +973,7 @@ fn raw_header_rejects_http2_and_http3_on_main_not_current_stream() {
     child.header_in = main.header_in;
     child.request_line = main.request_line;
     let raw = expect_string(
-        eval_in_request(child_ptr, "use ngx;\nngx::req::raw_header(null);\n")
+        eval_in_request(child_ptr, "use ngx;\nngx::req::raw_header(());\n")
             .expect("subrequest stream must not override main HTTP/1.x"),
     );
     assert!(raw.contains("Host: localhost"), "{raw:?}");
@@ -933,7 +985,7 @@ fn raw_header_rejects_malformed_ranges_null_cycles_and_caps() {
     let mut line = b"GET /t HTTP/1.1".to_vec();
     req.request_line = ngx_str(&mut line);
     let ptr = (&mut *req) as *mut ngx_http_request_t;
-    let err = eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n")
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::raw_header(());\n")
         .expect_err("missing connection buffers must error");
     assert!(
         err.to_ascii_lowercase().contains("header")
@@ -945,7 +997,7 @@ fn raw_header_rejects_malformed_ranges_null_cycles_and_caps() {
     let mut storage = b"GET /t HTTP/1.1\r\nHost: x\r\n\r\n".to_vec();
     let mut live = install_single_header_buffer(&mut req, &mut storage, b"GET /t HTTP/1.1".len());
     live._bufs[0].pos = live._bufs[0].start; // empty / inverted range
-    let err = eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n")
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::raw_header(());\n")
         .expect_err("inverted buffer range must error");
     assert!(!err.is_empty(), "got {err}");
 
@@ -956,7 +1008,7 @@ fn raw_header_rejects_malformed_ranges_null_cycles_and_caps() {
     let mut live = install_busy_header_buffers(&mut req, &mut chunks, b"GET /t HTTP/1.1".len());
     live._chains[0].next = live._chains[1].as_mut() as *mut ngx_chain_t;
     live._chains[1].next = live._chains[0].as_mut() as *mut ngx_chain_t;
-    let err = eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n")
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::raw_header(());\n")
         .expect_err("busy-chain cycle must error");
     assert!(
         err.to_ascii_lowercase().contains("cycle")
@@ -971,7 +1023,7 @@ fn raw_header_rejects_malformed_ranges_null_cycles_and_caps() {
     huge.extend_from_slice(b"\r\n\r\n");
     let line_len = b"GET /t HTTP/1.1".len();
     let _live = install_single_header_buffer(&mut req, &mut huge, line_len);
-    let err = eval_in_request(ptr, "use ngx;\nngx::req::raw_header(null);\n")
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::raw_header(());\n")
         .expect_err("over-cap raw header must error");
     assert!(
         err.to_ascii_lowercase().contains("limit")
@@ -987,7 +1039,7 @@ fn get_post_args_unread_body_is_host_error() {
     let mut req = dummy_request();
     req.request_body = std::ptr::null_mut();
     let ptr = (&mut *req) as *mut ngx_http_request_t;
-    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(());\n")
         .expect_err("unread body must fail");
     assert!(
         err.to_ascii_lowercase().contains("body") && err.to_ascii_lowercase().contains("read"),
@@ -1001,28 +1053,32 @@ fn get_post_args_parses_already_read_single_and_multi_chain_bodies() {
     let mut single = b"a=1&b=2&a=3&flag&empty=".to_vec();
     let _live = install_in_memory_body(&mut req, std::slice::from_mut(&mut single));
     let ptr = (&mut *req) as *mut ngx_http_request_t;
-    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n").expect("post");
+    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(());\n").expect("post");
     let root = expect_map(&decoded);
     assert_eq!(map_get(root, "truncated"), &Value::Bool(false));
-    let parsed = expect_map(map_get(root, "args"));
-    assert_eq!(map_get(parsed, "b"), &Value::string("2"));
-    assert_eq!(map_get(parsed, "flag"), &Value::Bool(true));
-    assert_eq!(map_get(parsed, "empty"), &Value::string(""));
-    match map_get(parsed, "a") {
-        Value::Array(values) => {
-            assert_eq!(values.as_slice(), &[Value::string("1"), Value::string("3")]);
-        }
-        other => panic!("repeated post keys must become an array, got {other:?}"),
-    }
+    assert_eq!(
+        arg_pairs_of(&decoded),
+        vec![
+            ("a".to_string(), Some("1".to_string())),
+            ("b".to_string(), Some("2".to_string())),
+            ("a".to_string(), Some("3".to_string())),
+            ("flag".to_string(), None),
+            ("empty".to_string(), Some(String::new())),
+        ]
+    );
 
     let mut chunks = [b"a=1&b=".to_vec(), b"2&flag".to_vec()];
     let _live = install_in_memory_body(&mut req, &mut chunks);
-    let decoded =
-        eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n").expect("multi");
-    let parsed = expect_map(map_get(expect_map(&decoded), "args"));
-    assert_eq!(map_get(parsed, "a"), &Value::string("1"));
-    assert_eq!(map_get(parsed, "b"), &Value::string("2"));
-    assert_eq!(map_get(parsed, "flag"), &Value::Bool(true));
+    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(());\n").expect("multi");
+    assert_eq!(
+        arg_pairs_of(&decoded),
+        vec![
+            ("a".to_string(), Some("1".to_string())),
+            ("b".to_string(), Some("2".to_string())),
+            ("flag".to_string(), None),
+        ],
+        "a body split across buffers keeps the bare (None) key"
+    );
 
     let capped = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(1);\n").expect("cap");
     assert_eq!(
@@ -1038,7 +1094,7 @@ fn get_post_args_file_backed_still_reading_and_corrupt_are_host_errors() {
     let mut live = install_in_memory_body(&mut req, std::slice::from_mut(&mut body));
     let ptr = (&mut *req) as *mut ngx_http_request_t;
     nginx_stubs::write_reading_body(ptr.cast(), true);
-    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(());\n")
         .expect_err("still-reading body must error");
     assert!(
         err.to_ascii_lowercase().contains("read") || err.to_ascii_lowercase().contains("body"),
@@ -1047,7 +1103,7 @@ fn get_post_args_file_backed_still_reading_and_corrupt_are_host_errors() {
 
     nginx_stubs::write_reading_body(ptr.cast(), false);
     live._chains[0].buf = std::ptr::null_mut();
-    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(());\n")
         .expect_err("corrupt body chain must error");
     assert!(
         err.to_ascii_lowercase().contains("body")
@@ -1063,16 +1119,24 @@ fn var_get_validates_names_and_distinguishes_missing_empty_found() {
     let mut req = dummy_request();
     let ptr = (&mut *req) as *mut ngx_http_request_t;
     assert_eq!(
-        eval_in_request(ptr, "use ngx;\nngx::var::get(\"missing\");\n").expect("missing"),
-        Value::Null
+        option_string(
+            &eval_in_request(ptr, "use ngx;\nngx::var::get(\"missing\");\n").expect("missing")
+        ),
+        None,
+        "a missing variable is Option::None"
     );
     assert_eq!(
-        eval_in_request(ptr, "use ngx;\nngx::var::get(\"empty\");\n").expect("empty"),
-        Value::string("")
+        option_string(
+            &eval_in_request(ptr, "use ngx;\nngx::var::get(\"empty\");\n").expect("empty")
+        ),
+        Some(String::new()),
+        "a present empty variable is Some(\"\")"
     );
     assert_eq!(
-        eval_in_request(ptr, "use ngx;\nngx::var::get(\"found\");\n").expect("found"),
-        Value::string("stub-value")
+        option_string(
+            &eval_in_request(ptr, "use ngx;\nngx::var::get(\"found\");\n").expect("found")
+        ),
+        Some("stub-value".to_string())
     );
 
     let empty_name =
@@ -1262,8 +1326,9 @@ fn nginx_request_read_semantics_methods_headers_args_vars_and_internal() {
         &script,
         r#"
 use ngx;
+
 ngx::log(ngx::log_level::notice(), "REQ_METHOD=" + ngx::req::get_method());
-ngx::log(ngx::log_level::notice(), "REQ_VERSION=" + ngx::encode_args({ v: ngx::req::http_version() }));
+ngx::log(ngx::log_level::notice(), "REQ_VERSION=" + ngx::encode_args({ v: ngx::req::http_version().unwrap_or(0.0) }));
 if ngx::req::is_internal() {
     ngx::log(ngx::log_level::notice(), "REQ_INTERNAL=true");
 } else {
@@ -1280,18 +1345,18 @@ if ngx::headers_sent() {
     ngx::log(ngx::log_level::notice(), "REQ_SENT=false");
 }
 ngx::log(ngx::log_level::notice(), "REQ_START=" + ngx::encode_args({ v: ngx::req::start_time() }));
-ngx::log(ngx::log_level::notice(), "REQ_RAW=" + ngx::req::raw_header(null));
-let headers: RequestHeadersResult = ngx::req::get_headers(null, null);
-ngx::log(ngx::log_level::notice(), "REQ_HEADERS=" + ngx::encode_args(headers.headers));
+ngx::log(ngx::log_level::notice(), "REQ_RAW=" + ngx::req::raw_header(()));
+let headers: RequestHeadersResult = ngx::req::get_headers((), ());
+ngx::log(ngx::log_level::notice(), "REQ_HEADERS=" + ngx::encode_args({ x_foo: ngx::var::get("http_x_foo").unwrap_or(""), x_empty: ngx::var::get("http_x_empty").unwrap_or("") }));
 ngx::log(ngx::log_level::notice(), "REQ_HEADERS_TRUNC=" + ngx::encode_args({ v: headers.truncated }));
-let raw_headers: RequestHeadersResult = ngx::req::get_headers(null, true);
-ngx::log(ngx::log_level::notice(), "REQ_RAW_HEADERS=" + ngx::encode_args(raw_headers.headers));
-let capped: RequestHeadersResult = ngx::req::get_headers(1, null);
+let raw_headers: RequestHeadersResult = ngx::req::get_headers((), true);
+ngx::log(ngx::log_level::notice(), "REQ_RAW_HEADERS=" + ngx::req::raw_header(()));
+let capped: RequestHeadersResult = ngx::req::get_headers(1, ());
 ngx::log(ngx::log_level::notice(), "REQ_HEADERS_CAP=" + ngx::encode_args({ v: capped.truncated }));
-let args: RequestArgsResult = ngx::req::get_uri_args(null);
-ngx::log(ngx::log_level::notice(), "REQ_ARGS=" + ngx::encode_args(args.args));
+let args: RequestArgsResult = ngx::req::get_uri_args(());
+ngx::log(ngx::log_level::notice(), "REQ_ARGS=" + ngx::var::get("args").unwrap_or(""));
 ngx::log(ngx::log_level::notice(), "REQ_ARGS_TRUNC=" + ngx::encode_args({ v: args.truncated }));
-ngx::log(ngx::log_level::notice(), "REQ_VARS=" + ngx::encode_args({ uri: ngx::var::get("uri"), request_uri: ngx::var::get("request_uri"), args: ngx::var::get("args"), host: ngx::var::get("host"), missing: ngx::var::get("no_such_rss_var"), empty: ngx::var::get("rss_empty") }));
+ngx::log(ngx::log_level::notice(), "REQ_VARS=" + ngx::encode_args({ uri: ngx::var::get("uri").unwrap_or(""), request_uri: ngx::var::get("request_uri").unwrap_or(""), args: ngx::var::get("args").unwrap_or(""), host: ngx::var::get("host").unwrap_or(""), empty: ngx::var::get("rss_empty").unwrap_or("") }));
 "#,
     );
     let post_script = prefix.join("conf/post_args.rss");
@@ -1299,7 +1364,7 @@ ngx::log(ngx::log_level::notice(), "REQ_VARS=" + ngx::encode_args({ uri: ngx::va
         &post_script,
         r#"
 use ngx;
-ngx::req::get_post_args(null);
+ngx::req::get_post_args(());
 "#,
     );
     let internal_script = prefix.join("conf/internal_read.rss");
@@ -1312,7 +1377,7 @@ if ngx::req::is_internal() {
 } else {
     ngx::log(ngx::log_level::notice(), "REQ_INTERNAL_REDIR=false");
 }
-ngx::log(ngx::log_level::notice(), "REQ_INTERNAL_URI=" + ngx::encode_args({ uri: ngx::var::get("uri") }));
+ngx::log(ngx::log_level::notice(), "REQ_INTERNAL_URI=" + ngx::encode_args({ uri: ngx::var::get("uri").unwrap_or("") }));
 "#,
     );
     let sub_script = prefix.join("conf/sub_read.rss");
@@ -1528,17 +1593,16 @@ if ngx::req::is_internal() {
     );
     let headers = log_field(&log, "REQ_HEADERS=");
     assert!(
-        headers.contains("x-foo=one") && headers.contains("x-foo=two"),
-        "canonical duplicate headers must be preserved, got {headers}"
+        headers.contains("x_foo=") && headers.contains("one") && headers.contains("two"),
+        "duplicate request headers must both reach the script, got {headers}"
     );
     assert!(
-        headers.contains("x-empty="),
-        "empty header values must be present, got {headers}"
+        headers.contains("x_empty="),
+        "an empty header value must be observable, got {headers}"
     );
-    let raw_headers = log_field(&log, "REQ_RAW_HEADERS=");
     assert!(
-        raw_headers.contains("X-Foo=one") || raw_headers.contains("X-Foo=two"),
-        "raw mode must keep original header names, got {raw_headers}"
+        log.contains("X-Foo: one") || log.contains("X-Foo: two"),
+        "raw mode must keep original header names; got:\n{log}"
     );
     assert!(
         log.contains("REQ_HEADERS_CAP=v"),

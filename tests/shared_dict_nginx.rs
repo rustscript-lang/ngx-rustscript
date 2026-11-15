@@ -172,7 +172,7 @@ fn setup_real() -> (PathBuf, u16, OwnedTempDir, RunningNginx) {
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "Jim", "8", null, null);
+ngx::shared::set(d, "Jim", "8", (), ());
 ngx::header::set("X-Ok", "1");
 ngx::exit(200);
 "#,
@@ -181,9 +181,52 @@ ngx::exit(200);
         &scripts.join("get.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
 let r: SharedGetResult = ngx::shared::get(d, "Jim");
-ngx::header::set("X-Value", r.value);
+ngx::header::set("X-Value", sv_text(r.value));
 ngx::exit(200);
 "#,
     );
@@ -191,9 +234,52 @@ ngx::exit(200);
         &scripts.join("incr.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
-let r: SharedIncrResult = ngx::shared::incr(d, "hits", 1, 0, null);
-ngx::header::set("X-Value", ngx::encode_args({ n: r.value }));
+let r: SharedIncrResult = ngx::shared::incr(d, "hits", 1, 0, ());
+ngx::header::set("X-Value", ngx::encode_args({ n: opt_number(r.value) }));
 ngx::exit(200);
 "#,
     );
@@ -201,9 +287,52 @@ ngx::exit(200);
         &scripts.join("read_hits.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
 let r: SharedGetResult = ngx::shared::get(d, "hits");
-ngx::header::set("X-Value", ngx::encode_args({ n: r.value }));
+ngx::header::set("X-Value", ngx::encode_args({ n: sv_number(r.value) }));
 ngx::exit(200);
 "#,
     );
@@ -211,24 +340,67 @@ ngx::exit(200);
         &scripts.join("types.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "b", true, null, 3);
-ngx::shared::set(d, "i", 42, null, null);
-ngx::shared::set(d, "f", 1.5, null, null);
-ngx::shared::set(d, "s", "hi", null, null);
+ngx::shared::set(d, "b", true, (), 3);
+ngx::shared::set(d, "i", 42, (), ());
+ngx::shared::set(d, "f", 1.5, (), ());
+ngx::shared::set(d, "s", "hi", (), ());
 let gb: SharedGetResult = ngx::shared::get(d, "b");
 let gi: SharedGetResult = ngx::shared::get(d, "i");
 let gf: SharedGetResult = ngx::shared::get(d, "f");
 let gs: SharedGetResult = ngx::shared::get(d, "s");
-if gb.value {
+if sv_bool(gb.value) {
     ngx::header::set("X-Bool", "1");
 } else {
     ngx::header::set("X-Bool", "0");
 }
 ngx::header::set("X-Flags", ngx::encode_args({ n: gb.flags }));
-ngx::header::set("X-Int", ngx::encode_args({ n: gi.value }));
-ngx::header::set("X-Float", ngx::encode_args({ n: gf.value }));
-ngx::header::set("X-Str", gs.value);
+ngx::header::set("X-Int", ngx::encode_args({ n: sv_number(gi.value) }));
+ngx::header::set("X-Float", ngx::encode_args({ n: sv_float(gf.value) }));
+ngx::header::set("X-Str", sv_text(gs.value));
 ngx::exit(200);
 "#,
     );
@@ -236,20 +408,63 @@ ngx::exit(200);
         &scripts.join("add_replace.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
-let add1: SharedStoreResult = ngx::shared::add(d, "once", "a", null, null);
-let add2: SharedStoreResult = ngx::shared::add(d, "once", "b", null, null);
-let rep: SharedStoreResult = ngx::shared::replace(d, "once", "c", null, null);
-let niladd: SharedStoreResult = ngx::shared::add(d, "nilk", null, null, null);
+let add1: SharedStoreResult = ngx::shared::add(d, "once", "a", (), ());
+let add2: SharedStoreResult = ngx::shared::add(d, "once", "b", (), ());
+let rep: SharedStoreResult = ngx::shared::replace(d, "once", "c", (), ());
+let niladd: SharedStoreResult = ngx::shared::add(d, "nilk", (), (), ());
 if add1.ok {
     ngx::header::set("X-Add1", "1");
 } else {
     ngx::header::set("X-Add1", "0");
 }
-ngx::header::set("X-Add2", add2.error);
+ngx::header::set("X-Add2", opt_text(add2.error));
 let replaced: SharedGetResult = ngx::shared::get(d, "once");
-ngx::header::set("X-Rep", replaced.value);
-ngx::header::set("X-Nil", niladd.error);
+ngx::header::set("X-Rep", sv_text(replaced.value));
+ngx::header::set("X-Nil", opt_text(niladd.error));
 ngx::exit(200);
 "#,
     );
@@ -257,10 +472,53 @@ ngx::exit(200);
         &scripts.join("ttl.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "ttlkey", "v", 30, null);
+ngx::shared::set(d, "ttlkey", "v", 30, ());
 let t: SharedNumberResult = ngx::shared::ttl(d, "ttlkey");
-ngx::header::set("X-Ttl", ngx::encode_args({ n: t.value }));
+ngx::header::set("X-Ttl", ngx::encode_args({ n: opt_number(t.value) }));
 ngx::exit(200);
 "#,
     );
@@ -280,14 +538,57 @@ ngx::exit(200);
         &scripts.join("cats.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let dogs = ngx::shared::dict("dogs");
 let cats = ngx::shared::dict("cats");
-ngx::shared::set(dogs, "k", "woof", null, null);
-ngx::shared::set(cats, "k", "meow", null, null);
+ngx::shared::set(dogs, "k", "woof", (), ());
+ngx::shared::set(cats, "k", "meow", (), ());
 let dog: SharedGetResult = ngx::shared::get(dogs, "k");
 let cat: SharedGetResult = ngx::shared::get(cats, "k");
-ngx::header::set("X-Dogs", dog.value);
-ngx::header::set("X-Cats", cat.value);
+ngx::header::set("X-Dogs", sv_text(dog.value));
+ngx::header::set("X-Cats", sv_text(cat.value));
 ngx::exit(200);
 "#,
     );
@@ -295,9 +596,52 @@ ngx::exit(200);
         &scripts.join("empty.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
-let r: SharedStoreResult = ngx::shared::set(d, "", "x", null, null);
-ngx::header::set("X-Err", r.error);
+let r: SharedStoreResult = ngx::shared::set(d, "", "x", (), ());
+ngx::header::set("X-Err", opt_text(r.error));
 ngx::exit(200);
 "#,
     );
@@ -484,7 +828,7 @@ fn production_shm_stale_ttl_and_tiny_zone_lru() {
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "keep", "alive", null, null);
+ngx::shared::set(d, "keep", "alive", (), ());
 ngx::shared::set(d, "k", "v", 0.05, 9);
 ngx::exit(200);
 "#,
@@ -493,6 +837,49 @@ ngx::exit(200);
         &scripts.join("stale_get.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 ngx::update_time();
 let d = ngx::shared::dict("dogs");
 let live: SharedGetResult = ngx::shared::get(d, "k");
@@ -503,7 +890,7 @@ if stale.stale {
 } else {
     ngx::header::set("X-Stale", "0");
 }
-ngx::header::set("X-Val", stale.value);
+ngx::header::set("X-Val", sv_text(stale.value));
 ngx::header::set("X-Flags", ngx::encode_args({ n: stale.flags }));
 ngx::exit(200);
 "#,
@@ -512,21 +899,64 @@ ngx::exit(200);
         &scripts.join("fill.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("tiny");
 let blob = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
-ngx::shared::set(d, "a", blob, null, null);
-ngx::shared::set(d, "b", blob, null, null);
-ngx::shared::set(d, "c", blob, null, null);
-ngx::shared::set(d, "d", blob, null, null);
-ngx::shared::set(d, "e", blob, null, null);
-ngx::shared::set(d, "f", blob, null, null);
-let safe: SharedSafeStoreResult = ngx::shared::safe_set(d, "final", blob, null, null);
+ngx::shared::set(d, "a", blob, (), ());
+ngx::shared::set(d, "b", blob, (), ());
+ngx::shared::set(d, "c", blob, (), ());
+ngx::shared::set(d, "d", blob, (), ());
+ngx::shared::set(d, "e", blob, (), ());
+ngx::shared::set(d, "f", blob, (), ());
+let safe: SharedSafeStoreResult = ngx::shared::safe_set(d, "final", blob, (), ());
 if safe.ok {
     ngx::header::set("X-Ok", "1");
 } else {
     ngx::header::set("X-Ok", "0");
 }
-ngx::header::set("X-Safe", safe.error);
+ngx::header::set("X-Safe", opt_text(safe.error));
 ngx::exit(200);
 "#,
     );
@@ -624,11 +1054,54 @@ fn two_workers_list_flush_keys_reload_and_pressure() {
         &scripts.join("push.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
 ngx::shared::lpush(d, "q", "left");
 ngx::shared::rpush(d, "q", "right");
 let len: SharedNumberResult = ngx::shared::llen(d, "q");
-ngx::header::set("X-Len", ngx::encode_args({ n: len.value }));
+ngx::header::set("X-Len", ngx::encode_args({ n: opt_number(len.value) }));
 ngx::header::set("X-Worker", ngx::encode_args({ n: ngx::worker::id() }));
 ngx::exit(200);
 "#,
@@ -637,13 +1110,56 @@ ngx::exit(200);
         &scripts.join("pop.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
 let left: SharedGetResult = ngx::shared::lpop(d, "q");
 let right: SharedGetResult = ngx::shared::rpop(d, "q");
-ngx::header::set("X-Left", left.value);
-ngx::header::set("X-Right", right.value);
+ngx::header::set("X-Left", sv_text(left.value));
+ngx::header::set("X-Right", sv_text(right.value));
 let len: SharedNumberResult = ngx::shared::llen(d, "q");
-ngx::header::set("X-Len", ngx::encode_args({ n: len.value }));
+ngx::header::set("X-Len", ngx::encode_args({ n: opt_number(len.value) }));
 ngx::header::set("X-Worker", ngx::encode_args({ n: ngx::worker::id() }));
 ngx::exit(200);
 "#,
@@ -652,12 +1168,55 @@ ngx::exit(200);
         &scripts.join("conflict.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "scalar", "keep", null, null);
+ngx::shared::set(d, "scalar", "keep", (), ());
 let push: SharedNumberResult = ngx::shared::lpush(d, "scalar", "x");
 let got: SharedGetResult = ngx::shared::get(d, "scalar");
-ngx::header::set("X-Err", push.error);
-ngx::header::set("X-Val", got.value);
+ngx::header::set("X-Err", opt_text(push.error));
+ngx::header::set("X-Val", sv_text(got.value));
 ngx::exit(200);
 "#,
     );
@@ -665,12 +1224,55 @@ ngx::exit(200);
         &scripts.join("list_get.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
 ngx::shared::rpush(d, "lst", "a");
 let got: SharedGetResult = ngx::shared::get(d, "lst");
-ngx::header::set("X-Err", got.error);
+ngx::header::set("X-Err", opt_text(got.error));
 let list_len: SharedNumberResult = ngx::shared::llen(d, "lst");
-ngx::header::set("X-Len", ngx::encode_args({ n: list_len.value }));
+ngx::header::set("X-Len", ngx::encode_args({ n: opt_number(list_len.value) }));
 ngx::exit(200);
 "#,
     );
@@ -681,9 +1283,9 @@ use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::flush_all(d);
 ngx::shared::flush_expired(d, 0);
-ngx::shared::set(d, "a", "1", null, null);
-ngx::shared::set(d, "b", "2", null, null);
-ngx::shared::set(d, "c", "3", null, null);
+ngx::shared::set(d, "a", "1", (), ());
+ngx::shared::set(d, "b", "2", (), ());
+ngx::shared::set(d, "c", "3", (), ());
 ngx::shared::rpush(d, "lst2", "x");
 ngx::exit(200);
 "#,
@@ -692,6 +1294,49 @@ ngx::exit(200);
         &scripts.join("get_keys.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
 let keys = ngx::shared::get_keys(d, 0);
 ngx::header::set("X-N", ngx::encode_args({ n: keys.length }));
@@ -702,11 +1347,11 @@ ngx::header::set("X-3", keys[3]);
 let ga: SharedGetResult = ngx::shared::get(d, "a");
 let gb2: SharedGetResult = ngx::shared::get(d, "b");
 let gc: SharedGetResult = ngx::shared::get(d, "c");
-ngx::header::set("X-A", ga.value);
-ngx::header::set("X-B", gb2.value);
-ngx::header::set("X-C", gc.value);
+ngx::header::set("X-A", sv_text(ga.value));
+ngx::header::set("X-B", sv_text(gb2.value));
+ngx::header::set("X-C", sv_text(gc.value));
 let lst_len: SharedNumberResult = ngx::shared::llen(d, "lst2");
-ngx::header::set("X-Lst", ngx::encode_args({ n: lst_len.value }));
+ngx::header::set("X-Lst", ngx::encode_args({ n: opt_number(lst_len.value) }));
 ngx::exit(200);
 "#,
     );
@@ -715,7 +1360,7 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "live", "1", 1, null);
+ngx::shared::set(d, "live", "1", 1, ());
 ngx::shared::flush_all(d);
 let n = ngx::shared::flush_expired(d, 0);
 let live: SharedGetResult = ngx::shared::get(d, "live");
@@ -742,10 +1387,53 @@ ngx::exit(200);
         &scripts.join("expire_list_get.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 ngx::update_time();
 let d = ngx::shared::dict("dogs");
 let n: SharedNumberResult = ngx::shared::llen(d, "exp");
-ngx::header::set("X-Len", ngx::encode_args({ n: n.value }));
+ngx::header::set("X-Len", ngx::encode_args({ n: opt_number(n.value) }));
 ngx::exit(200);
 "#,
     );
@@ -753,6 +1441,49 @@ ngx::exit(200);
         &scripts.join("list_fill.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("tiny");
 let blob = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 let a: SharedNumberResult = ngx::shared::lpush(d, "q", blob);
@@ -761,7 +1492,7 @@ let c: SharedNumberResult = ngx::shared::lpush(d, "q", blob);
 let d2: SharedNumberResult = ngx::shared::lpush(d, "q", blob);
 let e: SharedNumberResult = ngx::shared::lpush(d, "q", blob);
 let last: SharedNumberResult = ngx::shared::lpush(d, "q", blob);
-ngx::header::set("X-Err", last.error);
+ngx::header::set("X-Err", opt_text(last.error));
 ngx::exit(200);
 "#,
     );
@@ -769,11 +1500,54 @@ ngx::exit(200);
         &scripts.join("reload_check.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
 let n: SharedNumberResult = ngx::shared::llen(d, "reload");
-ngx::header::set("X-Len", ngx::encode_args({ n: n.value }));
+ngx::header::set("X-Len", ngx::encode_args({ n: opt_number(n.value) }));
 let popped: SharedGetResult = ngx::shared::lpop(d, "reload");
-ngx::header::set("X-Pop", popped.value);
+ngx::header::set("X-Pop", sv_text(popped.value));
 ngx::exit(200);
 "#,
     );
@@ -986,11 +1760,54 @@ http {{
         &scripts.join("reload_check.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
 let n: SharedNumberResult = ngx::shared::llen(d, "reload");
-ngx::header::set("X-Len", ngx::encode_args({ n: n.value }));
+ngx::header::set("X-Len", ngx::encode_args({ n: opt_number(n.value) }));
 let popped: SharedGetResult = ngx::shared::lpop(d, "reload");
-ngx::header::set("X-Pop", popped.value);
+ngx::header::set("X-Pop", sv_text(popped.value));
 ngx::exit(200);
 "#,
     );
@@ -1072,7 +1889,7 @@ fn rss_seed_numbered(dict: &str, prefix: &str, count: usize, exptime: &str) -> S
     let mut body = format!("use ngx;\nlet d = ngx::shared::dict(\"{dict}\");\n");
     for i in 0..count {
         body.push_str(&format!(
-            "ngx::shared::set(d, \"{prefix}{i:04}\", 1, {exptime}, null);\n"
+            "ngx::shared::set(d, \"{prefix}{i:04}\", 1, {exptime}, ());\n"
         ));
     }
     body.push_str("ngx::exit(200);\n");
@@ -1090,7 +1907,7 @@ fn shm_get_keys_flush_all_visit_caps_and_list_pop() {
 
     write_script(
         &scripts.join("seed_many.rss"),
-        &rss_seed_numbered("dogs", "k", 1100, "null"),
+        &rss_seed_numbered("dogs", "k", 1100, "()"),
     );
     write_script(
         &scripts.join("flush_all.rss"),
@@ -1115,15 +1932,58 @@ ngx::exit(200);
         &scripts.join("ends_probe.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
 let k0: SharedGetResult = ngx::shared::get(d, "k0000");
 let kn: SharedGetResult = ngx::shared::get(d, "k1099");
-if k0.value == null {
+if !sv_some(k0.value.copy()) {
     ngx::header::set("X-K0", "missing");
 } else {
     ngx::header::set("X-K0", "1");
 }
-if kn.value == null {
+if !sv_some(kn.value.copy()) {
     ngx::header::set("X-KN", "missing");
 } else {
     ngx::header::set("X-KN", "1");
@@ -1140,7 +2000,7 @@ ngx::exit(200);
         r#"
 use ngx;
 let d = ngx::shared::dict("visit");
-ngx::shared::set(d, "live", "1", null, null);
+ngx::shared::set(d, "live", "1", (), ());
 ngx::exit(200);
 "#,
     );
@@ -1148,26 +2008,69 @@ ngx::exit(200);
         &scripts.join("get_keys_visit.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 ngx::update_time();
 let d = ngx::shared::dict("visit");
 let keys = ngx::shared::get_keys(d, 10);
 ngx::header::set("X-N", ngx::encode_args({ n: keys.length }));
 let live: SharedGetResult = ngx::shared::get(d, "live");
-ngx::header::set("X-Live", live.value);
+ngx::header::set("X-Live", sv_text(live.value));
 ngx::exit(200);
 "#,
     );
     let mut flush_expired_seed = String::from(
-        "use ngx;\nlet d = ngx::shared::dict(\"cats\");\nngx::shared::set(d, \"expired-lru\", 0, 5, null);\n",
+        "use ngx;\nlet d = ngx::shared::dict(\"cats\");\nngx::shared::set(d, \"expired-lru\", 0, 5, ());\n",
     );
     for i in 0..1024 {
         flush_expired_seed.push_str(&format!(
-            "ngx::shared::set(d, \"live{i:04}\", 1, null, null);\n"
+            "ngx::shared::set(d, \"live{i:04}\", 1, (), ());\n"
         ));
     }
     for i in 0..5 {
         flush_expired_seed.push_str(&format!(
-            "ngx::shared::set(d, \"expired-mru-{i}\", 2, 5, null);\n"
+            "ngx::shared::set(d, \"expired-mru-{i}\", 2, 5, ());\n"
         ));
     }
     flush_expired_seed.push_str("ngx::exit(200);\n");
@@ -1179,12 +2082,55 @@ ngx::exit(200);
         &scripts.join("flush_expired_visit.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 ngx::update_time();
 let d = ngx::shared::dict("cats");
 let n = ngx::shared::flush_expired(d, 10);
 let stale: SharedGetResult = ngx::shared::get_stale(d, "expired-mru-4");
 ngx::header::set("X-Freed", ngx::encode_args({ n: n }));
-if stale.value == null {
+if !sv_some(stale.value.copy()) {
     ngx::header::set("X-Stale", "missing");
 } else {
     ngx::header::set("X-Stale", "present");
@@ -1196,18 +2142,61 @@ ngx::exit(200);
         &scripts.join("list_pop_ok.rss"),
         r#"
 use ngx;
+
+fn sv_text(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn sv_number(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
+
+fn sv_some(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn sv_bool(value: Option<SharedValue>) -> bool {
+    match value {
+        Option::Some(entry) => entry.bool_value.unwrap_or(false),
+        Option::None => false
+    }
+}
+
+fn sv_float(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.float_value.unwrap_or(0.0),
+        Option::None => 0.0
+    }
+}
+
+fn opt_text(value: Option<string>) -> string {
+    value.unwrap_or("")
+}
+
+fn opt_number(value: Option<number>) -> number {
+    value.unwrap_or(0)
+}
 let d = ngx::shared::dict("dogs");
 ngx::shared::rpush(d, "decode", "keep");
 ngx::shared::rpush(d, "decode", "tail");
 let popped: SharedGetResult = ngx::shared::lpop(d, "decode");
 let rest: SharedNumberResult = ngx::shared::llen(d, "decode");
-ngx::header::set("X-Pop", popped.value);
-if popped.error == null {
+ngx::header::set("X-Pop", sv_text(popped.value));
+if opt_text(popped.error.copy()) == "" {
     ngx::header::set("X-Err", "none");
 } else {
     ngx::header::set("X-Err", "err");
 }
-ngx::header::set("X-Len", ngx::encode_args({ n: rest.value }));
+ngx::header::set("X-Len", ngx::encode_args({ n: opt_number(rest.value) }));
 ngx::exit(200);
 "#,
     );

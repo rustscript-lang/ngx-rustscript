@@ -161,7 +161,9 @@ mod tests {
     }
 
     fn sleep_catalog() -> vm::HostApiCatalog {
-        crate::host::ngx_host_catalog()
+        // Production compile catalog: the merged ngx + standard snapshot the
+        // registry installs adapters from.
+        crate::host::compile_host_catalog()
     }
 
     fn test_catalog() -> vm::HostApiCatalog {

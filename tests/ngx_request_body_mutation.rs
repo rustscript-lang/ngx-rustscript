@@ -101,6 +101,23 @@ fn eval_in_request(request: *mut ngx_http_request_t, source: &str) -> Result<Val
     )
 }
 
+/// Unwraps a canonical guest `Option` carrier into its payload.
+fn option_payload(value: &Value) -> Option<Value> {
+    let (some, payload) = vm::option::payload(value).expect("Option carrier");
+    if some {
+        Some(payload.expect("Some payload").clone())
+    } else {
+        None
+    }
+}
+
+fn expect_option_string(value: Value) -> Option<String> {
+    option_payload(&value).map(|payload| match payload {
+        Value::String(text) => (*text).clone(),
+        other => panic!("expected string payload, got {other:?}"),
+    })
+}
+
 fn expect_string(value: Value) -> String {
     match value {
         Value::String(text) => (*text).clone(),
@@ -220,8 +237,8 @@ fn body_mutation_catalog_schemas_phases_and_capabilities() {
             "use ngx;\n{name}{};\n",
             match *name {
                 SET_BODY_DATA => "(\"x\")",
-                SET_BODY_FILE => "(\"/tmp/x\", null)",
-                INIT_BODY => "(null)",
+                SET_BODY_FILE => "(\"/tmp/x\", ())",
+                INIT_BODY => "(())",
                 APPEND_BODY => "(\"x\")",
                 FINISH_BODY => "()",
                 _ => unreachable!(),
@@ -256,8 +273,8 @@ fn body_mutation_catalog_schemas_phases_and_capabilities() {
 fn body_mutation_rejected_in_log_and_without_live_request_or_write() {
     for source in [
         "use ngx;\nngx::req::set_body_data(\"x\");\n",
-        "use ngx;\nngx::req::set_body_file(\"/tmp/x\", null);\n",
-        "use ngx;\nngx::req::init_body(null);\n",
+        "use ngx;\nngx::req::set_body_file(\"/tmp/x\", ());\n",
+        "use ngx;\nngx::req::init_body(());\n",
         "use ngx;\nngx::req::append_body(\"x\");\n",
         "use ngx;\nngx::req::finish_body();\n",
     ] {
@@ -366,11 +383,19 @@ ngx::req::get_body_data();
 "#,
     )
     .expect("set_body_data");
-    assert_eq!(expect_string(value), "alpha=1&beta=2");
-    let post = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n").expect("post");
-    let parsed = expect_map(map_get(expect_map(&post), "args"));
-    assert_eq!(map_get(parsed, "alpha"), &Value::string("1"));
-    assert_eq!(map_get(parsed, "beta"), &Value::string("2"));
+    assert_eq!(
+        expect_option_string(value).expect("body data is Some"),
+        "alpha=1&beta=2"
+    );
+    let post = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(());\n").expect("post");
+    let Value::Array(entries) = map_get(expect_map(&post), "args") else {
+        panic!("post args must be a typed entry array");
+    };
+    assert_eq!(entries.len(), 2);
+    let first = expect_map(&entries[0]);
+    let second = expect_map(&entries[1]);
+    assert_eq!(expect_string(map_get(first, "name").clone()), "alpha");
+    assert_eq!(expect_string(map_get(second, "name").clone()), "beta");
     nginx_stubs::stub_alloc_reset();
 }
 
@@ -394,7 +419,10 @@ fn set_body_data_allocation_failure_leaves_prior_body() {
     assert_eq!(req.request_body, prior, "prior body pointer must remain");
     nginx_stubs::stub_alloc_fail_after(64);
     let kept = eval_in_request(ptr, "use ngx;\nngx::req::get_body_data();\n").expect("kept");
-    assert_eq!(expect_string(kept), "keep-me");
+    assert_eq!(
+        expect_option_string(kept).expect("body data is Some"),
+        "keep-me"
+    );
     nginx_stubs::stub_alloc_reset();
 }
 
@@ -424,7 +452,7 @@ fn builder_state_machine_init_append_finish_and_failures() {
         ptr,
         r#"
 use ngx;
-ngx::req::init_body(null);
+ngx::req::init_body(());
 ngx::req::init_body(8);
 ngx::req::append_body("ab");
 ngx::req::append_body("cd");
@@ -433,7 +461,10 @@ ngx::req::get_body_data();
 "#,
     )
     .expect("builder");
-    assert_eq!(expect_string(value), "abcd");
+    assert_eq!(
+        expect_option_string(value).expect("body data is Some"),
+        "abcd"
+    );
 
     let err =
         eval_in_request(ptr, "use ngx;\nngx::req::finish_body();\n").expect_err("repeated finish");
@@ -452,7 +483,7 @@ ngx::req::get_body_data();
 "#,
     )
     .expect("empty");
-    assert_eq!(expect_string(empty), "");
+    assert_eq!(expect_option_string(empty).expect("body data is Some"), "");
 
     let err = eval_in_request(
         ptr,
@@ -474,14 +505,17 @@ ngx::req::append_body("xyz");
         ptr,
         r#"
 use ngx;
-ngx::req::init_body(null);
+ngx::req::init_body(());
 ngx::req::append_body("pending");
 ngx::req::set_body_data("direct");
 ngx::req::get_body_data();
 "#,
     )
     .expect("set during builder");
-    assert_eq!(expect_string(replaced), "direct");
+    assert_eq!(
+        expect_option_string(replaced).expect("body data is Some"),
+        "direct"
+    );
     nginx_stubs::stub_alloc_reset();
 }
 
@@ -497,7 +531,7 @@ fn builder_finish_install_failure_restores_builder_and_retries() {
         ptr,
         r#"
 use ngx;
-ngx::req::init_body(null);
+ngx::req::init_body(());
 ngx::req::append_body("retry-me");
 "#,
     )
@@ -524,7 +558,10 @@ ngx::req::get_body_data();
 "#,
     )
     .expect("retry finish");
-    assert_eq!(expect_string(value), "retry-me");
+    assert_eq!(
+        expect_option_string(value).expect("body data is Some"),
+        "retry-me"
+    );
     nginx_stubs::stub_alloc_reset();
 }
 
@@ -618,7 +655,7 @@ fn set_body_file_empty_file_installs_file_backed_body() {
     fs::write(&path, b"").unwrap();
     let lstat = fs::symlink_metadata(&path).unwrap();
     let path_s = path.to_string_lossy().replace('\\', "\\\\");
-    let got = expect_string(
+    let got = expect_option_string(
         eval_in_request(
             ptr,
             &format!(
@@ -626,7 +663,8 @@ fn set_body_file_empty_file_installs_file_backed_body() {
             ),
         )
         .expect("empty file"),
-    );
+    )
+    .expect("body file is Some");
     assert!(
         got.contains("empty.txt"),
         "empty file body should keep the path, got {got}"
@@ -639,9 +677,10 @@ fn set_body_file_empty_file_installs_file_backed_body() {
         "set_body_file success path must keep matching lstat/fstat identity"
     );
     let data = eval_in_request(ptr, "use ngx;\nngx::req::get_body_data();\n").expect("data");
-    assert!(
-        matches!(data, Value::Null),
-        "file-backed empty body get_body_data must be null, got {data:?}"
+    assert_eq!(
+        expect_option_string(data),
+        None,
+        "file-backed body get_body_data must be Option::None"
     );
     nginx_stubs::stub_alloc_reset();
 }
@@ -1021,8 +1060,8 @@ fn nginx_body_mutation_upstream_subrequest_cleanup_and_isolation() {
 use ngx;
 ngx::req::read_body();
 ngx::req::set_body_data("replaced-memory");
-ngx::log(ngx::log_level::notice(), ngx::encode_args({ mem_cl: ngx::var::get("content_length") }));
-ngx::say(ngx::req::get_body_data());
+ngx::log(ngx::log_level::notice(), ngx::encode_args({ mem_cl: ngx::var::get("content_length").unwrap_or("") }));
+ngx::say(ngx::req::get_body_data().unwrap_or(""));
 "#,
     );
     let mem_proxy = prefix.join("conf/mut_mem_proxy.rss");
@@ -1032,7 +1071,7 @@ ngx::say(ngx::req::get_body_data());
 use ngx;
 ngx::req::read_body();
 ngx::req::set_body_data("replaced-memory");
-ngx::log(ngx::log_level::notice(), ngx::encode_args({ mem_proxy_cl: ngx::var::get("content_length") }));
+ngx::log(ngx::log_level::notice(), ngx::encode_args({ mem_proxy_cl: ngx::var::get("content_length").unwrap_or("") }));
 "#,
     );
     let file_true = prefix.join("conf/mut_file_true.rss");
@@ -1043,8 +1082,8 @@ ngx::log(ngx::log_level::notice(), ngx::encode_args({ mem_proxy_cl: ngx::var::ge
 use ngx;
 ngx::req::read_body();
 ngx::req::set_body_file("{path}", true);
-ngx::log(ngx::log_level::notice(), ngx::encode_args({{ file_true_cl: ngx::var::get("content_length") }}));
-ngx::say(ngx::req::get_body_file());
+ngx::log(ngx::log_level::notice(), ngx::encode_args({{ file_true_cl: ngx::var::get("content_length").unwrap_or("") }}));
+ngx::say(ngx::req::get_body_file().unwrap_or(""));
 "#,
             path = source_true_path.replace('\\', "\\\\")
         ),
@@ -1057,8 +1096,8 @@ ngx::say(ngx::req::get_body_file());
 use ngx;
 ngx::req::read_body();
 ngx::req::set_body_file("{path}", false);
-ngx::log(ngx::log_level::notice(), ngx::encode_args({{ file_false_cl: ngx::var::get("content_length") }}));
-ngx::say(ngx::req::get_body_file());
+ngx::log(ngx::log_level::notice(), ngx::encode_args({{ file_false_cl: ngx::var::get("content_length").unwrap_or("") }}));
+ngx::say(ngx::req::get_body_file().unwrap_or(""));
 "#,
             path = source_false_path.replace('\\', "\\\\")
         ),
@@ -1071,7 +1110,7 @@ ngx::say(ngx::req::get_body_file());
 use ngx;
 ngx::req::read_body();
 ngx::req::set_body_file("{path}", false);
-ngx::log(ngx::log_level::notice(), ngx::encode_args({{ file_proxy_cl: ngx::var::get("content_length") }}));
+ngx::log(ngx::log_level::notice(), ngx::encode_args({{ file_proxy_cl: ngx::var::get("content_length").unwrap_or("") }}));
 "#,
             path = source_false_path.replace('\\', "\\\\")
         ),
@@ -1082,12 +1121,12 @@ ngx::log(ngx::log_level::notice(), ngx::encode_args({{ file_proxy_cl: ngx::var::
         r#"
 use ngx;
 ngx::req::read_body();
-ngx::req::init_body(null);
+ngx::req::init_body(());
 ngx::req::append_body("built-");
 ngx::req::append_body("body");
 ngx::req::finish_body();
-ngx::log(ngx::log_level::notice(), ngx::encode_args({ builder_cl: ngx::var::get("content_length") }));
-ngx::say(ngx::req::get_body_data());
+ngx::log(ngx::log_level::notice(), ngx::encode_args({ builder_cl: ngx::var::get("content_length").unwrap_or("") }));
+ngx::say(ngx::req::get_body_data().unwrap_or(""));
 "#,
     );
     let builder_proxy = prefix.join("conf/mut_builder_proxy.rss");
@@ -1096,10 +1135,10 @@ ngx::say(ngx::req::get_body_data());
         r#"
 use ngx;
 ngx::req::read_body();
-ngx::req::init_body(null);
+ngx::req::init_body(());
 ngx::req::append_body("built-body");
 ngx::req::finish_body();
-ngx::log(ngx::log_level::notice(), ngx::encode_args({ builder_proxy_cl: ngx::var::get("content_length") }));
+ngx::log(ngx::log_level::notice(), ngx::encode_args({ builder_proxy_cl: ngx::var::get("content_length").unwrap_or("") }));
 "#,
     );
     let chunked_proxy = prefix.join("conf/mut_chunked_proxy.rss");
@@ -1125,8 +1164,8 @@ ngx::req::set_body_data("ssi-inherited");
         &ssi_child,
         r#"
 use ngx;
-ngx::log(ngx::log_level::notice(), ngx::encode_args({ body: ngx::req::get_body_data() }));
-ngx::say(ngx::req::get_body_data());
+ngx::log(ngx::log_level::notice(), ngx::encode_args({ body: ngx::req::get_body_data().unwrap_or("") }));
+ngx::say(ngx::req::get_body_data().unwrap_or(""));
 "#,
     );
     let html_dir = prefix.join("html");
@@ -1151,7 +1190,7 @@ ngx::exit(418);
         &redir_inner,
         r#"
 use ngx;
-ngx::say(ngx::req::get_body_data());
+ngx::say(ngx::req::get_body_data().unwrap_or(""));
 "#,
     );
     let iso_replacements = [
@@ -1207,7 +1246,7 @@ ngx::req::set_body_data("{replacement}");
 use ngx;
 ngx::req::read_body();
 ngx::req::set_body_file("{source_path}", true);
-ngx::say(ngx::req::get_body_file());
+ngx::say(ngx::req::get_body_file().unwrap_or(""));
 "#
             ),
         );
@@ -1229,7 +1268,7 @@ ngx::say(ngx::req::get_body_file());
 use ngx;
 ngx::req::read_body();
 ngx::req::set_body_file("{path}", true);
-ngx::say(ngx::req::get_body_file());
+ngx::say(ngx::req::get_body_file().unwrap_or(""));
 "#,
         path = source_true_path.replace('\\', "\\\\")
     );
@@ -1687,7 +1726,9 @@ ngx::say(ngx::req::get_body_file());
     );
     assert_eq!(status, 200, "healthy after reload: {response}");
 
-    quit_and_wait(&mut running.child, Duration::from_secs(8));
+    // Graceful shutdown drains the aborted write wait and any reloaded worker;
+    // a loaded CI box needs well over the default 8s to finish that drain.
+    quit_and_wait(&mut running.child, Duration::from_secs(20));
     drop(echo_thread);
 
     assert!(

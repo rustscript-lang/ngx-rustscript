@@ -19,7 +19,11 @@ if pepper == "" || expected == "" {
 }
 
 let raw = ngx::var::get("http_x_api_key");
-if raw == null {
+let missing = match raw.copy() {
+    Option::Some(token) => false,
+    Option::None => true
+};
+if missing {
     ngx::header::set("WWW-Authenticate", "ApiKey realm=\"api\"");
     ngx::exit(401);
 }

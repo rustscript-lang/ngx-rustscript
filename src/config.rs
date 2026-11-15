@@ -264,8 +264,18 @@ struct StandardBuiltinUsage {
 fn standard_builtin_usage(program: &Program) -> StandardBuiltinUsage {
     let disassembly = vm::disassemble_program(program);
     StandardBuiltinUsage {
-        io: disassembly.contains("builtin io_"),
-        sqlite: disassembly.contains("builtin sqlite_"),
+        // The standard families are catalogued host imports as well as legacy
+        // compiler builtins; either form selects request-owned execution.
+        io: disassembly.contains("builtin io_")
+            || program
+                .imports
+                .iter()
+                .any(|import| import.name.starts_with("io::")),
+        sqlite: disassembly.contains("builtin sqlite_")
+            || program
+                .imports
+                .iter()
+                .any(|import| import.name.starts_with("sqlite::")),
         sse: program
             .imports
             .iter()
@@ -283,11 +293,17 @@ fn program_has_resource_or_unknown_host_schema(program: &Program) -> bool {
             .any(|(import, schema)| match schema {
                 None => import.name != "http::client::request",
                 Some(schema) => {
-                    schema.return_type.contains_resource()
-                        || schema
-                            .params
-                            .iter()
-                            .any(|param| param.schema.contains_resource())
+                    // The buffered HTTP builder/accessor family is statically
+                    // quiescent: its request/response/header resources are
+                    // created and released inside one synchronous call chain.
+                    // Streaming SSE is excluded by `standard_builtin_usage`.
+                    let quiescent_http = import.name.starts_with("http::");
+                    !quiescent_http
+                        && (schema.return_type.contains_resource()
+                            || schema
+                                .params
+                                .iter()
+                                .any(|param| param.schema.contains_resource()))
                 }
             })
 }
@@ -379,7 +395,7 @@ fn program_may_suspend_or_retain_state(program: &Program) -> bool {
         || program_has_resource_or_unknown_host_schema(program)
         || program.imports.iter().any(|import| {
             crate::host::ngx_timer_host_names().contains(&import.name.as_str())
-                || (is_standard_host_import(&import.name) && import.name != "http::client::request")
+                || (is_standard_host_import(&import.name) && !import.name.starts_with("http::"))
                 || ngx_host_manifest().iter().any(|entry| {
                     entry.name == import.name.as_str()
                         && (entry.sync == HostSyncKind::Async

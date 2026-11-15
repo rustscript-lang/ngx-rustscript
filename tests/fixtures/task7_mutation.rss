@@ -1,4 +1,38 @@
 use ngx;
+
+fn header_value(entries: [HeaderEntry], name: string) -> string {
+    let a = match entries[0]?.name.unwrap_or("") == name {
+        true => entries[0]?.value.unwrap_or(""),
+        false => ""
+    };
+    let b = match entries[1]?.name.unwrap_or("") == name {
+        true => entries[1]?.value.unwrap_or(""),
+        false => ""
+    };
+    let c = match entries[2]?.name.unwrap_or("") == name {
+        true => entries[2]?.value.unwrap_or(""),
+        false => ""
+    };
+    let d = match entries[3]?.name.unwrap_or("") == name {
+        true => entries[3]?.value.unwrap_or(""),
+        false => ""
+    };
+    let mut found = "";
+    if a != "" {
+        found = a;
+    }
+    if b != "" {
+        found = b;
+    }
+    if c != "" {
+        found = c;
+    }
+    if d != "" {
+        found = d;
+    }
+    found
+}
+
 ngx::req::set_method(ngx::http::post());
 ngx::req::set_uri("/mutated", false);
 ngx::req::set_uri_args("k=v");
@@ -6,7 +40,8 @@ ngx::req::set_header("Host", "mut.example");
 ngx::var::set("writable", "from-rss");
 ngx::status::set(201);
 ngx::header::set("X-Resp", "ok");
-let request_headers: RequestHeadersResult = ngx::req::get_headers(null, null);
-ngx::log(ngx::log_level::notice(), "TASK7_MUT_STATE " + ngx::encode_args({ method: ngx::req::get_method(), uri: ngx::var::get("uri"), args: ngx::var::get("args"), host: request_headers.headers["host"], var: ngx::var::get("writable"), status: ngx::status::get(), resp: ngx::header::get("X-Resp") }));
+let request_headers: RequestHeadersResult = ngx::req::get_headers((), ());
+let host_name = header_value(request_headers.headers.copy(), "host");
+ngx::log(ngx::log_level::notice(), "TASK7_MUT_STATE " + ngx::encode_args({ method: ngx::req::get_method(), uri: ngx::var::get("uri").unwrap_or(""), args: ngx::var::get("args").unwrap_or(""), host: host_name, var: ngx::var::get("writable").unwrap_or(""), status: ngx::status::get(), resp: ngx::header::get("X-Resp").unwrap_or("") }));
 ngx::exit(201);
 ngx::log(ngx::log_level::notice(), "TASK7_MUT_MARKER");

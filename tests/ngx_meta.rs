@@ -17,6 +17,12 @@ use ngx_rustscript::host::{
 use ngx_rustscript::notify::RequestIdentity;
 use vm::{HostTypeSchema, Program, Value, Vm, VmStatus};
 
+/// Serializes tests that share process-global stub or zone state.
+fn stub_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 fn compile(source: &str) -> Arc<Program> {
     compile_rss_source(source).unwrap_or_else(|err| panic!("compile failed: {err}"))
 }
@@ -175,6 +181,7 @@ impl Drop for CycleLogGuard {
 
 #[test]
 fn catalog_runtime_and_manifest_agree_on_task4_hosts() {
+    let _guard = stub_lock();
     let catalog_api = ngx_host_catalog();
     let catalog: BTreeSet<&str> = catalog_api
         .functions()
@@ -238,6 +245,7 @@ fn catalog_runtime_and_manifest_agree_on_task4_hosts() {
 
 #[test]
 fn task4_hosts_are_synchronous_in_the_manifest() {
+    let _guard = stub_lock();
     for entry in ngx_host_manifest() {
         if entry.name.starts_with("ngx::config::")
             || entry.name.starts_with("ngx::worker::")
@@ -259,6 +267,7 @@ fn task4_hosts_are_synchronous_in_the_manifest() {
 
 #[test]
 fn constant_hosts_are_zero_arg_ints_matching_nginx_sys_values() {
+    let _guard = stub_lock();
     assert!(
         catalog_params("ngx::core::ok").is_empty(),
         "constants are zero-argument hosts"
@@ -267,7 +276,7 @@ fn constant_hosts_are_zero_arg_ints_matching_nginx_sys_values() {
     assert!(catalog_params("ngx::core::null_value").is_empty());
     assert_eq!(
         catalog_schema("ngx::core::null_value"),
-        HostTypeSchema::Null
+        HostTypeSchema::Unit
     );
     assert!(
         compile_rss_source("use ngx;\nngx::core::null();\n").is_err(),
@@ -334,6 +343,7 @@ fn constant_hosts_are_zero_arg_ints_matching_nginx_sys_values() {
 
 #[test]
 fn constant_manifest_uses_openresty_names_and_sync_metadata() {
+    let _guard = stub_lock();
     let ok = manifest_named("ngx::core::ok");
     assert_eq!(ok.sync, HostSyncKind::Sync);
     assert_eq!(ok.openresty_name, "ngx.OK");
@@ -379,6 +389,7 @@ fn constant_manifest_uses_openresty_names_and_sync_metadata() {
 
 #[test]
 fn configure_argument_matching_requires_an_exact_token() {
+    let _guard = stub_lock();
     assert!(configure_has_exact_arg(
         "--with-compat --with-debug --with-http_ssl_module",
         "--with-debug"
@@ -391,6 +402,7 @@ fn configure_argument_matching_requires_an_exact_token() {
 
 #[test]
 fn compile_time_config_metadata_is_owned_and_truthful() {
+    let _guard = stub_lock();
     assert_eq!(
         expect_string(eval("use ngx;\nngx::config::subsystem();\n")),
         "http"
@@ -425,6 +437,7 @@ fn compile_time_config_metadata_is_owned_and_truthful() {
 
 #[test]
 fn nginx_version_phases_include_init_worker_and_exit_worker() {
+    let _guard = stub_lock();
     assert!(host_allowed_in_phase(
         "ngx::config::nginx_version",
         NgxPhase::InitWorker
@@ -461,6 +474,7 @@ fn nginx_version_phases_include_init_worker_and_exit_worker() {
 
 #[test]
 fn worker_stub_pid_id_exiting_and_cycle_dependent_hosts() {
+    let _guard = stub_lock();
     assert_eq!(expect_int(eval("use ngx;\nngx::worker::pid();\n")), 0);
     assert_eq!(expect_int(eval("use ngx;\nngx::worker::id();\n")), 0);
     assert!(!expect_bool(eval("use ngx;\nngx::worker::exiting();\n")));
@@ -489,6 +503,7 @@ fn worker_stub_pid_id_exiting_and_cycle_dependent_hosts() {
 
 #[test]
 fn worker_pids_mixed_slots_keep_current_and_active_workers_only() {
+    let _guard = stub_lock();
     let _table = ProcessTableGuard::install(
         100,
         1,
@@ -514,6 +529,7 @@ fn worker_pids_mixed_slots_keep_current_and_active_workers_only() {
 
 #[test]
 fn worker_pids_includes_current_pid_when_channels_are_absent() {
+    let _guard = stub_lock();
     let _table = ProcessTableGuard::install(50, 0, &[(0, 50, 0)]);
     let pids = expect_pids("use ngx;\nngx::worker::pids();\n");
     assert_eq!(pids, vec![50]);
@@ -521,6 +537,7 @@ fn worker_pids_includes_current_pid_when_channels_are_absent() {
 
 #[test]
 fn worker_pids_invalid_slot_still_includes_live_current_pid() {
+    let _guard = stub_lock();
     let _table = ProcessTableGuard::install(77, -1, &[(2, 88, 3)]);
     let mut pids = expect_pids("use ngx;\nngx::worker::pids();\n");
     pids.sort_unstable();
@@ -536,6 +553,7 @@ fn worker_pids_invalid_slot_still_includes_live_current_pid() {
 
 #[test]
 fn worker_pids_does_not_duplicate_the_current_slot() {
+    let _guard = stub_lock();
     let _table = ProcessTableGuard::install(100, 1, &[(1, 100, 5)]);
     let pids = expect_pids("use ngx;\nngx::worker::pids();\n");
     assert_eq!(pids, vec![100]);
@@ -543,6 +561,7 @@ fn worker_pids_does_not_duplicate_the_current_slot() {
 
 #[test]
 fn get_phase_reads_execution_scope_and_fails_outside_a_request() {
+    let _guard = stub_lock();
     let err = eval_err("use ngx;\nngx::get_phase();\n");
     let lower = err.to_ascii_lowercase();
     assert!(
@@ -559,6 +578,7 @@ fn get_phase_reads_execution_scope_and_fails_outside_a_request() {
 
 #[test]
 fn log_and_constant_schemas_are_exact() {
+    let _guard = stub_lock();
     let catalog = ngx_host_catalog();
     let log = catalog
         .function("ngx::log")
@@ -579,7 +599,7 @@ fn log_and_constant_schemas_are_exact() {
     );
     assert_eq!(
         catalog_schema("ngx::core::null_value"),
-        HostTypeSchema::Null
+        HostTypeSchema::Unit
     );
     assert_eq!(
         catalog_schema("ngx::http::status_payment_required"),
@@ -590,6 +610,7 @@ fn log_and_constant_schemas_are_exact() {
 
 #[test]
 fn log_without_sink_returns_host_error() {
+    let _guard = stub_lock();
     nginx_stubs::stub_log_reset();
     let err = eval_err("use ngx;\nngx::log(ngx::log_level::notice(), \"no-sink\");\n");
     let lower = err.to_ascii_lowercase();
@@ -607,6 +628,7 @@ fn log_without_sink_returns_host_error() {
 
 #[test]
 fn log_with_cycle_sink_writes_prefixed_message() {
+    let _guard = stub_lock();
     let _cycle = CycleLogGuard::install();
     assert_eq!(
         eval("use ngx;\nngx::log(ngx::log_level::notice(), \"worker-only\");\n"),
@@ -625,6 +647,7 @@ fn log_with_cycle_sink_writes_prefixed_message() {
 
 #[test]
 fn worker_only_log_rejects_invalid_level_and_embedded_nul() {
+    let _guard = stub_lock();
     let params = catalog_params("ngx::log");
     assert_eq!(params.len(), 2);
     assert_eq!(params[0].0, "level");

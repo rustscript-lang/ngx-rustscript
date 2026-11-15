@@ -8,7 +8,7 @@ use pd_host_function::pd_host_function;
 use vm::{HostModuleDescriptor, HostNamedStruct, HostStructField, HostTypeSchema};
 use vm::{Value, VmError, VmMap};
 
-use super::{CallOutcome, IntoHostCallOutcome};
+use super::{CallOutcome, IntoHostCallOutcome, option_none, option_some, option_value};
 use super::super::VmResult;
 
 const MAX_CODEC_INPUT_BYTES: usize = 65_536;
@@ -23,7 +23,7 @@ fn ret<T: IntoHostCallOutcome>(value: T) -> VmResult<CallOutcome> {
 
 #[derive(Debug)]
 struct DecodedArgsResult {
-    args: VmMap,
+    args: Vec<(String, Option<String>)>,
     truncated: bool,
 }
 
@@ -34,11 +34,39 @@ impl HostNamedStruct for DecodedArgsResult {
         vec![
             HostStructField::new(
                 "args",
-                HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+                HostTypeSchema::Array(Box::new(arg_entry_schema())),
             ),
             HostStructField::new("truncated", HostTypeSchema::Bool),
         ]
     }
+}
+
+/// One decoded argument entry: repeated names repeat the entry, and a bare
+/// key without `=` carries `Option::None`.
+fn arg_entry_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "ArgEntry",
+        vec![
+            HostStructField::new("name", HostTypeSchema::String),
+            HostStructField::new(
+                "value",
+                HostTypeSchema::Option(Box::new(HostTypeSchema::String)),
+            ),
+        ],
+    )
+}
+
+pub(crate) fn arg_entry(name: &str, value: Option<&str>) -> Value {
+    Value::map(vec![
+        (Value::string("name"), Value::string(name)),
+        (
+            Value::string("value"),
+            match value {
+                Some(value) => option_some(Value::string(value)),
+                None => option_none(),
+            },
+        ),
+    ])
 }
 
 impl IntoHostCallOutcome for DecodedArgsResult {
@@ -46,7 +74,12 @@ impl IntoHostCallOutcome for DecodedArgsResult {
         let mut carrier = VmMap::new();
         carrier.insert(
             Value::string("args"),
-            Value::Map(std::sync::Arc::new(self.args)),
+            Value::array(
+                self.args
+                    .iter()
+                    .map(|(name, value)| arg_entry(name, value.as_deref()))
+                    .collect(),
+            ),
         );
         carrier.insert(Value::string("truncated"), Value::Bool(self.truncated));
         carrier.into_host_call_outcome()
@@ -355,26 +388,11 @@ pub(crate) fn encode_args_map(args: &VmMap) -> VmResult<String> {
     Ok(out)
 }
 
-fn insert_decoded_arg(args: &mut VmMap, key: String, value: Value) {
-    let key_value = Value::string(key);
-    match args.get(&key_value) {
-        None => {
-            args.insert(key_value, value);
-        }
-        Some(Value::Array(existing)) => {
-            let mut items = existing.as_ref().clone();
-            items.push(value);
-            args.insert(key_value, Value::array(items));
-        }
-        Some(previous) => {
-            let previous = previous.clone();
-            args.insert(key_value, Value::array(vec![previous, value]));
-        }
-    }
-}
-
-pub(crate) fn decode_query_args(query: &[u8], max_args: usize) -> (VmMap, bool) {
-    let mut args = VmMap::new();
+pub(crate) fn decode_query_args(
+    query: &[u8],
+    max_args: usize,
+) -> (Vec<(String, Option<String>)>, bool) {
+    let mut args: Vec<(String, Option<String>)> = Vec::new();
     let mut seen = 0usize;
     let mut truncated = false;
     if query.is_empty() {
@@ -391,15 +409,15 @@ pub(crate) fn decode_query_args(query: &[u8], max_args: usize) -> (VmMap, bool) 
         let (raw_key, value) = match part.iter().position(|byte| *byte == b'=') {
             Some(idx) => (
                 &part[..idx],
-                Value::string(bytes_as_string(unescape_bytes(&part[idx + 1..]))),
+                Some(bytes_as_string(unescape_bytes(&part[idx + 1..]))),
             ),
-            None => (part, Value::Bool(true)),
+            None => (part, None),
         };
         let key = bytes_as_string(unescape_bytes(raw_key));
         if key.is_empty() {
             continue;
         }
-        insert_decoded_arg(&mut args, key, value);
+        args.push((key, value));
         seen += 1;
     }
     (args, truncated)
@@ -485,11 +503,12 @@ pub fn encode_base64(input: &Value, no_padding: &Value) -> VmResult<CallOutcome>
     ret(encoded)
 }
 
-/// Decodes standard Base64. Padding may be omitted. Invalid input is `null`.
+/// Decodes standard Base64. Padding may be omitted. Invalid input is
+/// `Option::None`.
 #[pd_host_function(name = "ngx::decode_base64", contract = crate::host::catalog::ngx_decode_base64_contract)]
 pub fn decode_base64(text: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::decode_base64", text.len())?;
-    ret(decode_base64_bytes(text))
+    ret(option_value(decode_base64_bytes(text).map(Value::bytes)))
 }
 
 /// MIME Base64 decode: non-alphabet bytes are skipped and decoding stops at
@@ -497,7 +516,7 @@ pub fn decode_base64(text: &str) -> VmResult<CallOutcome> {
 #[pd_host_function(name = "ngx::decode_base64mime", contract = crate::host::catalog::ngx_decode_base64mime_contract)]
 pub fn decode_base64mime(text: &str) -> VmResult<CallOutcome> {
     limit_input("ngx::decode_base64mime", text.len())?;
-    ret(decode_base64_mime(text))
+    ret(option_value(decode_base64_mime(text).map(Value::bytes)))
 }
 
 fn crc32_ieee(data: &[u8]) -> u32 {

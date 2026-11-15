@@ -39,27 +39,31 @@ fn error_text(err: &ConfigError) -> String {
 }
 
 #[test]
-fn compiler_catalog_adds_no_standard_family_schema() {
+fn compiler_catalog_carries_ngx_and_the_standard_families() {
     let ngx = ngx_host_catalog();
     let merged = compile_host_catalog();
-    // The compile catalog is the ngx surface exactly: no standard family
-    // schema is merged, so no standard position can be relaxed. HTTP stays a
-    // dynamic host import that configuration validates by name.
-    assert_eq!(
-        merged.functions(),
-        ngx.functions(),
-        "the merged catalog must carry exactly the ngx functions"
-    );
-    assert_eq!(merged.functions().len(), ngx.functions().len());
-    assert_eq!(
-        merged.structs(),
-        ngx.structs(),
-        "the merged catalog must not inherit the pd-vm HTTP named records"
-    );
-    for name in ["http::client::request", "http::client::sse"] {
+    // Every ngx host is catalogued with its own schema, and every standard
+    // family the runtime composition installs is catalogued too: the resource
+    // handles of io/http/sqlite only type-check against their own contracts.
+    for function in ngx.functions() {
+        let found = merged
+            .function(&function.name)
+            .unwrap_or_else(|| panic!("merged catalog must carry {}", function.name));
+        assert_eq!(found, function, "{} schema drifted", function.name);
+    }
+    for name in [
+        "http::client::request",
+        "http::request::new",
+        "http::response::status",
+        "io::open",
+        "io::read_all",
+        "sqlite::open",
+        "sqlite::query",
+        "sqlite::close",
+    ] {
         assert!(
-            merged.function(name).is_none(),
-            "{name} must stay a dynamic standard import, not a catalog function"
+            merged.function(name).is_some(),
+            "{name} must be catalogued so its resource schema is enforced"
         );
         assert!(
             is_standard_host_import(name),
@@ -69,37 +73,20 @@ fn compiler_catalog_adds_no_standard_family_schema() {
         assert!(host_allowed_in_phase(name, NgxPhase::Content));
         assert!(!host_allowed_in_phase(name, NgxPhase::Log));
     }
-    for name in [
-        "io::open",
-        "io::read_all",
-        "io::close",
-        "sqlite::open",
-        "sqlite::query",
-        "sqlite::close",
-    ] {
-        assert!(
-            merged.function(name).is_none(),
-            "{name} must stay on pd-vm's builtin dispatch path"
-        );
-        assert!(!is_standard_host_import(name));
-    }
 }
 
 #[test]
-fn standard_http_imports_compile_dynamically_and_keep_the_runtime_contract() {
-    // The documented loose object-literal scripts compile against the dynamic
-    // import, and the runtime payload variants of the pd-vm contract stay
-    // intact in the catalog the adapter validates against.
+fn standard_http_resources_compile_and_keep_the_runtime_contract() {
+    // The resource-based HTTP contract compiles: the builder is a mutable
+    // request resource and the buffered call consumes it into a response
+    // resource.
     let program = compile(
         r#"
         use http;
-        let response: map = http::client::request({
-            method: "GET",
-            url: "http://127.0.0.1:8081/data",
-            headers: { "accept": "application/json" },
-            body: null
-        });
-        let status: int = response["status"];
+        let mut request = http::request::new("GET", "http://127.0.0.1:8081/data");
+        http::request::set_header(&mut request, "accept", "application/json");
+        let response = http::client::request(request);
+        let status: int = http::response::status(response);
         "#,
     );
     assert!(
@@ -111,70 +98,38 @@ fn standard_http_imports_compile_dynamically_and_keep_the_runtime_contract() {
     );
     assert!(program_requires_request_state(&program));
 
-    // The runtime contract still declares the duplicate-header array and the
-    // text/bytes header-value payload variants: the merged catalog must not
-    // degrade them.
+    // The runtime contract keeps the resource types and the typed header
+    // arrays the adapter registers.
     let contract = vm::http_host_catalog();
     let request = contract
         .function("http::client::request")
         .expect("contract request schema");
-    let request_fields = match &request.params[0].ty {
-        HostTypeSchema::Named { fields, .. } => fields.clone(),
-        other => panic!("request param must stay a named record, got {other:?}"),
-    };
-    let headers = request_fields
-        .iter()
-        .find(|field| field.name == "headers")
-        .expect("request record carries headers");
-    match &headers.ty {
-        HostTypeSchema::Optional(inner) => match inner.as_ref() {
-            HostTypeSchema::Array(inner) => match inner.as_ref() {
-                HostTypeSchema::Named { name, .. } => assert_eq!(
-                    name, "HttpRequestHeader",
-                    "headers stay an array of typed header entries (duplicates allowed)"
-                ),
-                other => panic!("header entry must stay named, got {other:?}"),
-            },
-            other => panic!("headers must stay an array, got {other:?}"),
-        },
-        other => panic!("headers must stay optional, got {other:?}"),
+    assert_eq!(request.params.len(), 1);
+    assert_eq!(request.params[0].name, "request");
+    match &request.params[0].ty {
+        HostTypeSchema::Resource(key) => assert_eq!(key.as_str(), "http.request"),
+        other => panic!("request param must stay the http.request resource, got {other:?}"),
     }
-    let response = contract
-        .function("http::client::request")
-        .expect("contract request schema")
-        .return_type
-        .clone();
-    let response_headers = match &response {
-        HostTypeSchema::Named { fields, .. } => fields
-            .iter()
-            .find(|field| field.name == "headers")
-            .expect("response record carries headers")
-            .ty
-            .clone(),
-        other => panic!("response must stay a named record, got {other:?}"),
-    };
-    match response_headers {
-        HostTypeSchema::Array(inner) => match inner.as_ref() {
-            HostTypeSchema::Named { fields, .. } => {
-                let value = fields
-                    .iter()
-                    .find(|field| field.name == "value")
-                    .expect("response header carries the value variant");
-                match &value.ty {
-                    HostTypeSchema::Named { name, fields } => {
-                        assert_eq!(name, "HttpHeaderValue");
-                        let kinds: HashSet<&str> =
-                            fields.iter().map(|field| field.name.as_str()).collect();
-                        assert!(
-                            kinds.contains("text") && kinds.contains("bytes"),
-                            "the header-value payload stays a text/bytes variant: {kinds:?}"
-                        );
-                    }
-                    other => panic!("header value must stay named, got {other:?}"),
-                }
-            }
-            other => panic!("response header entry must stay named, got {other:?}"),
-        },
+    match &request.return_type {
+        HostTypeSchema::Resource(key) => assert_eq!(key.as_str(), "http.response"),
+        other => panic!("response must stay the http.response resource, got {other:?}"),
+    }
+    let new = contract
+        .function("http::request::new")
+        .expect("request builder schema");
+    match &new.return_type {
+        HostTypeSchema::Resource(key) => assert_eq!(key.as_str(), "http.request"),
+        other => panic!("request builder must return an http.request resource, got {other:?}"),
+    }
+    let values = contract
+        .function("http::response::header_values")
+        .expect("response header schema");
+    match &values.return_type {
+        HostTypeSchema::Array(inner) => assert_eq!(
+            inner.as_ref(),
+            &HostTypeSchema::String,
+            "response header values stay a typed string array (duplicates allowed)"
+        ),
         other => panic!("response headers must stay an array, got {other:?}"),
     }
 }
@@ -274,11 +229,20 @@ fn standard_async_imports_compile_and_require_request_owned_execution() {
         use io;
         use http;
         use sqlite;
-        let file = io::open("input.txt", "r");
-        let text = io::read_all(file);
-        io::close(file);
-        http::client::request({"method": "GET", "url": text});
-        let db = sqlite::open({"path": "state.db", "mode": "read_write_create"});
+        fn upstream_url(path: string) -> Result<string, string> {
+            let file = io::open(path, "r")?;
+            let text = io::read_all(file)?;
+            io::close(file);
+            Result::Ok(text)
+        }
+        let opened = upstream_url("input.txt");
+        let url = match opened {
+            Result::Ok(text) => text,
+            Result::Err(message) => ""
+        };
+        let mut request = http::request::new("GET", url);
+        http::client::request(request);
+        let db = sqlite::open({ path: Option::Some("state.db"), mode: Option::Some("read_write_create") });
         sqlite::query(db, "SELECT value FROM events", [], {});
         sqlite::close(db);
         "#,
@@ -302,46 +266,73 @@ fn documented_standard_async_interfaces_compile() {
         use sqlite;
         use bytes as builtin_bytes;
 
-        let handle: int = io::open("input.txt", "r");
-        let line: string = io::read_line(handle);
-        let remaining: string = io::read_all(handle);
-        let written: int = io::write(handle, line);
-        let flushed: bool = io::flush(handle);
-        let closed: bool = io::close(handle);
-        let exists: bool = io::exists("input.txt");
-
-        let response: map = http::client::request({
-            method: "GET",
-            url: "https://example.test/",
-            headers: { "accept": "application/json" },
-            body: null
-        });
-        let status: int = response["status"];
-        let body_bytes: bytes = response["body"];
-        let body: string = builtin_bytes::to_utf8(body_bytes);
-
-        fn on_sse_event(item: map) -> map {
-            { action: "continue" }
+        fn read_text(path: string) -> Result<string, string> {
+            let handle = io::open(path, "r")?;
+            let line: Option<string> = io::read_line(handle)?;
+            let remaining: string = io::read_all(handle)?;
+            io::write(handle, remaining)?;
+            io::flush(handle)?;
+            io::close(handle)?;
+            line.unwrap_or("");
+            Result::Ok(remaining)
         }
-        let sse_summary: map = http::client::sse({
-            method: "GET",
-            url: "https://example.test/events",
-            timeout_ms: 1000
-        }, on_sse_event);
 
-        let db: int = sqlite::open({
-            path: "state.db",
-            mode: "read_write_create",
-            limits: {}
-        });
-        let executed: map = sqlite::execute(db, "CREATE TABLE t (v TEXT)", []);
-        let affected: int = executed["rows_affected"];
-        let queried: map = sqlite::query(db, "SELECT v FROM t", [], { max_rows: 10 });
-        let truncated: bool = queried["truncated"];
-        let transaction_results = sqlite::transaction(db, {
-            { sql: "INSERT INTO t(v) VALUES (?1)", params: {"value"} }
-        });
-        sqlite::close(db);
+        fn fetch(url: string) -> int {
+            let mut request = http::request::new("GET", url);
+            http::request::set_header(&mut request, "accept", "application/json");
+            http::request::set_body_text(&mut request, "");
+            let response = http::client::request(request);
+            let status: int = http::response::status(response);
+            let body_bytes: bytes = http::response::body(response);
+            let body: string = builtin_bytes::to_utf8(body_bytes);
+            let values = http::response::header_values(response, "content-type");
+            body;
+            values;
+            status
+        }
+
+        fn on_sse_event(event: string, data: string, id: string, retry: string) -> bool {
+            event;
+            data;
+            id;
+            retry;
+            true
+        }
+
+        fn sse_summary() -> int {
+            let request = http::request::new("GET", "https://example.test/events");
+            let summary = http::client::sse(request, on_sse_event);
+            let items: int = http::sse_summary::items(summary);
+            http::sse_summary::status(summary);
+            http::sse_summary::outcome(summary);
+            items
+        }
+
+        fn sqlite_round_trip() -> int {
+            let db = sqlite::open({
+                path: Option::Some("state.db"),
+                mode: Option::Some("read_write_create"),
+                limits: Option::Some({})
+            });
+            let executed: SqliteExecuteResult = sqlite::execute(db, "CREATE TABLE t (v TEXT)", []);
+            let queried: SqliteQueryResult = sqlite::query(db, "SELECT v FROM t", [], { max_rows: Option::Some(10) });
+            let transaction_results = sqlite::transaction(db, []);
+            sqlite::close(db);
+            transaction_results;
+            queried.truncated;
+            executed.rows_affected
+        }
+
+        let text = match read_text("input.txt") {
+            Result::Ok(text) => text,
+            Result::Err(message) => ""
+        };
+        let exists: bool = io::exists("input.txt");
+        text;
+        exists;
+        fetch("https://example.test/");
+        sse_summary();
+        sqlite_round_trip();
         "#,
     );
 }
@@ -400,31 +391,44 @@ fn shared_fixed_results_compile_as_explicit_struct_types() {
 
         let dict = ngx::shared::dict("ratelimit");
         let got: SharedGetResult = ngx::shared::get(dict, "key");
-        if got.error == null && !got.stale {
-            got.value;
-            got.flags;
-        }
+        let shared_value = got.value.copy();
+        let kind = match shared_value {
+            Option::Some(entry) => entry.kind,
+            Option::None => ""
+        };
+        let text = match shared_value.copy() {
+            Option::Some(entry) => entry.text_value.unwrap_or(""),
+            Option::None => ""
+        };
+        kind;
+        text;
+        got.flags;
+        got.stale;
+        got.error.unwrap_or("");
 
-        let stored: SharedStoreResult = ngx::shared::set(dict, "key", 1, 2, null);
+        let stored: SharedStoreResult = ngx::shared::set(dict, "key", 1, 2, ());
         if stored.ok && !stored.forcible {
             stored.error;
         }
 
         let added: SharedSafeStoreResult =
-            ngx::shared::safe_add(dict, "key", 1, 2, null);
+            ngx::shared::safe_add(dict, "key", 1, 2, ());
         if added.ok {
             added.error;
         }
 
-        let counted: SharedIncrResult = ngx::shared::incr(dict, "key", 1, null, null);
-        if counted.error == null && !counted.forcible {
+        let counted: SharedIncrResult = ngx::shared::incr(dict, "key", 1, (), ());
+        if !counted.forcible {
             counted.value;
+            counted.error;
         }
 
         let ttl: SharedNumberResult = ngx::shared::ttl(dict, "key");
-        if ttl.error == null {
-            ttl.value;
-        }
+        ttl.error;
+        ttl.value;
+
+        let removed: bool = ngx::shared::delete(dict, "key");
+        removed;
         "#,
     );
 }
@@ -435,18 +439,19 @@ fn dynamic_map_envelopes_compile_as_explicit_struct_types() {
         r#"
         use ngx;
 
-        let decoded: DecodedArgsResult = ngx::decode_args("a=1", null);
+        let decoded: DecodedArgsResult = ngx::decode_args("a=1", ());
         if !decoded.truncated {
             ngx::encode_args(decoded.args);
         }
 
-        let headers: RequestHeadersResult = ngx::req::get_headers(null, null);
+        let headers: RequestHeadersResult = ngx::req::get_headers((), ());
         if !headers.truncated {
-            ngx::encode_args(headers.headers);
+            let names = headers.headers.copy();
+            ngx::encode_args(names);
         }
 
-        let uri: RequestArgsResult = ngx::req::get_uri_args(null);
-        let post: RequestArgsResult = ngx::req::get_post_args(null);
+        let uri: RequestArgsResult = ngx::req::get_uri_args(());
+        let post: RequestArgsResult = ngx::req::get_post_args(());
         if !uri.truncated && !post.truncated {
             ngx::encode_args(uri.args);
             ngx::encode_args(post.args);
@@ -1091,41 +1096,33 @@ fn catalog_dynamic_slots() -> BTreeSet<String> {
     slots
 }
 
-/// Exact per-function/slot allowlist for remaining Unknown/Map catalog types.
+/// Exact per-function/slot allowlist for the remaining dynamic catalog types.
+///
+/// Only host **parameters** may stay dynamic: a guest passes either a string or
+/// a number to an OpenResty trailing-argument adaptation, or an open-keyed
+/// value to `encode_args`/`print`/`say`. Every host **output** is fully typed;
+/// absence is a guest `Option<T>`, and heterogeneous bags are named records.
 ///
 /// Rationales:
-/// - `header::get` return: OpenResty can yield a string or a multi-value array.
-/// - request/codec maps: query/header bags are open-keyed.
-/// - shared-dict `value`/store payloads: heterogeneous zone values.
-/// - optional OpenResty trailing args (`exptime`, `flags`, `max_*`, timeouts).
-/// - print/say/socket payloads: mixed printable or buffer values.
-/// - request ctx: opaque per-request table, not a VM resource.
+/// - optional OpenResty trailing args (`exptime`, `flags`, `max_*`, timeouts)
+///   accept either the value or `()`;
+/// - `set_header`/`set_uri_args`/`print`/`say`/socket payloads accept a mixed
+///   printable or buffer value;
+/// - `ngx::ctx::set` only accepts strings and stores them by value.
 const ALLOWED_DYNAMIC_SLOTS: &[&str] = &[
-    "ngx::ctx::delete#return:Unknown",
-    "ngx::ctx::get#return:Unknown",
-    "ngx::ctx::set#value:Unknown",
     "ngx::decode_args#max_args:Unknown",
-    "ngx::decode_args#return.DecodedArgsResult.args.<map>:Unknown",
-    "ngx::decode_args#return.DecodedArgsResult.args:Map",
     "ngx::encode_args#args:Unknown",
     "ngx::encode_base64#input:Unknown",
     "ngx::encode_base64#no_padding:Unknown",
     "ngx::escape_uri#escape_type:Unknown",
-    "ngx::header::get#return:Unknown",
     "ngx::header::set#value:Unknown",
     "ngx::header::set_all#headers:Unknown",
     "ngx::print#data:Unknown",
     "ngx::redirect#status:Unknown",
     "ngx::req::get_headers#max_headers:Unknown",
     "ngx::req::get_headers#raw:Unknown",
-    "ngx::req::get_headers#return.RequestHeadersResult.headers.<map>:Unknown",
-    "ngx::req::get_headers#return.RequestHeadersResult.headers:Map",
     "ngx::req::get_post_args#max_args:Unknown",
-    "ngx::req::get_post_args#return.RequestArgsResult.args.<map>:Unknown",
-    "ngx::req::get_post_args#return.RequestArgsResult.args:Map",
     "ngx::req::get_uri_args#max_args:Unknown",
-    "ngx::req::get_uri_args#return.RequestArgsResult.args.<map>:Unknown",
-    "ngx::req::get_uri_args#return.RequestArgsResult.args:Map",
     "ngx::req::init_body#buffer_size:Unknown",
     "ngx::req::raw_header#no_request_line:Unknown",
     "ngx::req::set_body_file#auto_clean:Unknown",
@@ -1140,18 +1137,14 @@ const ALLOWED_DYNAMIC_SLOTS: &[&str] = &[
     "ngx::shared::add#value:Unknown",
     "ngx::shared::expire#exptime:Unknown",
     "ngx::shared::flush_expired#max:Unknown",
-    "ngx::shared::get#return.SharedGetResult.value?:Unknown",
     "ngx::shared::get_keys#max:Unknown",
-    "ngx::shared::get_stale#return.SharedGetResult.value?:Unknown",
     "ngx::shared::incr#init:Unknown",
     "ngx::shared::incr#init_ttl:Unknown",
     "ngx::shared::incr#value:Unknown",
-    "ngx::shared::lpop#return.SharedGetResult.value?:Unknown",
     "ngx::shared::lpush#value:Unknown",
     "ngx::shared::replace#exptime:Unknown",
     "ngx::shared::replace#flags:Unknown",
     "ngx::shared::replace#value:Unknown",
-    "ngx::shared::rpop#return.SharedGetResult.value?:Unknown",
     "ngx::shared::rpush#value:Unknown",
     "ngx::shared::safe_add#exptime:Unknown",
     "ngx::shared::safe_add#flags:Unknown",
@@ -1183,7 +1176,7 @@ const ALLOWED_DYNAMIC_SLOTS: &[&str] = &[
 #[test]
 fn catalog_schema_version_and_fingerprint_goldens() {
     let catalog = ngx_host_catalog();
-    assert_eq!(NGX_HOST_CATALOG_SCHEMA_VERSION, 4);
+    assert_eq!(NGX_HOST_CATALOG_SCHEMA_VERSION, 5);
     assert_eq!(NGX_HOST_CATALOG_FINGERPRINT_V1, 0x5e37_8285_8fa0_b584);
     assert_eq!(NGX_HOST_CATALOG_FINGERPRINT_V2, 0x10c4_07b2_b827_eaff);
     assert_eq!(
@@ -1202,24 +1195,27 @@ fn catalog_schema_version_and_fingerprint_goldens() {
 }
 
 #[test]
-fn void_hosts_return_unit_instead_of_legacy_null() {
-    let catalog = ngx_host_catalog();
-    for function in catalog.functions() {
-        if function.name == "ngx::core::null_value" {
-            // The one deliberate null-returning host: it hands guest code a
-            // raw null value to prove literal rejection and null semantics.
-            assert_eq!(
-                function.return_type,
-                HostTypeSchema::Null,
-                "ngx::core::null_value must stay the legacy Null probe"
-            );
-            continue;
+fn host_outputs_never_carry_dynamic_or_legacy_null_schemas() {
+    // RustScript rejects `unknown`, `null`, and the legacy `optional<T>` schema
+    // anywhere in a host output, including named fields and callable results.
+    fn forbidden(schema: &HostTypeSchema) -> bool {
+        match schema {
+            HostTypeSchema::Unknown | HostTypeSchema::Null | HostTypeSchema::Optional(_) => true,
+            HostTypeSchema::Array(inner)
+            | HostTypeSchema::Map(inner)
+            | HostTypeSchema::Option(inner) => forbidden(inner),
+            HostTypeSchema::Result { ok, err } => forbidden(ok) || forbidden(err),
+            HostTypeSchema::Callable { result, .. } => forbidden(result),
+            HostTypeSchema::Named { fields, .. } => fields.iter().any(|field| forbidden(&field.ty)),
+            _ => false,
         }
-        assert_ne!(
-            function.return_type,
-            HostTypeSchema::Null,
-            "{} must return Unit; the RustScript compiler rejects legacy Null host returns",
-            function.name
+    }
+    for function in ngx_host_catalog().functions() {
+        assert!(
+            !forbidden(&function.return_type),
+            "{} must return a fully typed value, got {:?}",
+            function.name,
+            function.return_type
         );
     }
 }

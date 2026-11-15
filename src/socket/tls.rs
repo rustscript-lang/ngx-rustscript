@@ -332,7 +332,7 @@ fn parse_reused_session(value: &Value, name: &str) -> VmResult<SessionFlag> {
             "{name} reused_session session handles are unsupported; pass null for automatic same-identity resumption or false to disable"
         ))),
         _ => Err(VmError::HostError(format!(
-            "{name} reused_session expects null, true, or false"
+            "{name} reused_session expects (), true, or false"
         ))),
     }
 }

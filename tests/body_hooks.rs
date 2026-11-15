@@ -635,7 +635,7 @@ fn nginx_delayed_body_success_and_main_count_lease() {
         r#"
 use ngx;
 ngx::req::read_body();
-ngx::say(ngx::req::get_body_data());
+ngx::say(ngx::req::get_body_data().unwrap_or(""));
 "#,
     );
     let access_read = prefix.join("conf/body_access.rss");
@@ -644,7 +644,7 @@ ngx::say(ngx::req::get_body_data());
         r#"
 use ngx;
 ngx::req::read_body();
-ngx::ctx::set("body", ngx::req::get_body_data());
+ngx::ctx::set("body", ngx::req::get_body_data().unwrap_or(""));
 "#,
     );
     let content_see = prefix.join("conf/body_content.rss");
@@ -652,7 +652,7 @@ ngx::ctx::set("body", ngx::req::get_body_data());
         &content_see,
         r#"
 use ngx;
-ngx::say(ngx::ctx::get("body"));
+ngx::say(ngx::ctx::get("body").unwrap_or(""));
 "#,
     );
 

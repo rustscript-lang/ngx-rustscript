@@ -14,7 +14,7 @@ use vm::{
     ResourceTypeKey, Value, Vm, VmError, VmMap,
 };
 
-use super::{CallOutcome, IntoHostCallOutcome};
+use super::{CallOutcome, IntoHostCallOutcome, option_none, option_some, option_value};
 use super::super::VmResult;
 use crate::shared_dict::{
     self, DictValue, SharedDictHandle, StoreMode, MAX_KEY_BYTES, MAX_VALUE_BYTES,
@@ -50,8 +50,9 @@ fn struct_outcome<const N: usize>(fields: [(&'static str, Value); N]) -> CallOut
     Value::Map(Arc::new(carrier)).into_host_call_outcome()
 }
 
+/// `Option<string>` carrier for a result `error` field.
 fn error_value(error: Option<&'static str>) -> Value {
-    error.map_or(Value::Null, Value::string)
+    option_value(error.map(Value::string))
 }
 
 #[derive(Debug)]
@@ -73,16 +74,106 @@ impl From<shared_dict::GetResult> for SharedGetResult {
     }
 }
 
-fn optional_string_schema() -> HostTypeSchema {
-    HostTypeSchema::Optional(Box::new(HostTypeSchema::String))
+fn option_schema(inner: HostTypeSchema) -> HostTypeSchema {
+    HostTypeSchema::Option(Box::new(inner))
 }
 
-fn optional_unknown_schema() -> HostTypeSchema {
-    HostTypeSchema::Optional(Box::new(HostTypeSchema::Unknown))
+/// Guest `Option<string>` field schema (logical Option, not `Optional`).
+fn optional_string_schema() -> HostTypeSchema {
+    option_schema(HostTypeSchema::String)
 }
 
 fn optional_number_schema() -> HostTypeSchema {
-    HostTypeSchema::Optional(Box::new(HostTypeSchema::Number))
+    option_schema(HostTypeSchema::Number)
+}
+
+/// A shared-dictionary value. One zone entry can hold a bool, number, string,
+/// or byte string, so the guest contract is a tagged record exactly like
+/// `SqliteValue`.
+fn shared_value_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "SharedValue",
+        vec![
+            HostStructField::new("kind", HostTypeSchema::String),
+            HostStructField::new("bool_value", option_schema(HostTypeSchema::Bool)),
+            HostStructField::new("int_value", option_schema(HostTypeSchema::Int)),
+            HostStructField::new("float_value", option_schema(HostTypeSchema::Float)),
+            HostStructField::new("text_value", option_schema(HostTypeSchema::String)),
+            HostStructField::new("bytes_value", option_schema(HostTypeSchema::Bytes)),
+        ],
+    )
+}
+
+fn optional_shared_value_schema() -> HostTypeSchema {
+    option_schema(shared_value_schema())
+}
+
+/// Tagged record carrier for one stored value.
+fn shared_value_record(value: DictValue) -> Value {
+    let (kind, bool_value, int_value, float_value, text_value, bytes_value) = match value {
+        DictValue::Bool(flag) => (
+            "bool",
+            option_some(Value::Bool(flag)),
+            option_none(),
+            option_none(),
+            option_none(),
+            option_none(),
+        ),
+        DictValue::Int(number) => (
+            "int",
+            option_none(),
+            option_some(Value::Int(number)),
+            option_none(),
+            option_none(),
+            option_none(),
+        ),
+        DictValue::Float(number) => (
+            "float",
+            option_none(),
+            option_none(),
+            option_some(Value::Float(number)),
+            option_none(),
+            option_none(),
+        ),
+        DictValue::String(text) => (
+            "string",
+            option_none(),
+            option_none(),
+            option_none(),
+            option_some(Value::string(text)),
+            option_none(),
+        ),
+        DictValue::Bytes(bytes) => (
+            "bytes",
+            option_none(),
+            option_none(),
+            option_none(),
+            option_none(),
+            option_some(Value::bytes(bytes)),
+        ),
+    };
+    Value::map(vec![
+        (Value::string("kind"), Value::string(kind)),
+        (Value::string("bool_value"), bool_value),
+        (Value::string("int_value"), int_value),
+        (Value::string("float_value"), float_value),
+        (Value::string("text_value"), text_value),
+        (Value::string("bytes_value"), bytes_value),
+    ])
+}
+
+/// `Option<SharedValue>` carrier for a get-class result.
+fn dict_value_to_vm(value: Option<DictValue>) -> Value {
+    option_value(value.map(shared_value_record))
+}
+
+/// `Option<number>` carrier for numeric get-class results.
+fn dict_number_to_vm(value: Option<DictValue>) -> Value {
+    match value {
+        Some(DictValue::Int(number)) => option_some(Value::Int(number)),
+        Some(DictValue::Float(number)) => option_some(Value::Float(number)),
+        _ => option_none(),
+    }
 }
 
 impl HostNamedStruct for SharedGetResult {
@@ -90,7 +181,7 @@ impl HostNamedStruct for SharedGetResult {
 
     fn host_struct_fields() -> Vec<HostStructField> {
         vec![
-            HostStructField::new("value", optional_unknown_schema()),
+            HostStructField::new("value", optional_shared_value_schema()),
             HostStructField::new("flags", HostTypeSchema::Int),
             HostStructField::new("stale", HostTypeSchema::Bool),
             HostStructField::new("error", optional_string_schema()),
@@ -193,7 +284,7 @@ struct SharedIncrResult {
 impl From<shared_dict::StoreResult> for SharedIncrResult {
     fn from(result: shared_dict::StoreResult) -> Self {
         Self {
-            value: dict_value_to_vm(result.value),
+            value: dict_number_to_vm(result.value),
             error: result.error,
             forcible: result.forcible,
         }
@@ -231,7 +322,7 @@ struct SharedNumberResult {
 impl From<shared_dict::GetResult> for SharedNumberResult {
     fn from(result: shared_dict::GetResult) -> Self {
         Self {
-            value: dict_value_to_vm(result.value),
+            value: dict_number_to_vm(result.value),
             error: result.error,
         }
     }
@@ -240,7 +331,7 @@ impl From<shared_dict::GetResult> for SharedNumberResult {
 impl From<shared_dict::StoreResult> for SharedNumberResult {
     fn from(result: shared_dict::StoreResult) -> Self {
         Self {
-            value: dict_value_to_vm(result.value),
+            value: dict_number_to_vm(result.value),
             error: result.error,
         }
     }
@@ -260,17 +351,6 @@ impl HostNamedStruct for SharedNumberResult {
 impl IntoHostCallOutcome for SharedNumberResult {
     fn into_host_call_outcome(self) -> CallOutcome {
         struct_outcome([("value", self.value), ("error", error_value(self.error))])
-    }
-}
-
-fn dict_value_to_vm(value: Option<DictValue>) -> Value {
-    match value {
-        None => Value::Null,
-        Some(DictValue::Bool(flag)) => Value::Bool(flag),
-        Some(DictValue::Int(number)) => Value::Int(number),
-        Some(DictValue::Float(number)) => Value::Float(number),
-        Some(DictValue::String(text)) => Value::String(text.into()),
-        Some(DictValue::Bytes(bytes)) => Value::Bytes(bytes.into()),
     }
 }
 
@@ -301,7 +381,7 @@ fn vm_to_dict_value(value: &Value) -> VmResult<Option<DictValue>> {
             }
             Ok(Some(DictValue::Bytes((**bytes).clone())))
         }
-        _ => Err(host_err("shared dict value must be null, bool, number, string, or bytes")),
+        _ => Err(host_err("shared dict value must be (), bool, number, string, or bytes")),
     }
 }
 
@@ -529,8 +609,8 @@ fn replace(
 #[pd_host_function(name = "ngx::shared::delete", contract = crate::host::catalog::ngx_shared_delete_contract)]
 fn delete(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOutcome> {
     let key = key_bytes(&key)?;
-    zone_op(&dict, |name| shared_dict::dict_delete(name, key))?;
-    ret(())
+    let removed = zone_op(&dict, |name| shared_dict::dict_delete(name, key))?;
+    ret(removed)
 }
 
 /// `newval, err, forcible = dict:incr(key, value, init?, init_ttl?)`.
@@ -568,14 +648,14 @@ fn ttl(dict: ResourceRef<'_, SharedDictHandle>, key: String) -> VmResult<CallOut
     let result = match result {
         Ok(ttl) => SharedNumberResult {
             value: if ttl.fract() == 0.0 {
-                Value::Int(ttl as i64)
+                option_some(Value::Int(ttl as i64))
             } else {
-                Value::Float(ttl)
+                option_some(Value::Float(ttl))
             },
             error: None,
         },
         Err(error) => SharedNumberResult {
-            value: Value::Null,
+            value: option_none(),
             error: Some(error),
         },
     };

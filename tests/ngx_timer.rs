@@ -131,8 +131,8 @@ fn timer_hosts_are_catalogued_and_manifested_in_access_and_content() {
 fn access_and_content_accept_the_timer_family() {
     for phase in [NgxPhase::Access, NgxPhase::Content] {
         for source in [
-            "use ngx;\nngx::timer::at(0.05, |premature| null);\n",
-            "use ngx;\nngx::timer::every(0.05, |premature| null);\n",
+            "use ngx;\nngx::timer::at(0.05, |premature| ());\n",
+            "use ngx;\nngx::timer::every(0.05, |premature| ());\n",
             "use ngx;\nngx::timer::pending_count();\n",
             "use ngx;\nngx::timer::running_count();\n",
         ] {
@@ -145,7 +145,7 @@ fn access_and_content_accept_the_timer_family() {
 #[test]
 fn log_phase_rejects_timer_registration_at_configuration_compile() {
     for source in [
-        "use ngx;\nngx::timer::at(0.05, |premature| null);\n",
+        "use ngx;\nngx::timer::at(0.05, |premature| ());\n",
         "use ngx;\nngx::timer::pending_count();\n",
     ] {
         let err = compile_rss_source_for_phase(source, NgxPhase::Log)
@@ -162,7 +162,7 @@ fn log_phase_rejects_timer_registration_at_configuration_compile() {
 
 #[test]
 fn timer_imports_require_request_state() {
-    let program = compile_rss_source("use ngx;\nngx::timer::at(0.05, |premature| null);\n")
+    let program = compile_rss_source("use ngx;\nngx::timer::at(0.05, |premature| ());\n")
         .expect("timer script must compile");
     assert!(
         program_requires_request_state(&program),
@@ -199,7 +199,7 @@ fn at_registers_one_fake_request_with_an_ordinary_identity() {
     // Catalog/registry install is paid during VM construction. Time only the
     // host call so a slow first bind cannot be mistaken for waiting on the
     // 10s deadline.
-    let mut vm = timer_vm("use ngx;\nngx::timer::at(10, |premature| null);\n", &worker);
+    let mut vm = timer_vm("use ngx;\nngx::timer::at(10, |premature| ());\n", &worker);
     let start = Instant::now();
     vm.run()
         .map(|_| ())
@@ -230,7 +230,7 @@ fn at_registers_one_fake_request_with_an_ordinary_identity() {
 
     // A second registration takes the next worker-unique fake request id; two
     // live registrations never share an identity.
-    run_script("use ngx;\nngx::timer::at(20, |premature| null);\n", &worker).expect("registration");
+    run_script("use ngx;\nngx::timer::at(20, |premature| ());\n", &worker).expect("registration");
     let both = live_timer_identities();
     assert_eq!(both.len(), 2);
     assert_ne!(
@@ -260,7 +260,7 @@ fn deadline_fires_the_callback_once_with_premature_false() {
     run_script(
         // A `premature=true` round would call the request-only host and fail;
         // a clean completion witnesses `premature=false`.
-        "use ngx;\nngx::timer::at(0.05, |premature| if premature => { ngx::req::get_method(); null } else => { null });\n",
+        "use ngx;\nngx::timer::at(0.05, |premature| if premature => { ngx::req::get_method(); () } else => { () });\n",
         &worker,
     )
     .expect("registration");
@@ -285,7 +285,7 @@ fn deadline_fires_the_callback_once_with_premature_false() {
 fn callback_waits_on_an_async_host_and_resumes_through_the_same_identity() {
     let mut worker = WorkerRuntime::start().expect("worker runtime");
     run_script(
-        "use ngx;\nngx::timer::at(0.02, |premature| if true => { ngx::sleep_ms(50); null } else => { null });\n",
+        "use ngx;\nngx::timer::at(0.02, |premature| if true => { ngx::sleep_ms(50); () } else => { () });\n",
         &worker,
     )
     .expect("registration");
@@ -314,7 +314,7 @@ fn callback_waits_on_an_async_host_and_resumes_through_the_same_identity() {
 fn callback_failure_is_isolated_and_reported_once() {
     let mut worker = WorkerRuntime::start().expect("worker runtime");
     run_script(
-        "use ngx;\nngx::timer::at(0.02, |premature| ngx::req::get_method());\n",
+        "use ngx;\nngx::timer::at(0.02, |premature| if true => { ngx::req::get_method(); () } else => { () });\n",
         &worker,
     )
     .expect("registration");
@@ -328,7 +328,7 @@ fn callback_failure_is_isolated_and_reported_once() {
     assert_eq!(live_timer_count(), 0, "`at` retires after the failed round");
 
     // The worker keeps serving: another registration still works.
-    run_script("use ngx;\nngx::timer::at(10, |premature| null);\n", &worker).expect("registration");
+    run_script("use ngx;\nngx::timer::at(10, |premature| ());\n", &worker).expect("registration");
     assert_eq!(live_timer_count(), 1);
     worker.shutdown();
     assert_eq!(live_timer_count(), 0);
@@ -340,7 +340,7 @@ fn every_serializes_rounds_and_keeps_running_after_each_round() {
     // Each round calls a request-only host, so a completed round is visible as
     // exactly one reported error.
     run_script(
-        "use ngx;\nngx::timer::every(0.03, |premature| ngx::req::get_method());\n",
+        "use ngx;\nngx::timer::every(0.03, |premature| if true => { ngx::req::get_method(); () } else => { () });\n",
         &worker,
     )
     .expect("registration");
@@ -383,7 +383,7 @@ fn every_rounds_rotate_identity_and_retire_the_previous_generation() {
     // A completed round is visible as exactly one reported error, because the
     // callback calls a request-only host.
     run_script(
-        "use ngx;\nngx::timer::every(0.05, |premature| ngx::req::get_method());\n",
+        "use ngx;\nngx::timer::every(0.05, |premature| if true => { ngx::req::get_method(); () } else => { () });\n",
         &worker,
     )
     .expect("registration");
@@ -435,7 +435,7 @@ fn duplicate_stale_wakes_cannot_start_the_next_every_round_early() {
     let interval = Duration::from_millis(500);
     run_script(
         &format!(
-            "use ngx;\nngx::timer::every({}, |premature| ngx::req::get_method());\n",
+            "use ngx;\nngx::timer::every({}, |premature| if true => {{ ngx::req::get_method(); () }} else => {{ () }});\n",
             interval.as_secs_f64()
         ),
         &worker,
@@ -501,7 +501,7 @@ fn stale_async_wake_from_a_previous_round_is_ignored() {
     run_script(
         // The round parks on `ngx::sleep_ms`; the sleep completion wakes the
         // round's own identity through the worker eventfd.
-        "use ngx;\nngx::timer::every(10, |premature| if true => { ngx::sleep_ms(30); ngx::req::get_method(); null } else => { null });\n",
+        "use ngx;\nngx::timer::every(10, |premature| if true => { ngx::sleep_ms(30); ngx::req::get_method(); () } else => { () });\n",
         &worker,
     )
     .expect("registration");
@@ -546,9 +546,11 @@ fn http_standard_import_and_ngx_timer_bind_through_the_worker_registry() {
     let program = compile_rss_source(
         r#"use http;
 use ngx;
-let response: map = http::client::request({"method": "GET", "url": "https://example.test/", "headers": {"accept": "application/json"}, "body": null});
-let status: int = response["status"];
-ngx::timer::at(0.05, |premature| null);
+let mut request = http::request::new("GET", "https://example.test/");
+http::request::set_header(&mut request, "accept", "application/json");
+let response = http::client::request(request);
+let status: int = http::response::status(response);
+ngx::timer::at(0.05, |premature| ());
 "#,
     )
     .expect("merged catalog compiles HTTP + timer");
@@ -568,7 +570,7 @@ ngx::timer::at(0.05, |premature| null);
 fn pending_limit_rejects_the_next_registration() {
     let worker = WorkerRuntime::start().expect("worker runtime");
     let program = compile_rss_source(
-        "use ngx;\nngx::timer::at(30, |premature| null);\nngx::timer::at(30, |premature| null);\n",
+        "use ngx;\nngx::timer::at(30, |premature| ());\nngx::timer::at(30, |premature| ());\n",
     )
     .expect("compile");
     let mut vm = Vm::new_shared(program);
@@ -608,19 +610,19 @@ fn invalid_seconds_are_rejected_by_the_registration_host() {
     let mut worker = WorkerRuntime::start().expect("worker runtime");
     for (source, needle) in [
         (
-            "use ngx;\nngx::timer::at(-1, |premature| null);\n",
+            "use ngx;\nngx::timer::at(-1, |premature| ());\n",
             "non-negative",
         ),
         (
-            "use ngx;\nngx::timer::every(0, |premature| null);\n",
+            "use ngx;\nngx::timer::every(0, |premature| ());\n",
             "positive",
         ),
         (
-            "use ngx;\nlet zero = 0.0;\nngx::timer::at(1.0 / zero, |premature| null);\n",
+            "use ngx;\nlet zero = 0.0;\nngx::timer::at(1.0 / zero, |premature| ());\n",
             "infinite",
         ),
         (
-            "use ngx;\nlet zero = 0.0;\nngx::timer::at(zero / zero, |premature| null);\n",
+            "use ngx;\nlet zero = 0.0;\nngx::timer::at(zero / zero, |premature| ());\n",
             "NaN",
         ),
     ] {
@@ -643,7 +645,7 @@ fn worker_shutdown_runs_pending_callbacks_with_premature_true_once() {
     shutdown_current();
     let mut worker = WorkerRuntime::start().expect("worker runtime");
     run_script(
-        "use ngx;\nngx::timer::at(30, |premature| if premature => { ngx::req::get_method(); null } else => { null });\n",
+        "use ngx;\nngx::timer::at(30, |premature| if premature => { ngx::req::get_method(); () } else => { () });\n",
         &worker,
     )
     .expect("registration");
@@ -669,7 +671,7 @@ fn cancelled_waiting_callback_releases_its_async_step() {
     shutdown_current();
     let mut worker = WorkerRuntime::start().expect("worker runtime");
     run_script(
-        "use ngx;\nngx::timer::at(0.02, |premature| if true => { ngx::sleep_ms(30000); null } else => { null });\n",
+        "use ngx;\nngx::timer::at(0.02, |premature| if true => { ngx::sleep_ms(30000); () } else => { () });\n",
         &worker,
     )
     .expect("registration");

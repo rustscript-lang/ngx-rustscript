@@ -37,77 +37,39 @@ helpers as part of this module.
 | `adapted` | Intentional RustScript mapping (namespacing, fixed structs, `null` optionals, bytes vs string) |
 
 The pinned compiler matches host arity exactly. OpenResty optional
-trailing arguments are an explicit `null` argument, not an omitted
-argument.
+trailing arguments are explicit arguments: pass `()` where OpenResty
+allows `nil`.
 
-## Typed fixed results and dynamic maps
+## Typed fixed results and entry arrays
 
-Multi-return OpenResty values use **fixed result structs** at the
-RustScript boundary. The current host catalog exposes several of those
-return slots as `unknown`, so callers declare the matching struct and
-annotate the assignment; field access then uses `.value` / `.flags` /
-`.stale` / `.ok` / `.error` / `.forcible`. The VM's internal carrier is
-not part of the script-facing type.
+Multi-return OpenResty values use **fixed result structs** at the RustScript
+boundary, and every return slot is fully typed: `Option<T>` for logical
+absence, named structs for fixed shapes, and entry arrays for open-keyed
+bags. Field access uses `.value` / `.flags` / `.stale` / `.ok` / `.error` /
+`.forcible`; an absent logical value is `Option::None`, never `null`. The
+VM's internal carrier is not part of the script-facing type.
 
-Truly **dynamic-key** collections remain `map` fields inside typed
-envelopes, such as `DecodedArgsResult.args` and
-`RequestHeadersResult.headers`.
+Open-keyed collections are typed entry arrays instead of dynamic maps:
 
 ```rss
 struct DecodedArgsResult {
-    args: map,
+    args: [ArgEntry],      // ArgEntry { name: string, value: Option<string> }
     truncated: bool
 }
 
 struct RequestHeadersResult {
-    headers: map,
+    headers: [HeaderEntry], // HeaderEntry { name: string, value: string }
     truncated: bool
-}
-
-struct RequestArgsResult {
-    args: map,
-    truncated: bool
-}
-
-struct SharedGetResult {
-    value: unknown?,
-    flags: int,
-    stale: bool,
-    error: string?
-}
-
-struct SharedStoreResult {
-    ok: bool,
-    error: string?,
-    forcible: bool
-}
-
-struct SharedSafeStoreResult {
-    ok: bool,
-    error: string?
-}
-
-struct SharedIncrResult {
-    value: number?,
-    error: string?,
-    forcible: bool
-}
-
-struct SharedNumberResult {
-    value: number?,
-    error: string?
 }
 ```
 
-Example:
+Repeated keys repeat the entry, so duplicate headers and repeated query
+arguments survive without an `unknown` value. A bare query key carries
+`Option::None`; a present empty value carries `Option::Some("")`.
 
-```rss
-let added: SharedSafeStoreResult =
-    ngx::shared::safe_add(dict, key, 1, WINDOW_SECONDS, null);
-if added.ok {
-    // ...
-}
-```
+Heterogeneous stored values use a tagged record. Shared-dictionary values
+are `SharedValue { kind, bool_value, int_value, float_value, text_value,
+bytes_value }`, where `kind` selects the active payload.
 
 ## Namespacing and constants
 
@@ -115,7 +77,7 @@ Lua fields and constants become zero-argument functions:
 `ngx.OK` → `ngx::core::ok()`, `ngx.HTTP_GET` → `ngx::http::get()`,
 `ngx.config.prefix` → `ngx::config::prefix()`,
 `ngx.worker.pid` → `ngx::worker::pid()`. There are no host constants
-or dynamic table fields. `ngx.null` is `ngx::core::null_value() -> null`
+or dynamic table fields. `ngx.null` is `ngx::core::null_value() -> ()`
 because `null` is a reserved token.
 
 See [Constants](api/constants.md) and

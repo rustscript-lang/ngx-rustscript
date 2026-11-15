@@ -193,11 +193,11 @@ use ngx;
 let d = ngx::shared::dict("timers");
 ngx::timer::at(5, |premature| if true => {
     let d = ngx::shared::dict("timers");
-    ngx::shared::set(d, "at_fired", "yes", null, null);
+    ngx::shared::set(d, "at_fired", "yes", (), ());
     ngx::log(ngx::log_level::error(), "TIMER_AT_FIRED");
-    null
-} else => { null });
-ngx::shared::set(d, "creating_done", "yes", null, null);
+    ()
+} else => { () });
+ngx::shared::set(d, "creating_done", "yes", (), ());
 assert(ngx::timer::pending_count() == 1);
 ngx::log(ngx::log_level::error(), "DIAG pending_count is 1 after registration");
 ngx::exit(200);
@@ -208,9 +208,23 @@ ngx::exit(200);
         "scripts/read_fired.rss",
         r#"
 use ngx;
+
+fn text_of(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn number_of(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
 let d = ngx::shared::dict("timers");
 let r: SharedGetResult = ngx::shared::get(d, "at_fired");
-ngx::say(r.value);
+ngx::say(text_of(r.value));
 "#,
     );
     let locations = format!(
@@ -257,10 +271,10 @@ fn timer_at_passes_premature_false_on_normal_expiry() {
 use ngx;
 ngx::timer::at(0.05, |premature| if premature => {
     ngx::log(ngx::log_level::error(), "TIMER_PREMATURE_TRUE");
-    null
+    ()
 } else => {
     ngx::log(ngx::log_level::error(), "TIMER_PREMATURE_FALSE");
-    null
+    ()
 });
 ngx::exit(200);
 "#,
@@ -290,8 +304,8 @@ use ngx;
 ngx::timer::at(0.05, |premature| if true => {
     ngx::sleep_ms(40);
     ngx::log(ngx::log_level::error(), "TIMER_SLEPT");
-    null
-} else => { null });
+    ()
+} else => { () });
 ngx::exit(200);
 "#,
     );
@@ -329,8 +343,8 @@ ngx::timer::at(0.05, |premature| if true => {{
     ngx::socket::tcp::send(s, "ping");
     ngx::socket::tcp::close(s);
     ngx::log(ngx::log_level::error(), "TIMER_TCP_OK");
-    null
-}} else => {{ null }});
+    ()
+}} else => {{ () }});
 ngx::exit(200);
 "#
         ),
@@ -354,8 +368,8 @@ fn timer_callback_cannot_use_request_hosts_and_keeps_serving() {
 use ngx;
 ngx::timer::at(0.05, |premature| if true => {
     ngx::req::get_method();
-    null
-} else => { null });
+    ()
+} else => { () });
 ngx::exit(200);
 "#,
     );
@@ -384,9 +398,9 @@ let mut rounds = 0;
 ngx::timer::every(0.05, |premature| if true => {
     rounds = rounds + 1;
     let d = ngx::shared::dict("timers");
-    ngx::shared::set(d, "rounds", rounds, null, null);
-    null
-} else => { null });
+    ngx::shared::set(d, "rounds", rounds, (), ());
+    ()
+} else => { () });
 ngx::exit(200);
 "#,
     );
@@ -395,9 +409,23 @@ ngx::exit(200);
         "scripts/read_rounds.rss",
         r#"
 use ngx;
+
+fn text_of(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn number_of(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
 let d = ngx::shared::dict("timers");
 let r: SharedGetResult = ngx::shared::get(d, "rounds");
-if r.value == 3 { ngx::say("ROUNDS_3"); } else { ngx::say("ROUNDS_OTHER"); }
+if number_of(r.value) == 3 { ngx::say("ROUNDS_3"); } else { ngx::say("ROUNDS_OTHER"); }
 "#,
     );
     let locations = format!(
@@ -440,8 +468,8 @@ ngx::timer::every(0.05, |premature| if true => {
     ngx::log(ngx::log_level::error(), "SLOW_START");
     ngx::sleep_ms(120);
     ngx::log(ngx::log_level::error(), "SLOW_END");
-    null
-} else => { null });
+    ()
+} else => { () });
 ngx::exit(200);
 "#,
     );
@@ -481,8 +509,8 @@ ngx::timer::at(0.2, |premature| if true => {
     assert(ngx::timer::running_count() == 1);
     assert(ngx::timer::pending_count() == 0);
     ngx::log(ngx::log_level::error(), "TIMER_COUNTS_OK");
-    null
-} else => { null });
+    ()
+} else => { () });
 assert(ngx::timer::pending_count() == 1);
 assert(ngx::timer::running_count() == 0);
 ngx::exit(200);
@@ -506,10 +534,10 @@ fn reload_leaves_old_workers_with_their_timers_and_new_workers_empty() {
 use ngx;
 ngx::timer::at(30, |premature| if premature => {
     ngx::log(ngx::log_level::error(), "TIMER_RELOAD_PREMATURE_TRUE");
-    null
+    ()
 } else => {
     ngx::log(ngx::log_level::error(), "TIMER_RELOAD_PREMATURE_FALSE");
-    null
+    ()
 });
 ngx::exit(200);
 "#,
@@ -584,10 +612,10 @@ ngx::timer::at(0.05, |premature| if true => {
     let timed_out = ngx::semaphore::wait(sem, 0.05);
     assert(timed_out == false);
     let d = ngx::shared::dict("timers");
-    ngx::shared::set(d, "semaphore_ok", "yes", null, null);
+    ngx::shared::set(d, "semaphore_ok", "yes", (), ());
     ngx::log(ngx::log_level::error(), "TIMER_SEMAPHORE_OK");
-    null
-} else => { null });
+    ()
+} else => { () });
 ngx::exit(200);
 "#,
     );
@@ -617,10 +645,10 @@ fn graceful_worker_exit_runs_a_pending_every_round_once_with_premature_true() {
 use ngx;
 ngx::timer::every(30, |premature| if premature => {
     ngx::log(ngx::log_level::error(), "TIMER_EVERY_EXIT_PREMATURE_TRUE");
-    null
+    ()
 } else => {
     ngx::log(ngx::log_level::error(), "TIMER_EVERY_EXIT_PREMATURE_FALSE");
-    null
+    ()
 });
 ngx::exit(200);
 "#,
@@ -668,24 +696,24 @@ let d = ngx::shared::dict("timers");
 ngx::timer::every(0.6, |premature| if true => {
     let d = ngx::shared::dict("timers");
     if ngx::timer::running_count() == 1 && ngx::timer::pending_count() == 0 {
-        ngx::shared::set(d, "round_start_counts", "ok", null, null);
+        ngx::shared::set(d, "round_start_counts", "ok", (), ());
     } else {
-        ngx::shared::set(d, "round_start_counts", "bad", null, null);
+        ngx::shared::set(d, "round_start_counts", "bad", (), ());
     }
     ngx::log(ngx::log_level::error(), "TIMER_COUNTS_ROUND_START");
     ngx::sleep_ms(300);
     if ngx::timer::running_count() == 1 && ngx::timer::pending_count() == 0 {
-        ngx::shared::set(d, "waiting_counts", "ok", null, null);
+        ngx::shared::set(d, "waiting_counts", "ok", (), ());
     } else {
-        ngx::shared::set(d, "waiting_counts", "bad", null, null);
+        ngx::shared::set(d, "waiting_counts", "bad", (), ());
     }
     ngx::log(ngx::log_level::error(), "TIMER_COUNTS_ROUND_DONE");
-    null
-} else => { null });
+    ()
+} else => { () });
 if ngx::timer::pending_count() == 1 && ngx::timer::running_count() == 0 {
-    ngx::shared::set(d, "registered_counts", "ok", null, null);
+    ngx::shared::set(d, "registered_counts", "ok", (), ());
 } else {
-    ngx::shared::set(d, "registered_counts", "bad", null, null);
+    ngx::shared::set(d, "registered_counts", "bad", (), ());
 }
 ngx::exit(200);
 "#,
@@ -695,13 +723,27 @@ ngx::exit(200);
         "scripts/observe_counts.rss",
         r#"
 use ngx;
+
+fn text_of(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn number_of(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
 let d = ngx::shared::dict("timers");
 let registered: SharedGetResult = ngx::shared::get(d, "registered_counts");
 let round_start: SharedGetResult = ngx::shared::get(d, "round_start_counts");
 let waiting: SharedGetResult = ngx::shared::get(d, "waiting_counts");
-ngx::say(registered.value);
-ngx::say(round_start.value);
-ngx::say(waiting.value);
+ngx::say(text_of(registered.value));
+ngx::say(text_of(round_start.value));
+ngx::say(text_of(waiting.value));
 if ngx::timer::pending_count() == 1 {
     if ngx::timer::running_count() == 0 {
         ngx::say("P1R0");
@@ -796,20 +838,15 @@ use ngx;
 use http;
 ngx::timer::at(0.05, |premature| if true => {{
     let d = ngx::shared::dict("timers");
-    ngx::shared::set(d, "timer_fired", "yes", null, null);
+    ngx::shared::set(d, "timer_fired", "yes", (), ());
     ngx::log(ngx::log_level::error(), "TIMER_HTTP_IMPORT_FIRED");
-    null
-}} else => {{ null }});
-let response: map = http::client::request({{
-    method: "GET",
-    url: "http://127.0.0.1:{port}/source",
-    headers: [
-        {{ name: "accept", value: "text/plain" }},
-        {{ name: "accept", value: "application/json" }}
-    ],
-    body: null
-}});
-let status: int = response["status"];
+    ()
+}} else => {{ () }});
+let mut request = http::request::new("GET", "http://127.0.0.1:{port}/source");
+http::request::set_header(&mut request, "accept", "text/plain");
+http::request::set_header(&mut request, "accept", "application/json");
+let response = http::client::request(request);
+let status: int = http::response::status(response);
 assert(status == 200);
 ngx::exit(200);
 "#
@@ -820,9 +857,23 @@ ngx::exit(200);
         "scripts/read_http_timer.rss",
         r#"
 use ngx;
+
+fn text_of(value: Option<SharedValue>) -> string {
+    match value {
+        Option::Some(entry) => entry.text_value.unwrap_or(""),
+        Option::None => ""
+    }
+}
+
+fn number_of(value: Option<SharedValue>) -> number {
+    match value {
+        Option::Some(entry) => entry.int_value.unwrap_or(0),
+        Option::None => 0
+    }
+}
 let d = ngx::shared::dict("timers");
 let r: SharedGetResult = ngx::shared::get(d, "timer_fired");
-ngx::say(r.value);
+ngx::say(text_of(r.value));
 "#,
     );
     let locations = format!(
@@ -867,10 +918,11 @@ fn timer_callback_does_not_inherit_the_registering_location_http_policy() {
 use ngx;
 use http;
 ngx::timer::at(0.05, |premature| if true => {
-    let response: map = http::client::request({"method": "GET", "url": "http://127.0.0.1:9/source", "body": null});
+    let mut request = http::request::new("GET", "http://127.0.0.1:9/source");
+    let response = http::client::request(request);
     ngx::log(ngx::log_level::error(), "TIMER_CALLBACK_HTTP_ALLOWED");
-    null
-} else => { null });
+    ()
+} else => { () });
 ngx::exit(200);
 "#,
     );
@@ -914,10 +966,10 @@ fn graceful_worker_exit_runs_pending_callbacks_with_premature_true() {
 use ngx;
 ngx::timer::at(30, |premature| if premature => {
     ngx::log(ngx::log_level::error(), "TIMER_EXIT_PREMATURE_TRUE");
-    null
+    ()
 } else => {
     ngx::log(ngx::log_level::error(), "TIMER_EXIT_PREMATURE_FALSE");
-    null
+    ()
 });
 ngx::exit(200);
 "#,

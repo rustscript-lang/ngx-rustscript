@@ -223,7 +223,7 @@ ngx::socket::tcp::settimeout(sock, 2000);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
 let store = ngx::socket::tcp::trustedstore(\"{ca}\");
 ngx::socket::tcp::settrustedstore(sock, store);
-ngx::socket::tcp::sslhandshake(sock, null, \"{server_name}\", {verify}, null);
+ngx::socket::tcp::sslhandshake(sock, (), \"{server_name}\", {verify}, ());
 ngx::socket::tcp::send(sock, \"{payload}\");
 ngx::socket::tcp::receive(sock, {len});
 ngx::socket::tcp::close(sock);
@@ -405,7 +405,7 @@ fn tls_verify_false_skips_certificate_checks() {
 let sock = ngx::socket::tcp();
 ngx::socket::tcp::settimeout(sock, 2000);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
-ngx::socket::tcp::sslhandshake(sock, null, \"wrong.example\", false, null);
+ngx::socket::tcp::sslhandshake(sock, (), \"wrong.example\", false, ());
 ngx::socket::tcp::send(sock, \"ping\");
 ngx::socket::tcp::receive(sock, 4);
 ngx::socket::tcp::close(sock);
@@ -434,7 +434,7 @@ fn tls_handshake_timeout() {
 let sock = ngx::socket::tcp();
 ngx::socket::tcp::settimeout(sock, 80);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
-ngx::socket::tcp::sslhandshake(sock, null, \"localhost\", false, null);
+ngx::socket::tcp::sslhandshake(sock, (), \"localhost\", false, ());
 "
     );
     assert_eq!(
@@ -461,7 +461,7 @@ fn tls_handshake_cancel_does_not_leak_inflight() {
 let sock = ngx::socket::tcp();
 ngx::socket::tcp::settimeout(sock, 0);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
-ngx::socket::tcp::sslhandshake(sock, null, \"localhost\", false, null);
+ngx::socket::tcp::sslhandshake(sock, (), \"localhost\", false, ());
 "
             )),
             1,
@@ -518,7 +518,7 @@ ngx::socket::tcp::settimeout(sock, 2000);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
 let store = ngx::socket::tcp::trustedstore(\"{ca}\");
 ngx::socket::tcp::settrustedstore(sock, store);
-ngx::socket::tcp::sslhandshake(sock, null, \"localhost\", true, null);
+ngx::socket::tcp::sslhandshake(sock, (), \"localhost\", true, ());
 ngx::socket::tcp::send(sock, \"one\");
 ngx::socket::tcp::receive(sock, 3);
 ngx::socket::tcp::setkeepalive(sock, 60000, 8);
@@ -535,7 +535,7 @@ ngx::exit(500);
 }}
 let store = ngx::socket::tcp::trustedstore(\"{ca}\");
 ngx::socket::tcp::settrustedstore(sock, store);
-ngx::socket::tcp::sslhandshake(sock, null, \"localhost\", true, null);
+ngx::socket::tcp::sslhandshake(sock, (), \"localhost\", true, ());
 let n = ngx::socket::tcp::getreusedtimes(sock);
 if n != 1 {{
 ngx::exit(500);
@@ -608,7 +608,7 @@ ngx::socket::tcp::settimeout(sock, 2000);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
 let store = ngx::socket::tcp::trustedstore(\"{ca}\");
 ngx::socket::tcp::settrustedstore(sock, store);
-ngx::socket::tcp::sslhandshake(sock, null, \"localhost\", true, null);
+ngx::socket::tcp::sslhandshake(sock, (), \"localhost\", true, ());
 ngx::socket::tcp::send(sock, \"one\");
 ngx::socket::tcp::receive(sock, 3);
 ngx::socket::tcp::setkeepalive(sock, 60000, 8);
@@ -619,7 +619,7 @@ ngx::socket::tcp::setkeepalive(sock, 60000, 8);
 let sock = ngx::socket::tcp();
 ngx::socket::tcp::settimeout(sock, 200);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
-ngx::socket::tcp::sslhandshake(sock, null, \"other.example\", false, null);
+ngx::socket::tcp::sslhandshake(sock, (), \"other.example\", false, ());
 "
     );
     let mut session = Session::new();
@@ -653,7 +653,7 @@ ngx::socket::tcp::settimeout(sock, 2000);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
 let store = ngx::socket::tcp::trustedstore(\"{ca}\");
 ngx::socket::tcp::settrustedstore(sock, store);
-ngx::socket::tcp::sslhandshake(sock, null, \"localhost\", true, null);
+ngx::socket::tcp::sslhandshake(sock, (), \"localhost\", true, ());
 ngx::socket::tcp::send(sock, \"one\");
 ngx::socket::tcp::receive(sock, 3);
 ngx::socket::tcp::setkeepalive(sock, 60000, 8);
@@ -811,7 +811,7 @@ let store = ngx::socket::tcp::trustedstore(\"{ca}\");
 ngx::socket::tcp::settrustedstore(sock, store);
 let client = ngx::socket::tcp::clientcert(\"{cert}\", \"{key}\");
 ngx::socket::tcp::setclientcert(sock, client);
-ngx::socket::tcp::sslhandshake(sock, null, \"localhost\", true, null);
+ngx::socket::tcp::sslhandshake(sock, (), \"localhost\", true, ());
 ngx::socket::tcp::send(sock, \"ping\");
 ngx::socket::tcp::receive(sock, 4);
 ngx::socket::tcp::close(sock);
@@ -848,7 +848,7 @@ ngx::socket::tcp::settimeout(sock, 2000);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
 let store = ngx::socket::tcp::trustedstore(\"{ca}\");
 ngx::socket::tcp::settrustedstore(sock, store);
-ngx::socket::tcp::sslhandshake(sock, null, \"localhost\", true, null);
+ngx::socket::tcp::sslhandshake(sock, (), \"localhost\", true, ());
 ngx::socket::tcp::send(sock, \"ping\");
 ngx::socket::tcp::receive(sock, 4);
 "
@@ -911,7 +911,7 @@ fn reused_session_handle_is_unsupported() {
 let sock = ngx::socket::tcp();
 ngx::socket::tcp::settimeout(sock, 500);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
-ngx::socket::tcp::sslhandshake(sock, 1, \"localhost\", false, null);
+ngx::socket::tcp::sslhandshake(sock, 1, \"localhost\", false, ());
 "
     );
     let mut session = Session::new();
@@ -934,7 +934,7 @@ fn send_status_req_false_is_unsupported() {
 let sock = ngx::socket::tcp();
 ngx::socket::tcp::settimeout(sock, 500);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
-ngx::socket::tcp::sslhandshake(sock, null, \"localhost\", false, false);
+ngx::socket::tcp::sslhandshake(sock, (), \"localhost\", false, false);
 "
     );
     let mut session = Session::new();
@@ -964,7 +964,7 @@ fn send_status_req_true_puts_ocsp_status_request_in_client_hello() {
 let sock = ngx::socket::tcp();
 ngx::socket::tcp::settimeout(sock, 800);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
-ngx::socket::tcp::sslhandshake(sock, null, \"localhost\", false, true);
+ngx::socket::tcp::sslhandshake(sock, (), \"localhost\", false, true);
 "
     );
     let mut session = Session::new();
@@ -997,7 +997,7 @@ ngx::socket::tcp::settimeout(sock, 2000);
 ngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});
 let store = ngx::socket::tcp::trustedstore(\"{ca}\");
 ngx::socket::tcp::settrustedstore(sock, store);
-ngx::socket::tcp::sslhandshake(sock, false, \"localhost\", true, null);
+ngx::socket::tcp::sslhandshake(sock, false, \"localhost\", true, ());
 ngx::socket::tcp::send(sock, \"ping\");
 ngx::socket::tcp::receive(sock, 4);
 ngx::socket::tcp::close(sock);

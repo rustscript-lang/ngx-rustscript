@@ -757,10 +757,10 @@ mod tests {
         let program = compile_rss_source(
             r#"
 use ngx;
-if ngx::ctx::get("seen") != null {
+if ngx::ctx::get("seen").unwrap_or("") != "" {
     1 / 0;
 }
-ngx::ctx::set("seen", 1);
+ngx::ctx::set("seen", "1");
 ngx::exit(ngx::core::ok());
 "#,
         )
@@ -798,14 +798,11 @@ ngx::exit(ngx::core::ok());
             r#"
 use http;
 use ngx;
-if ngx::ctx::get("seen") != null {{ 1 / 0; }}
-ngx::ctx::set("seen", 1);
-let response: map = http::client::request({{
-    method: "GET",
-    url: "http://127.0.0.1:{port}/",
-    body: null
-}});
-if response["status"] != 204 {{ 1 / 0; }}
+if ngx::ctx::get("seen").unwrap_or("") != "" {{ 1 / 0; }}
+ngx::ctx::set("seen", "1");
+let mut request = http::request::new("GET", "http://127.0.0.1:{port}/");
+let response = http::client::request(request);
+if http::response::status(response) != 204 {{ 1 / 0; }}
 "#
         ))
         .expect("compile buffered HTTP fixture");
@@ -861,7 +858,7 @@ if response["status"] != 204 {{ 1 / 0; }}
     #[test]
     fn identical_source_in_distinct_programs_does_not_share_request_vms() {
         let mut worker = WorkerRuntime::start().unwrap();
-        let source = "use ngx;\nngx::ctx::set(\"k\", 1);\n";
+        let source = "use ngx;\nngx::ctx::set(\"k\", \"1\");\n";
         let first = compile_rss_source(source).expect("first program");
         let second = compile_rss_source(source).expect("second program");
         for (request_id, program) in [(1, first), (2, second)] {
@@ -884,7 +881,8 @@ if response["status"] != 204 {{ 1 / 0; }}
     #[test]
     fn configured_exec_selects_reusable_pool_from_cached_metadata() {
         let mut worker = WorkerRuntime::start().unwrap();
-        let program = compile_rss_source("use ngx;\nngx::ctx::set(\"k\", 1);\n").expect("compile");
+        let program =
+            compile_rss_source("use ngx;\nngx::ctx::set(\"k\", \"1\");\n").expect("compile");
         let metadata = crate::phase::ScriptExecutionMetadata {
             requires_request_state: true,
             reuses_request_vm: true,
@@ -911,7 +909,8 @@ if response["status"] != 204 {{ 1 / 0; }}
     #[test]
     fn reusable_request_vm_pool_separates_policy_and_phase() {
         let mut worker = WorkerRuntime::start().unwrap();
-        let program = compile_rss_source("use ngx;\nngx::ctx::set(\"k\", 1);\n").expect("compile");
+        let program =
+            compile_rss_source("use ngx;\nngx::ctx::set(\"k\", \"1\");\n").expect("compile");
         let first_policy = crate::host::StandardHostPolicy::fail_closed();
         let mut second_policy = first_policy.clone();
         second_policy.io_roots.push("/tmp/isolated".into());
@@ -942,7 +941,8 @@ if response["status"] != 204 {{ 1 / 0; }}
     #[test]
     fn configured_exec_keeps_non_reusable_metadata_out_of_request_vm_pool() {
         let mut worker = WorkerRuntime::start().unwrap();
-        let program = compile_rss_source("use ngx;\nngx::ctx::set(\"k\", 1);\n").expect("compile");
+        let program =
+            compile_rss_source("use ngx;\nngx::ctx::set(\"k\", \"1\");\n").expect("compile");
         let metadata = crate::phase::ScriptExecutionMetadata {
             requires_request_state: true,
             reuses_request_vm: false,
@@ -972,7 +972,8 @@ if response["status"] != 204 {{ 1 / 0; }}
     fn reusable_request_vm_replaces_and_clears_async_bridge_per_checkout() {
         crate::async_bridge::reset_bridge_lifecycle_counts();
         let mut worker = WorkerRuntime::start().unwrap();
-        let program = compile_rss_source("use ngx;\nngx::ctx::set(\"k\", 1);\n").expect("compile");
+        let program =
+            compile_rss_source("use ngx;\nngx::ctx::set(\"k\", \"1\");\n").expect("compile");
 
         for request_id in 1..=2 {
             let mut exec = worker
@@ -995,8 +996,9 @@ if response["status"] != 204 {{ 1 / 0; }}
     #[test]
     fn failed_request_vm_is_dropped_instead_of_reused() {
         let mut worker = WorkerRuntime::start().unwrap();
-        let program = compile_rss_source("use ngx;\nngx::ctx::set(\"k\", 1);\nlet x = 1 / 0;\n")
-            .expect("compile");
+        let program =
+            compile_rss_source("use ngx;\nngx::ctx::set(\"k\", \"1\");\nlet x = 1 / 0;\n")
+                .expect("compile");
 
         for request_id in 1..=2 {
             let mut exec = worker

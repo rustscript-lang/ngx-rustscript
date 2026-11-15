@@ -125,7 +125,7 @@ fn c_headers_sent_reading_body_and_discard_body_follow_c_fields() {
 
     let _body = install_unread_body(ptr);
     req.set_reading_body(true);
-    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(());\n")
         .expect_err("reading_body must error");
     assert!(
         err.to_ascii_lowercase().contains("read") || err.to_ascii_lowercase().contains("body"),
@@ -134,7 +134,7 @@ fn c_headers_sent_reading_body_and_discard_body_follow_c_fields() {
     req.set_reading_body(false);
 
     req.set_discard_body(true);
-    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n")
+    let err = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(());\n")
         .expect_err("discard_body must error");
     assert!(
         err.to_ascii_lowercase().contains("discard") || err.to_ascii_lowercase().contains("body"),

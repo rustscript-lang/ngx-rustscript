@@ -174,12 +174,12 @@ fn log_phase_accepts_sync_read_log_time_meta_ctx_and_shared_dict() {
     compile_log("use ngx;\nngx::get_phase();\n").expect("get_phase");
     compile_log("use ngx;\nngx::var::get(\"uri\");\n").expect("var get");
     compile_log("use ngx;\nngx::now();\nngx::time();\n").expect("time");
-    compile_log("use ngx;\nngx::escape_uri(\"a\", null);\n").expect("codec");
+    compile_log("use ngx;\nngx::escape_uri(\"a\", ());\n").expect("codec");
     compile_log("use ngx;\nngx::status::get();\n").expect("status get");
     compile_log("use ngx;\nngx::header::get(\"Content-Type\");\n").expect("header get");
     compile_log("use ngx;\nngx::ctx::set(\"k\", \"v\");\nngx::ctx::get(\"k\");\n").expect("ctx");
     compile_log("use ngx;\nngx::shared::dict(\"dogs\");\n").expect("shared dict lookup");
-    let ctx = compile_log("use ngx;\nngx::ctx::set(\"k\", 1);\n").expect("ctx-only");
+    let ctx = compile_log("use ngx;\nngx::ctx::set(\"k\", \"1\");\n").expect("ctx-only");
     assert!(ngx_rustscript::config::program_requires_request_state(&ctx));
 }
 

@@ -13,9 +13,10 @@ request-state programs, including buffered `http::client::request`, key-auth
 control flows, and `ngx.ctx`, may reuse a VM after successful `Halted` cleanup.
 Their pool key contains the exact compiled `Arc<Program>` identity, phase,
 complete standard-host policy, ngx catalog fingerprint, and standard catalog
-fingerprint. SQLite, standard I/O, SSE, timers, sleep, cosockets, resource or
-unknown host schemas, failures, cancellation, timeouts, pending cleanup, and
-over-capacity returns are excluded. The worker retains at most four reusable
+fingerprint. SQLite, standard I/O, SSE, timers, sleep, cosockets, dynamic host
+schemas, failures, cancellation, timeouts, pending cleanup, and over-capacity
+returns are excluded. Buffered HTTP is admitted: its resource handles are
+quiescent within one synchronous call chain. The worker retains at most four reusable
 request VMs, installs a fresh `NgxAsyncBridge` and runtime policy on checkout,
 and clears request `ngx.ctx`, bridge, print sink, futures, resources, and reset
 state before return. Client disconnect during a wait finalizes the request as

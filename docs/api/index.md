@@ -67,12 +67,13 @@ pd-vm I/O, HTTP, and SQLite hosts are not part of the 199 ngx names; see
 | Acceptance | Tests that exercise the host or family |
 
 Catalog type labels: `number` (int or float), `int`, `string`, `bytes`,
-`bool`, `null`, `unknown` (checked at runtime), `map`, `array<int>`,
-`optional<T>` (`T` or `null`), `resource` (typed VM handle).
+`bool`, `()`, `array<T>`, `Option<T>` (`Option::Some(T)` or `Option::None`),
+`Result<T, E>`, named records, and `resource` (typed VM handle). A host
+output never carries `unknown`, `null`, or the legacy `optional<T>` schema.
 
 The pinned compiler matches host arity exactly. OpenResty optional
-trailing arguments are an explicit `null` argument, not an omitted
-argument.
+trailing arguments are explicit arguments: pass `()` where the default is
+wanted. Absence in a result is `Option::None`, never `null`.
 
 ## Inventory
 
@@ -172,22 +173,26 @@ host adds a further difference.
    callables such as `ngx::core::ok()`, `ngx::http::get()`,
    `ngx::config::prefix()`, `ngx::worker::pid()`. There are no host
    constants or dynamic table fields.
-2. **`ngx.null` is `ngx::core::null_value() -> null`.** `ngx::core::null`
-   is not catalogued: `null` is a reserved token.
-3. **`ngx.sleep` is seconds.** `ngx::sleep(seconds: number) -> null`
+2. **`ngx.null` is `ngx::core::null_value() -> ()`.** `ngx::core::null`
+   is not catalogued: `null` is a reserved token, and the host returns the
+   logical Unit so the RustScript compiler admits it.
+3. **`ngx.sleep` is seconds.** `ngx::sleep(seconds: number) -> ()`
    accepts int or float seconds and rejects negative values, NaN,
-   infinity, and duration overflow. Legacy `ngx::sleep_ms(ms: int) -> null`
+   infinity, and duration overflow. Legacy `ngx::sleep_ms(ms: int) -> ()`
    keeps integer milliseconds for existing scripts. Both are async.
-4. **`ngx.decode_args` result shape.** Returns `{ args, truncated }`
-   rather than Lua's multi-return `(table, truncated?)`. `max_args` of
-   `null` defaults to 100; `0` is clamped to the hard max 1024 (not
-   unbounded); values above 1024 are rejected. Keys without `=` become
-   boolean `true`. Repeated keys become arrays. Empty keys are skipped.
-   Invalid `%` sequences are left as-is.
+4. **`ngx.decode_args` result shape.** Returns
+   `DecodedArgsResult { args: array<ArgEntry>, truncated: bool }` rather
+   than Lua's multi-return `(table, truncated?)`, where
+   `ArgEntry { name: string, value: Option<string> }`. `max_args` of `()`
+   defaults to 100; `0` is clamped to the hard max 1024 (not unbounded);
+   values above 1024 are rejected. A key without `=` carries
+   `Option::None`; a present empty value is `Option::Some("")`. Repeated
+   keys repeat the entry. Empty keys are skipped. Invalid `%` sequences are
+   left as-is.
 5. **Byte versus string results.** Hex `ngx::md5` returns `string`.
    `ngx::md5_bin`, `ngx::sha1_bin`, and `ngx::hmac_sha1` return `bytes`.
-   `ngx::decode_base64` / `ngx::decode_base64mime` return `optional<bytes>`
-   (`null` on invalid input). `ngx::unescape_uri` returns a string even
+   `ngx::decode_base64` / `ngx::decode_base64mime` return
+   `Option<bytes>` (`Option::None` on invalid input). `ngx::unescape_uri` returns a string even
    when decoded bytes are not UTF-8 (each byte becomes `char::from`).
 6. **Time cache / update boundary.** Time hosts use a process-local
    cached clock, not nginx `ngx_time` / `ngx_timeofday`. Reads reuse the
@@ -206,19 +211,19 @@ host adds a further difference.
    messages containing NUL are host errors. The line is prefixed
    `ngx-rustscript: `. OpenResty varargs are a single string.
 9. **Phase and config import enforcement.** `compile_rss_source` compiles
-   access scripts against `compile_host_catalog()` — exactly the 199-name
-   `ngx_host_catalog()`, with no pd-vm standard family merged in — and then
+   access scripts against `compile_host_catalog()` — the 199-name
+   `ngx_host_catalog()` merged with pd-vm's standard host catalog (I/O,
+   HTTP, SQLite) — and then
    `validate_program_imports_for_phase(..., Access)`;
    `compile_rss_source_for_phase` performs the corresponding Content or
-   Log validation for `content_by_rss_file` and `log_by_rss_file`. pd-vm
-   standard HTTP imports stay dynamic: they compile as ordinary host
-   imports against the documented `map` interface, are validated by name
-   (`is_standard_host_import`), and bind through the staged standard
-   composition at runtime; pd-vm I/O and SQLite are compiler builtins
-   dispatched through that composition. Unknown names, phase-forbidden
-   names, arity, and type mismatches fail distinctly at `nginx -t` /
-   reload. Catalog phase metadata is the allowlist for all three
-   executable directives and for documented future phases.
+   Log validation for `content_by_rss_file` and `log_by_rss_file`. The
+   standard families are catalogued so their resource handles type-check
+   against the exact schemas the runtime composition registers, and the
+   same snapshot installs the adapters in the production registry.
+   Unknown names, phase-forbidden names, arity, and type mismatches fail
+   distinctly at `nginx -t` / reload. Catalog phase metadata is the
+   allowlist for all three executable directives and for documented future
+   phases.
 10. **`ngx.worker.pids` semantics.** The array always includes live
     `ngx_pid` when `pid > 0`. Other `ngx_processes` slots are included
     only when `pid > 0` and `channel[0] > 0` (excludes master, helpers,
@@ -226,8 +231,8 @@ host adds a further difference.
     pids are collapsed. Values come from NGINX public globals, never
     `/proc`.
 11. **Optional OpenResty arguments.** Trailing options such as escape
-    type, `max_args`, and `no_padding` must be passed as `null` when the
-    default is wanted.
+    type, `max_args`, and `no_padding` must be passed explicitly; use `()`
+    when the default is wanted.
 
 ## Hard caps
 
@@ -235,7 +240,7 @@ host adds a further difference.
 | --- | ---: | --- |
 | Codec input | 65536 bytes | URI/args/base64/hash/quote inputs |
 | Codec output | 196608 bytes | escape/encode/quote outputs |
-| `decode_args` default `max_args` | 100 | `null` second argument |
+| `decode_args` default `max_args` | 100 | `()` second argument |
 | `decode_args` hard `max_args` | 1024 | explicit cap; `0` clamps to this |
 | `encode_args` pairs | 1024 | including array expansion |
 | `parse_http_time` input | 128 bytes | over-limit is a host error |
@@ -246,7 +251,7 @@ host adds a further difference.
 | Cached clock stale limit | 1 second | time hosts without `update_time` |
 | Request copy / body / raw header | 65536 bytes | `ngx::req::raw_header`, `get_headers` total, `get_uri_args` / `get_post_args` source |
 | Header field | 8192 bytes | single `get_headers` name or value |
-| Header / args default cap | 100 | `null` `max_headers` / `max_args` |
+| Header / args default cap | 100 | `()` `max_headers` / `max_args` |
 | Header / args hard cap | 1024 | explicit cap; `0` clamps to this |
 
 

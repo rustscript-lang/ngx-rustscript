@@ -62,20 +62,14 @@ and then `validate_program_imports_for_phase(..., Access)`.
 Log validation. Unknown names, phase-forbidden names, arity, and type
 mismatches fail distinctly at `nginx -t` / reload.
 
-pd-vm's standard HTTP imports are not part of that catalog. The pinned pd-vm
-HTTP catalog declares its request/response positions as named records
-(`HttpRequest` / `HttpResponse` / SSE records) and registers its adapters
-byte-for-byte from that same catalog, so a merged compile-time schema could
-never both match the documented loose `map` scripts and stay registered.
-`http::client::*` therefore compiles dynamically as an ordinary host import
-against the documented `map` interface: configuration validates the name
-(`is_standard_host_import`), and the pinned pd-vm adapter validates the
-concrete request contents at runtime and returns the pinned named-record
-contract payload shapes unchanged (duplicate header entries, `HttpHeaderValue`
-text/bytes variants). The dynamic standard import binds through the staged
-standard composition (I/O and SQLite are compiler builtins dispatched through
-that same composition); see [pd-vm standard async hosts](api/standard-async.md).
-The standard host domains are rejected in `log_by_rss_file`.
+pd-vm's standard host families (I/O, HTTP, SQLite) are part of that catalog.
+Their handle positions are typed resources, so a name resolved through the
+legacy builtin table instead would carry an `int` carrier the resource-typed
+sibling hosts reject; cataloguing the exact schemas keeps compile-time and
+registered adapters identical. Configuration validates the name and phase
+(`is_standard_host_import`) and the production registry installs the same
+descriptors from the same snapshot. The standard host domains are rejected in
+`log_by_rss_file`. See [pd-vm standard async hosts](api/standard-async.md).
 
 `ngx::timer::{at,every,pending_count,running_count}` is landed: registration
 is accepted in Access and Content and rejected in Log at configuration compile

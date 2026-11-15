@@ -225,8 +225,9 @@ fn request_state_reuse_admits_buffered_http_and_excludes_retained_families() {
     let buffered_http = compile_rss_source(
         r#"
 use http;
-let response = http::client::request({ method: "GET", url: "https://example.test/" });
-if response.status < 100 { 1 / 0; }
+let request = http::request::new("GET", "https://example.test/");
+let response = http::client::request(request);
+if http::response::status(response) < 100 { 1 / 0; }
 "#,
     )
     .expect("buffered HTTP request");
@@ -238,8 +239,15 @@ if response.status < 100 { 1 / 0; }
     let sse = compile_source(
         r#"
 use http;
-fn on_event(item: SseEvent) -> SseCallbackAction { { action: "continue" } }
-http::client::sse({ method: "GET", url: "https://example.test/events" }, on_event);
+fn on_event(event: string, data: string, id: string, retry: string) -> bool {
+    event;
+    data;
+    id;
+    retry;
+    true
+}
+let request = http::request::new("GET", "https://example.test/events");
+http::client::sse(request, on_event);
 "#,
     )
     .expect("compile SSE");
@@ -253,15 +261,15 @@ http::client::sse({ method: "GET", url: "https://example.test/events" }, on_even
         ("cosocket", "use ngx;\nlet sock = ngx::socket::udp();\n"),
         (
             "resource handle",
-            "use ngx;\nngx::ctx::set(\"k\", 1);\nlet semaphore = ngx::semaphore::new(1);\n",
+            "use ngx;\nngx::ctx::set(\"k\", \"1\");\nlet semaphore = ngx::semaphore::new(1);\n",
         ),
         (
             "standard io",
-            "use io;\nlet input = io::open(\"x\", \"r\");\nio::close(input);\n",
+            "use io;\nfn probe(path: string) -> Result<(), string> {\n    let handle = io::open(path, \"r\")?;\n    io::close(handle)?;\n    Result::Ok(())\n}\nprobe(\"x\");\n",
         ),
         (
             "sqlite",
-            "use sqlite;\nlet db = sqlite::open({\"path\": \":memory:\", \"mode\": \"memory\"});\nsqlite::close(db);\n",
+            "use sqlite;\nlet db = sqlite::open({path: Option::Some(\":memory:\"), mode: Option::Some(\"memory\")});\nsqlite::close(db);\n",
         ),
     ];
     for (label, source) in retained_or_async_cases {
@@ -395,7 +403,7 @@ fn compiled_slot_caches_request_routing_and_sqlite_usage() {
     let sqlite = compile_rss_source(
         r#"
         use sqlite;
-        let db = sqlite::open({"path": ":memory:", "mode": "memory"});
+        let db = sqlite::open({path: Option::Some(":memory:"), mode: Option::Some("memory")});
         sqlite::close(db);
         "#,
     )

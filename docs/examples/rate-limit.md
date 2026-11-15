@@ -34,11 +34,11 @@ The zone name `"ratelimit"` in the script must match `rss_shared_dict ratelimit 
 
 ## Algorithm
 
-1. Read `$rate_limit_key` via `ngx::var::get(...).unwrap_or("")`. Missing (`null`) or empty fails closed with 503.
+1. Read `$rate_limit_key` via `ngx::var::get(...).unwrap_or("")`. Missing (`Option::None`) or empty fails closed with 503.
 2. Resolve `ngx::shared::dict("ratelimit")`. An unknown zone is a host error (500).
-3. Establish a new window with `ngx::shared::safe_add(dict, key, 1, WINDOW_SECONDS, null)` so capacity pressure never evicts a live quota:
+3. Establish a new window with `ngx::shared::safe_add(dict, key, 1, WINDOW_SECONDS, ())` so capacity pressure never evicts a live quota:
    - `ok` → this is count `1` for a new window;
-   - `error == "exists"` → the window already exists; `ngx::shared::incr(dict, key, 1, null, null)` on that scalar (no `init`, so incr cannot allocate a new key);
+   - `error == "exists"` → the window already exists; `ngx::shared::incr(dict, key, 1, (), ())` on that scalar (no `init`, so incr cannot allocate a new key);
    - any other `safe_add` error (including `no memory`) fails closed with 503.
 4. Unexpected `incr` `error` or `forcible` fails closed with 503. `forcible` means an LRU victim was deleted; this example never accepts that.
 5. If the resulting count is `> LIMIT`, set `Retry-After` and `ngx::exit(ngx::http::status_too_many_requests())` (429).
@@ -51,7 +51,7 @@ The script does not log the identity key.
 This is a **fixed window**, not a sliding window.
 
 - TTL is assigned only when `safe_add` creates the key (`exptime = WINDOW_SECONDS`).
-- Subsequent `incr` calls pass `null` init / init_ttl and keep the original expiry.
+- Subsequent `incr` calls pass `()` for init / init_ttl and keep the original expiry.
 - When the key expires, the next request starts a new window at count 1.
 - A client that spends `LIMIT` at the end of one window and `LIMIT` again at the
   start of the next can send up to `2 * LIMIT` requests in `WINDOW_SECONDS`

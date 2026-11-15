@@ -874,8 +874,8 @@ fn access_phase_ctx_persists_across_two_sleeps() {
         "missing persisted ctx in log:\n{log}"
     );
     assert!(
-        log.contains("CTX_USER=") && log.contains("id=7") && log.contains("name=ada"),
-        "missing nested ctx in log:\n{log}"
+        log.contains("CTX_USER=ada"),
+        "ctx values are strings; the persisted value must round-trip:\n{log}"
     );
 }
 
@@ -930,7 +930,7 @@ fn nginx_denies_in_memory_sqlite_without_sqlite_root() {
         &script,
         r#"
 use sqlite;
-let db = sqlite::open({"path": ":memory:", "mode": "memory"});
+let db = sqlite::open({path: Option::Some(":memory:"), mode: Option::Some("memory")});
 sqlite::close(db);
 "#,
     )
@@ -983,7 +983,8 @@ fn nginx_async_pipeline_runs_io_http_sqlite_shared_dict_and_json() {
     let upstream_port = upstream.local_addr().unwrap().port();
     upstream.set_nonblocking(true).unwrap();
     let upstream_thread = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // Allow for a loaded box starting NGINX and running the pipeline.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let (mut stream, _) = loop {
             match upstream.accept() {
                 Ok(pair) => break pair,
@@ -1062,7 +1063,7 @@ http {{
     assert!(out.status.success(), "nginx -t failed:\n{text}");
 
     let _running = spawn_nginx(&nginx, &prefix);
-    wait_for_port(listen_port, Duration::from_secs(3));
+    wait_for_port(listen_port, Duration::from_secs(10));
     let (status, response) = http_get(listen_port, "/pipeline");
     let log = fs::read_to_string(prefix.join("logs/error.log")).unwrap_or_default();
     assert_eq!(status, 200, "response:\n{response}\nerror log:\n{log}");

@@ -24,7 +24,7 @@ Acceptance: `tests/ngx_meta.rs`
 | `ngx.AGAIN` | `ngx::core::again() -> int` | `-2` |
 | `ngx.DONE` | `ngx::core::done() -> int` | `-4` |
 | `ngx.DECLINED` | `ngx::core::declined() -> int` | `-5` |
-| `ngx.null` | `ngx::core::null_value() -> null` | `null` |
+| `ngx.null` | `ngx::core::null_value() -> ()` | `()` |
 
 ### HTTP methods (`PHASE_CORE_CONST`)
 

@@ -597,7 +597,7 @@ fn access_then_content_run_on_the_same_request() {
         r#"
 use ngx;
 ngx::ctx::set("shared", "from-access");
-ngx::log(ngx::log_level::notice(), "ACCESS_CTX=" + ngx::ctx::get("shared"));
+ngx::log(ngx::log_level::notice(), "ACCESS_CTX=" + ngx::ctx::get("shared").unwrap_or(""));
 ngx::sleep_ms(20);
 ngx::log(ngx::log_level::notice(), "BOTH_ACCESS=" + ngx::get_phase());
 "#,
@@ -608,7 +608,7 @@ ngx::log(ngx::log_level::notice(), "BOTH_ACCESS=" + ngx::get_phase());
 use ngx;
 ngx::log(ngx::log_level::notice(), "CONTENT_START=" + ngx::get_phase());
 ngx::sleep_ms(20);
-if ngx::ctx::get("shared") == "from-access" {
+if ngx::ctx::get("shared").unwrap_or("") == "from-access" {
     ngx::log(ngx::log_level::notice(), "CONTENT_CTX=from-access");
 } else {
     ngx::log(ngx::log_level::notice(), "CONTENT_CTX=missing");

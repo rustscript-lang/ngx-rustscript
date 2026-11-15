@@ -24,9 +24,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pd_host_function::pd_host_function;
 use vm::HostModuleDescriptor;
-use vm::VmError;
+use vm::{Value, VmError};
 
-use super::{CallOutcome, IntoHostCallOutcome};
+use super::{CallOutcome, IntoHostCallOutcome, option_value};
 use super::super::VmResult;
 
 const MAX_CLOCK_STALE: Duration = Duration::from_secs(1);
@@ -379,7 +379,7 @@ pub fn parse_http_time(text: &str) -> VmResult<CallOutcome> {
             "ngx::parse_http_time input exceeds 128 bytes".to_string(),
         ));
     }
-    ret(parse_http_date(text))
+    ret(option_value(parse_http_date(text).map(Value::Int)))
 }
 
 

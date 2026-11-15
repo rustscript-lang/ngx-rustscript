@@ -68,6 +68,13 @@ struct HarnessSpec<'a> {
     extra_server: &'a str,
 }
 
+/// Serializes the heavy two-worker NGINX fixtures so a default-threading run
+/// does not exhaust loopback ports and startup budgets.
+fn nginx_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -385,11 +392,11 @@ fn assert_documented_constants() {
         "zone name missing from example: {EXAMPLE_RSS}"
     );
     assert!(
-        EXAMPLE_RSS.contains("ngx::shared::safe_add(dict, key, 1, WINDOW_SECONDS, null)"),
+        EXAMPLE_RSS.contains("ngx::shared::safe_add(dict, key, 1, WINDOW_SECONDS, ())"),
         "new windows must use safe_add: {EXAMPLE_RSS}"
     );
     assert!(
-        EXAMPLE_RSS.contains("ngx::shared::incr(dict, key, 1, null, null)"),
+        EXAMPLE_RSS.contains("ngx::shared::incr(dict, key, 1, (), ())"),
         "existing windows must incr without init: {EXAMPLE_RSS}"
     );
     assert!(
@@ -420,6 +427,7 @@ fn assert_documented_constants() {
 
 #[test]
 fn example_rss_compiles_and_requires_request_state() {
+    let _guard = nginx_lock();
     assert_documented_constants();
     let disk = fs::read_to_string(example_rss_path()).expect("read examples/rate-limit.rss");
     assert_eq!(
@@ -435,6 +443,7 @@ fn example_rss_compiles_and_requires_request_state() {
 
 #[test]
 fn example_rss_does_not_log_keys_or_trust_client_headers() {
+    let _guard = nginx_lock();
     let rss = EXAMPLE_RSS.to_ascii_lowercase();
     assert!(
         !rss.contains("ngx::log"),
@@ -479,6 +488,7 @@ fn example_rss_does_not_log_keys_or_trust_client_headers() {
 
 #[test]
 fn example_conf_nginx_t_accepts_templated_copy() {
+    let _guard = nginx_lock();
     let nginx = nginx_binary();
     let module = module_cdylib();
     let tmp = isolated_prefix("rate-limit-example-conf");
@@ -517,6 +527,7 @@ fn example_conf_nginx_t_accepts_templated_copy() {
 
 #[test]
 fn first_n_are_200_then_429_with_retry_after() {
+    let _guard = nginx_lock();
     let (_nginx, port, tmp, _running) = setup_keyed("rate-limit-n");
     for i in 0..LIMIT {
         let (status, body) = get_id(port, "n");
@@ -545,6 +556,7 @@ fn first_n_are_200_then_429_with_retry_after() {
 
 #[test]
 fn window_resets_after_ttl() {
+    let _guard = nginx_lock();
     let (_nginx, port, tmp, _running) = setup_keyed("rate-limit-ttl");
     for i in 0..LIMIT {
         let (status, body) = get_id(port, "ttl");
@@ -570,6 +582,7 @@ fn window_resets_after_ttl() {
 
 #[test]
 fn concurrent_burst_allows_exactly_n() {
+    let _guard = nginx_lock();
     let (_nginx, port, tmp, _running) = setup_keyed("rate-limit-burst");
     let allowed = AtomicUsize::new(0);
     let denied = AtomicUsize::new(0);
@@ -610,6 +623,7 @@ fn concurrent_burst_allows_exactly_n() {
 
 #[test]
 fn shared_state_across_two_distinct_worker_pids() {
+    let _guard = nginx_lock();
     let extra = format!("add_header {WORKER_PID_HEADER} $pid always;");
     let (_nginx, port, tmp, _running, _) = setup(HarnessSpec {
         label: "rate-limit-shared-pid",
@@ -687,6 +701,7 @@ fn shared_state_across_two_distinct_worker_pids() {
 
 #[test]
 fn distinct_trusted_keys_are_isolated() {
+    let _guard = nginx_lock();
     let (_nginx, port, tmp, _running) = setup_keyed("rate-limit-iso");
     for _ in 0..LIMIT {
         let (status, body) = get_id(port, "alice");
@@ -711,6 +726,7 @@ fn distinct_trusted_keys_are_isolated() {
 
 #[test]
 fn default_binary_remote_addr_isolates_loopback_peers() {
+    let _guard = nginx_lock();
     let probe = TcpListener::bind("127.0.0.2:0");
     assert!(
         probe.is_ok(),
@@ -770,6 +786,7 @@ fn default_binary_remote_addr_isolates_loopback_peers() {
 
 #[test]
 fn missing_key_fails_closed() {
+    let _guard = nginx_lock();
     let (_nginx, port, tmp, _running, _) = setup(HarnessSpec {
         label: "rate-limit-missing-key",
         http_extra: &format!("rss_shared_dict {ZONE} 1m;"),
@@ -788,6 +805,7 @@ fn missing_key_fails_closed() {
 
 #[test]
 fn present_empty_key_fails_closed() {
+    let _guard = nginx_lock();
     let (_nginx, port, tmp, _running, _) = setup(HarnessSpec {
         label: "rate-limit-empty-key",
         http_extra: &format!("rss_shared_dict {ZONE} 1m;"),
@@ -806,6 +824,7 @@ fn present_empty_key_fails_closed() {
 
 #[test]
 fn unknown_zone_fails_closed() {
+    let _guard = nginx_lock();
     let (_nginx, port, tmp, _running, _) = setup(HarnessSpec {
         label: "rate-limit-unknown-zone",
         http_extra: "rss_shared_dict other 1m;",
@@ -824,6 +843,7 @@ fn unknown_zone_fails_closed() {
 
 #[test]
 fn reload_preserves_window_count() {
+    let _guard = nginx_lock();
     let long = rss_with_window(LONG_WINDOW_SECONDS);
     let (nginx, port, tmp, _running, _) = setup(HarnessSpec {
         label: "rate-limit-reload",
@@ -901,6 +921,7 @@ fn reload_preserves_window_count() {
 
 #[test]
 fn capacity_pressure_fails_closed_without_resetting_live_quotas() {
+    let _guard = nginx_lock();
     let long = rss_with_window(LONG_WINDOW_SECONDS);
     let (_nginx, port, tmp, _running, _) = setup(HarnessSpec {
         label: "rate-limit-capacity",
@@ -1013,6 +1034,7 @@ fn capacity_pressure_fails_closed_without_resetting_live_quotas() {
 
 #[test]
 fn sigquit_exits_cleanly() {
+    let _guard = nginx_lock();
     let (nginx, port, tmp, mut running) = setup_keyed("rate-limit-quit");
     let (status, body) = get_id(port, "quit");
     assert_eq!(status, 200, "warmup: {body}\n{}", error_log(&tmp));

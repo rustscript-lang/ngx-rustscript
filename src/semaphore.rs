@@ -449,7 +449,7 @@ pub(crate) fn parse_post_amount(value: &Value, host: &str) -> VmResult<u64> {
         })?,
         other => {
             return Err(VmError::HostError(format!(
-                "{host} expects an integer count or null, got {other:?}"
+                "{host} expects an integer count or (), got {other:?}"
             )));
         }
     };
@@ -480,7 +480,7 @@ pub(crate) fn parse_wait_timeout(value: &Value, host: &str) -> VmResult<Option<D
                 .map_err(|_| VmError::HostError(format!("{host} timeout is not a finite duration")))
         }
         other => Err(VmError::HostError(format!(
-            "{host} timeout expects a number of seconds or null, got {other:?}"
+            "{host} timeout expects a number of seconds or (), got {other:?}"
         ))),
     }
 }
@@ -1296,7 +1296,7 @@ sentinel;
         runtime: &tokio::runtime::Runtime,
     ) -> (vm::Vm, Arc<SemaphoreState>, vm::HostOpId) {
         let program = crate::config::compile_rss_source(
-            "use ngx;\nlet s = ngx::semaphore::new(0);\nngx::semaphore::wait(s, null);\n",
+            "use ngx;\nlet s = ngx::semaphore::new(0);\nngx::semaphore::wait(s, ());\n",
         )
         .expect("compile semaphore wait");
         let mut vm = vm::Vm::try_new((*program).clone()).expect("vm");

@@ -538,7 +538,7 @@ fn receive_line_strips_crlf() {
     });
     let status = pump(
         &format!(
-            "use ngx;\nlet sock = ngx::socket::tcp();\nngx::socket::tcp::settimeout(sock, 1000);\nngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});\nlet a = ngx::socket::tcp::receive(sock, null);\nngx::socket::tcp::send(sock, a);\nlet b = ngx::socket::tcp::receive(sock, \"*l\");\nngx::socket::tcp::send(sock, b);\nngx::socket::tcp::close(sock);\n"
+            "use ngx;\nlet sock = ngx::socket::tcp();\nngx::socket::tcp::settimeout(sock, 1000);\nngx::socket::tcp::connect(sock, \"127.0.0.1\", {port});\nlet a = ngx::socket::tcp::receive(sock, ());\nngx::socket::tcp::send(sock, a);\nlet b = ngx::socket::tcp::receive(sock, \"*l\");\nngx::socket::tcp::send(sock, b);\nngx::socket::tcp::close(sock);\n"
         ),
         Duration::from_secs(3),
     );

@@ -751,7 +751,7 @@ mod tests {
         // of the worker id space is separate from the ascending request ids, so
         // a timer identity can never equal a request identity.
         let program = crate::config::compile_rss_source(
-            "use ngx;\nngx::timer::at(30, |premature| null);\nngx::timer::at(20, |premature| null);\n",
+            "use ngx;\nngx::timer::at(30, |premature| ());\nngx::timer::at(20, |premature| ());\n",
         )
         .expect("compile timer script");
         let mut vm = Vm::new_shared(program);
@@ -815,7 +815,7 @@ mod tests {
         shutdown_current();
         let mut worker = crate::runtime::WorkerRuntime::start().expect("worker runtime");
         let program =
-            crate::config::compile_rss_source("use ngx;\nngx::timer::at(30, |premature| null);\n")
+            crate::config::compile_rss_source("use ngx;\nngx::timer::at(30, |premature| ());\n")
                 .expect("compile timer script");
         let mut vm = Vm::new_shared(program);
         install_timer_vm(&mut vm, &StandardHostPolicy::fail_closed()).expect("install timer vm");
