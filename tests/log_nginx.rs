@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use ngx_rustscript_nginx_test_stubs as _;
@@ -16,6 +17,9 @@ use support::nginx::{
     nginx_test, terminate_process_group,
 };
 use support::temp::isolated_prefix;
+
+// Avoid competing worker initialization across real-NGINX fixtures.
+static SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -337,6 +341,9 @@ ngx::log(ngx::log_level::notice(), "LOG_MARK=" + ngx::encode_args({ uri: ngx::va
 
 #[test]
 fn nginx_t_accepts_log_by_rss_file() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let prefix = isolated_prefix("log-t-ok");
@@ -366,6 +373,9 @@ fn nginx_t_accepts_log_by_rss_file() {
 
 #[test]
 fn nginx_t_rejects_missing_syntax_and_duplicate_log() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
 
@@ -454,6 +464,9 @@ fn nginx_t_rejects_missing_syntax_and_duplicate_log() {
 
 #[test]
 fn nginx_t_rejects_sleep_udp_tcp_output_control_and_mutation() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let cases: &[(&str, &str, &str)] = &[
@@ -501,6 +514,9 @@ fn nginx_t_rejects_sleep_udp_tcp_output_control_and_mutation() {
 
 #[test]
 fn log_script_writes_marker_after_2xx_and_4xx() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -582,6 +598,9 @@ fn log_script_writes_marker_after_2xx_and_4xx() {
 
 #[test]
 fn log_script_writes_marker_after_499() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let prefix = isolated_prefix("log-499");
@@ -647,6 +666,9 @@ fn log_script_writes_marker_after_499() {
 
 #[test]
 fn log_runtime_error_does_not_mutate_response() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -703,6 +725,9 @@ fn log_runtime_error_does_not_mutate_response() {
 
 #[test]
 fn access_content_then_log_share_ngx_ctx() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -793,6 +818,9 @@ ngx::log(ngx::log_level::notice(), "LOG_PHASE=" + ngx::get_phase());
 
 #[test]
 fn concurrent_requests_log_the_matching_uri() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -850,6 +878,9 @@ fn concurrent_requests_log_the_matching_uri() {
 
 #[test]
 fn inherited_log_script_runs_in_child_location() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -895,6 +926,9 @@ fn inherited_log_script_runs_in_child_location() {
 
 #[test]
 fn log_reload_and_sigquit_do_not_wait_or_leak() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -978,6 +1012,9 @@ fn log_reload_and_sigquit_do_not_wait_or_leak() {
 
 #[test]
 fn existing_access_and_content_stay_untouched() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -1056,6 +1093,9 @@ ngx::log(ngx::log_level::notice(), "STILL_CONTENT=" + ngx::get_phase());
 
 #[test]
 fn log_uses_current_loc_conf_after_internal_redirect_and_error_page() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -1138,6 +1178,9 @@ fn log_uses_current_loc_conf_after_internal_redirect_and_error_page() {
 
 #[test]
 fn log_proof_env_is_inert_on_ordinary_module() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -1217,6 +1260,9 @@ fn log_proof_env_is_inert_on_ordinary_module() {
 
 #[test]
 fn log_subrequest_requires_core_log_subrequest_on() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     if !nginx_has_ssi(&nginx) {
         eprintln!(
@@ -1310,6 +1356,9 @@ fn log_subrequest_requires_core_log_subrequest_on() {
 fn concurrent_two_worker_log_maps_requests() {
     // Log is synchronous on the worker main thread, so one worker cannot
     // overlap two VMs. Two workers can; distinct markers prove mapping.
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
