@@ -217,7 +217,7 @@ fn timer_catalog_callback_schema_is_the_declared_callable() {
             .unwrap_or_else(|| panic!("{name} must declare a callback parameter"));
         assert_eq!(
             callback.ty, expected,
-            "{name} callback must use the declared `fn(bool) -> unknown` schema"
+            "{name} callback must use the declared `fn(bool) -> ()` schema"
         );
     }
 }

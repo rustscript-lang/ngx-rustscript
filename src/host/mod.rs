@@ -247,13 +247,9 @@ pub fn ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
 
 fn build_ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
     let catalog = compile_host_catalog();
-    // HostFunctionRegistry::restricted() starts from HostFunctionRegistry::new(),
-    // which catalog-installs HTTP adapters. Those catalog entries then reject
-    // ngx-compiled `http::client::*` imports that have no fingerprint — the ngx
-    // compile catalog deliberately omits HTTP so documented map literals keep
-    // compiling. empty() + deny_all is the same capability restriction without
-    // that HTTP catalog seed. Standard HTTP names are granted below; bind_vm_cached
-    // stages name-only adapters through standard_composition::ensure_surfaces.
+    // Start empty and install ngx and standard adapters from the same merged
+    // compile catalog, including HTTP, so imports and adapters share schemas.
+    // The standard capability profile restricts which hosts are available.
     let mut registry = vm::HostFunctionRegistry::empty();
     registry.set_capability_profile(standard_capability_profile());
     registry.set_standard_composition(vm::standard_composition());

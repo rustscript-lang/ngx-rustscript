@@ -199,7 +199,7 @@ values are rejected.
 ### Parameters
 
 `params` is an array of tagged `SqliteValue` records. Exactly one payload
-matches `kind`, except for `null`:
+matches `kind`, except when `kind` is the string `"null"`:
 
 ```text
 SqliteValue {
