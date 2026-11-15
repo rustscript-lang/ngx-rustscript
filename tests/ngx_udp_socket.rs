@@ -328,16 +328,16 @@ fn oversized_datagram_is_rejected() {
     let peer = bind_echo_peer();
     let port = peer.local_addr().unwrap().port();
     let oversized = vec![b'x'; 64];
+    let driver = Driver::new(compile(&format!(
+        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, 8);\n"
+    )));
     let handle = thread::spawn(move || {
         let mut buf = [0u8; 16];
         let (n, addr) = peer.recv_from(&mut buf).expect("recv ping");
         assert_eq!(&buf[..n], b"ping");
         peer.send_to(&oversized, addr).expect("send oversized");
     });
-    let status = Driver::new(compile(&format!(
-        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, 8);\n"
-    )))
-    .pump_until(Duration::from_secs(3));
+    let status = driver.pump_until(Duration::from_secs(3));
     handle.join().expect("peer thread");
     assert_eq!(status, AccessStatus::Error500);
 }
@@ -359,11 +359,11 @@ fn udp_echo_round_trip() {
 fn receive_timeout_fails_the_request() {
     let peer = bind_echo_peer();
     let port = peer.local_addr().unwrap().port();
-    let started = Instant::now();
-    let status = Driver::new(compile(&format!(
+    let driver = Driver::new(compile(&format!(
         "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 50);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::receive(sock, ());\n"
-    )))
-    .pump_until(Duration::from_secs(3));
+    )));
+    let started = Instant::now();
+    let status = driver.pump_until(Duration::from_secs(3));
     let elapsed = started.elapsed();
     assert_eq!(status, AccessStatus::Error500);
     assert!(

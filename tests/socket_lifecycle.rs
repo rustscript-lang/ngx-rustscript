@@ -214,13 +214,11 @@ fn dns_setpeername_echo_round_trip() {
     assert!(resolved.ip().is_loopback());
     let peer = bind_echo_peer(&resolved.to_string());
     let port = peer.local_addr().unwrap().port();
+    let driver = Driver::new(compile(&format!(
+        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"localhost\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, ());\nngx::socket::udp::close(sock);\n"
+    )));
     let echo = spawn_echo(peer, b"ping", b"pong");
-    let status = pump(
-        &format!(
-            "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"localhost\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, ());\nngx::socket::udp::close(sock);\n"
-        ),
-        Duration::from_secs(3),
-    );
+    let status = driver.pump_until(Duration::from_secs(3));
     echo.join().expect("echo thread");
     assert_eq!(status, AccessStatus::Ok);
 }
@@ -229,13 +227,11 @@ fn dns_setpeername_echo_round_trip() {
 fn ipv6_bind_setpeername_echo_round_trip() {
     let peer = bind_echo_peer("[::1]:0");
     let port = peer.local_addr().unwrap().port();
+    let driver = Driver::new(compile(&format!(
+        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::bind(sock, \"::1\", 0);\nngx::socket::udp::setpeername(sock, \"::1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, ());\nngx::socket::udp::close(sock);\n"
+    )));
     let echo = spawn_echo(peer, b"ping", b"pong");
-    let status = pump(
-        &format!(
-            "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::bind(sock, \"::1\", 0);\nngx::socket::udp::setpeername(sock, \"::1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, ());\nngx::socket::udp::close(sock);\n"
-        ),
-        Duration::from_secs(3),
-    );
+    let status = driver.pump_until(Duration::from_secs(3));
     echo.join().expect("echo thread");
     assert_eq!(status, AccessStatus::Ok);
 }
@@ -393,13 +389,11 @@ fn unresolved_error_host_name_is_rejected() {
 #[test]
 fn dns_host_over_the_length_cap_is_rejected() {
     let host = "a".repeat(256);
+    let driver = Driver::new(compile(&format!(
+        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"{host}\", 53);\n"
+    )));
     let started = Instant::now();
-    let status = pump(
-        &format!(
-            "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"{host}\", 53);\n"
-        ),
-        Duration::from_secs(3),
-    );
+    let status = driver.pump_until(Duration::from_secs(3));
     let elapsed = started.elapsed();
     assert_eq!(status, AccessStatus::Error500);
     assert!(
@@ -443,18 +437,16 @@ fn oversized_datagram_names_the_host() {
     let peer = bind_echo_peer("127.0.0.1:0");
     let port = peer.local_addr().unwrap().port();
     let oversized = vec![b'x'; 64];
+    let driver = Driver::new(compile(&format!(
+        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, 8);\n"
+    )));
     let handle = thread::spawn(move || {
         let mut buf = [0u8; 16];
         let (n, addr) = peer.recv_from(&mut buf).expect("recv ping");
         assert_eq!(&buf[..n], b"ping");
         peer.send_to(&oversized, addr).expect("send oversized");
     });
-    let status = pump(
-        &format!(
-            "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, 8);\n"
-        ),
-        Duration::from_secs(3),
-    );
+    let status = driver.pump_until(Duration::from_secs(3));
     handle.join().expect("peer thread");
     assert_eq!(status, AccessStatus::Error500);
 }
