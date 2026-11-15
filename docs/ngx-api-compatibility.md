@@ -46,7 +46,7 @@ Multi-return OpenResty values use **fixed result structs** at the RustScript
 boundary, and every return slot is fully typed: `Option<T>` for logical
 absence, named structs for fixed shapes, and entry arrays for open-keyed
 bags. Field access uses `.value` / `.flags` / `.stale` / `.ok` / `.error` /
-`.forcible`; an absent logical value is `Option::None`, never `null`. The
+`.forcible`; an absent logical value is `None`, never `null`. The
 VM's internal carrier is not part of the script-facing type.
 
 Open-keyed collections are typed entry arrays instead of dynamic maps:
@@ -65,7 +65,7 @@ struct RequestHeadersResult {
 
 Repeated keys repeat the entry, so duplicate headers and repeated query
 arguments survive without an `unknown` value. A bare query key carries
-`Option::None`; a present empty value carries `Option::Some("")`.
+`None`; a present empty value carries `Some("")`.
 
 Heterogeneous stored values use a tagged record. Shared-dictionary values
 are `SharedValue { kind, bool_value, int_value, float_value, text_value,
