@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use ngx_rustscript_nginx_test_stubs as _;
@@ -19,6 +20,9 @@ use support::temp::isolated_prefix;
 
 use ngx_rustscript::config::{ConfigError, compile_rss_source_for_phase};
 use ngx_rustscript::host::{NgxPhase, ngx_host_manifest};
+
+// Avoid competing worker initialization across real-NGINX fixtures.
+static SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -304,6 +308,9 @@ fn first_content_phase_forbidden_script() -> Option<(String, String)> {
 
 #[test]
 fn nginx_t_accepts_content_by_rss_file() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let prefix = isolated_prefix("content-t-ok");
@@ -332,6 +339,9 @@ fn nginx_t_accepts_content_by_rss_file() {
 
 #[test]
 fn nginx_t_rejects_missing_syntax_print_and_duplicate_content() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
 
@@ -441,6 +451,9 @@ fn nginx_t_rejects_missing_syntax_print_and_duplicate_content() {
 
 #[test]
 fn nginx_t_rejects_phase_forbidden_import_via_content_by_rss_file() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let Some((name, source)) = first_content_phase_forbidden_script() else {
         // Catalog currently allows every host in Content. Lock that, and prove
         // content_by_rss_file still uses the Content compile path (get_method
@@ -518,6 +531,9 @@ fn nginx_t_rejects_phase_forbidden_import_via_content_by_rss_file() {
 
 #[test]
 fn content_script_runs_and_get_phase_is_content() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -586,6 +602,9 @@ ngx::log(ngx::log_level::notice(), "CONTENT_PHASE=" + ngx::get_phase());
 
 #[test]
 fn access_then_content_run_on_the_same_request() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -671,6 +690,9 @@ ngx::log(ngx::log_level::notice(), "BOTH_CONTENT=" + ngx::get_phase());
 
 #[test]
 fn content_sleep_does_not_block_a_concurrent_static_request() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -741,6 +763,9 @@ fn content_sleep_does_not_block_a_concurrent_static_request() {
 
 #[test]
 fn inherited_content_script_runs_in_child_location() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -790,6 +815,9 @@ ngx::log(ngx::log_level::notice(), "CONTENT_INHERIT=" + ngx::get_phase());
 
 #[test]
 fn content_runtime_error_returns_500() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let port = free_port();
@@ -827,6 +855,9 @@ fn content_runtime_error_returns_500() {
 
 #[test]
 fn content_disconnect_during_long_sleep_logs_499_before_timer() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let prefix = isolated_prefix("content-disconnect");
@@ -897,6 +928,9 @@ fn content_disconnect_during_long_sleep_logs_499_before_timer() {
 
 #[test]
 fn content_graceful_quit_with_long_sleep_exits_within_bound() {
+    let _guard = SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let nginx = nginx_binary();
     let module = module_cdylib();
     let prefix = isolated_prefix("content-sigquit");
