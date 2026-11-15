@@ -753,7 +753,7 @@ fn catalog_sleep_schema_is_openresty_seconds_number() {
     assert_eq!(schema.params.len(), 1);
     assert_eq!(schema.params[0].name, "seconds");
     assert_eq!(schema.params[0].ty, HostTypeSchema::Number);
-    assert_eq!(schema.return_type, HostTypeSchema::Null);
+    assert_eq!(schema.return_type, HostTypeSchema::Unit);
 }
 
 #[test]
@@ -766,7 +766,7 @@ fn catalog_sleep_ms_schema_preserves_millisecond_int() {
     assert_eq!(schema.params.len(), 1);
     assert_eq!(schema.params[0].name, "ms");
     assert_eq!(schema.params[0].ty, HostTypeSchema::Int);
-    assert_eq!(schema.return_type, HostTypeSchema::Null);
+    assert_eq!(schema.return_type, HostTypeSchema::Unit);
 }
 
 #[test]
@@ -1183,7 +1183,7 @@ const ALLOWED_DYNAMIC_SLOTS: &[&str] = &[
 #[test]
 fn catalog_schema_version_and_fingerprint_goldens() {
     let catalog = ngx_host_catalog();
-    assert_eq!(NGX_HOST_CATALOG_SCHEMA_VERSION, 3);
+    assert_eq!(NGX_HOST_CATALOG_SCHEMA_VERSION, 4);
     assert_eq!(NGX_HOST_CATALOG_FINGERPRINT_V1, 0x5e37_8285_8fa0_b584);
     assert_eq!(NGX_HOST_CATALOG_FINGERPRINT_V2, 0x10c4_07b2_b827_eaff);
     assert_eq!(
@@ -1202,8 +1202,32 @@ fn catalog_schema_version_and_fingerprint_goldens() {
 }
 
 #[test]
+fn void_hosts_return_unit_instead_of_legacy_null() {
+    let catalog = ngx_host_catalog();
+    for function in catalog.functions() {
+        if function.name == "ngx::core::null_value" {
+            // The one deliberate null-returning host: it hands guest code a
+            // raw null value to prove literal rejection and null semantics.
+            assert_eq!(
+                function.return_type,
+                HostTypeSchema::Null,
+                "ngx::core::null_value must stay the legacy Null probe"
+            );
+            continue;
+        }
+        assert_ne!(
+            function.return_type,
+            HostTypeSchema::Null,
+            "{} must return Unit; the RustScript compiler rejects legacy Null host returns",
+            function.name
+        );
+    }
+}
+
+#[test]
 fn exact_dynamic_unknown_and_map_slots_are_allowlisted() {
     let actual = catalog_dynamic_slots();
+
     let expected: BTreeSet<String> = ALLOWED_DYNAMIC_SLOTS
         .iter()
         .map(|slot| (*slot).to_string())

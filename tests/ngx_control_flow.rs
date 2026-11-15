@@ -154,13 +154,13 @@ fn exit_and_redirect_are_catalogued_control_hosts() {
     let exit = catalog.function(EXIT).unwrap();
     assert_eq!(exit.params.len(), 1);
     assert_eq!(exit.params[0].ty, HostTypeSchema::Int);
-    assert_eq!(exit.return_type, HostTypeSchema::Null);
+    assert_eq!(exit.return_type, HostTypeSchema::Unit);
 
     let redirect = catalog.function(REDIRECT).unwrap();
     assert_eq!(redirect.params.len(), 2);
     assert_eq!(redirect.params[0].ty, HostTypeSchema::String);
     assert_eq!(redirect.params[1].ty, HostTypeSchema::Unknown);
-    assert_eq!(redirect.return_type, HostTypeSchema::Null);
+    assert_eq!(redirect.return_type, HostTypeSchema::Unit);
 }
 
 #[test]

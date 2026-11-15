@@ -125,29 +125,29 @@ fn output_catalog_signatures_match_openresty_names() {
         .function(NGX_SEND_HEADERS_NAME)
         .expect("send_headers schema");
     assert!(send.params.is_empty());
-    assert_eq!(send.return_type, HostTypeSchema::Null);
+    assert_eq!(send.return_type, HostTypeSchema::Unit);
 
     let print = catalog.function(NGX_PRINT_NAME).expect("print schema");
     assert_eq!(print.params.len(), 1);
     assert_eq!(print.params[0].name, "data");
     assert_eq!(print.params[0].ty, HostTypeSchema::Unknown);
-    assert_eq!(print.return_type, HostTypeSchema::Null);
+    assert_eq!(print.return_type, HostTypeSchema::Unit);
 
     let say = catalog.function(NGX_SAY_NAME).expect("say schema");
     assert_eq!(say.params.len(), 1);
     assert_eq!(say.params[0].name, "data");
     assert_eq!(say.params[0].ty, HostTypeSchema::Unknown);
-    assert_eq!(say.return_type, HostTypeSchema::Null);
+    assert_eq!(say.return_type, HostTypeSchema::Unit);
 
     let flush = catalog.function(NGX_FLUSH_NAME).expect("flush schema");
     assert_eq!(flush.params.len(), 1);
     assert_eq!(flush.params[0].name, "wait");
     assert_eq!(flush.params[0].ty, HostTypeSchema::Bool);
-    assert_eq!(flush.return_type, HostTypeSchema::Null);
+    assert_eq!(flush.return_type, HostTypeSchema::Unit);
 
     let eof = catalog.function(NGX_EOF_NAME).expect("eof schema");
     assert!(eof.params.is_empty());
-    assert_eq!(eof.return_type, HostTypeSchema::Null);
+    assert_eq!(eof.return_type, HostTypeSchema::Unit);
 }
 
 #[test]

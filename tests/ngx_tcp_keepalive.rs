@@ -195,7 +195,7 @@ fn catalog_declares_keepalive_hosts() {
     assert_eq!(keepalive.params[1].ty, HostTypeSchema::Unknown);
     assert_eq!(keepalive.params[2].name, "pool_size");
     assert_eq!(keepalive.params[2].ty, HostTypeSchema::Unknown);
-    assert_eq!(keepalive.return_type, HostTypeSchema::Null);
+    assert_eq!(keepalive.return_type, HostTypeSchema::Unit);
 
     let reused = catalog
         .function(GETREUSEDTIMES)

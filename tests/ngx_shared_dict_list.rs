@@ -134,7 +134,7 @@ fn list_and_maintenance_hosts_are_catalogued() {
             }
             NGX_SHARED_FLUSH_ALL_NAME => {
                 assert_eq!(schema.params.len(), 1);
-                assert_eq!(schema.return_type, HostTypeSchema::Null);
+                assert_eq!(schema.return_type, HostTypeSchema::Unit);
             }
             NGX_SHARED_FLUSH_EXPIRED_NAME => {
                 assert_eq!(schema.params.len(), 2);

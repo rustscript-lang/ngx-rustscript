@@ -583,7 +583,7 @@ mod tests {
         assert_eq!(schema.params.len(), 1);
         assert_eq!(schema.params[0].name, "seconds");
         assert_eq!(schema.params[0].ty, HostTypeSchema::Number);
-        assert_eq!(schema.return_type, HostTypeSchema::Null);
+        assert_eq!(schema.return_type, HostTypeSchema::Unit);
     }
 
     #[test]
@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(schema.params.len(), 1);
         assert_eq!(schema.params[0].name, "ms");
         assert_eq!(schema.params[0].ty, HostTypeSchema::Int);
-        assert_eq!(schema.return_type, HostTypeSchema::Null);
+        assert_eq!(schema.return_type, HostTypeSchema::Unit);
     }
 
     #[test]

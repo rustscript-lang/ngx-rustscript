@@ -180,7 +180,7 @@ fn shared_dict_hosts_are_catalogued() {
                 assert_eq!(schema.params.len(), 2);
                 assert_eq!(schema.params[0].passing, HostParamPassing::Borrow);
                 assert_eq!(schema.params[1].ty, HostTypeSchema::String);
-                assert_eq!(schema.return_type, HostTypeSchema::Null);
+                assert_eq!(schema.return_type, HostTypeSchema::Unit);
             }
             NGX_SHARED_INCR_NAME => {
                 assert!(host_allowed_in_phase(name, NgxPhase::Init));

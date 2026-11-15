@@ -166,7 +166,11 @@ pub const NGX_SHARED_GET_KEYS_NAME: &str = "ngx::shared::get_keys";
 /// Catalog schema version for fingerprint goldens. Bump together with
 /// [`NGX_HOST_CATALOG_FINGERPRINT`] when named structs, resource keys, or
 /// function shapes change.
-pub const NGX_HOST_CATALOG_SCHEMA_VERSION: u32 = 3;
+///
+/// Version 4: void host returns moved from `Null` to `Unit` so the RustScript
+/// compiler admits them; `ngx::core::null_value` keeps `Null` because it is
+/// the deliberate null literal probe.
+pub const NGX_HOST_CATALOG_SCHEMA_VERSION: u32 = 4;
 
 /// Fingerprint of schema version 1: named request/codec envelopes with
 /// `Unknown` shared-dict result carriers.
@@ -178,7 +182,7 @@ pub const NGX_HOST_CATALOG_FINGERPRINT_V2: u64 = 0x10c4_07b2_b827_eaff;
 
 /// Fingerprint of the current schema version. The host_catalog drift gate
 /// compares `ngx_host_catalog().fingerprint()` against this constant.
-pub const NGX_HOST_CATALOG_FINGERPRINT: u64 = 0xc54f_427f_8ef6_f5d4;
+pub const NGX_HOST_CATALOG_FINGERPRINT: u64 = 0xf73b_df45_cceb_df54;
 
 pub const NGX_SEND_HEADERS_NAME: &str = "ngx::send_headers";
 pub const NGX_PRINT_NAME: &str = "ngx::print";
@@ -1748,7 +1752,7 @@ fn sleep_schema() -> HostFunctionSchema {
     HostFunctionSchema::with_return(
         NGX_SLEEP_NAME,
         vec![HostParamSchema::value("seconds", HostTypeSchema::Number)],
-        HostTypeSchema::Null,
+        HostTypeSchema::Unit,
     )
 }
 
@@ -1756,7 +1760,7 @@ fn sleep_ms_schema() -> HostFunctionSchema {
     HostFunctionSchema::with_return(
         NGX_SLEEP_MS_NAME,
         vec![HostParamSchema::value("ms", HostTypeSchema::Int)],
-        HostTypeSchema::Null,
+        HostTypeSchema::Unit,
     )
 }
 
@@ -1958,7 +1962,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 semaphore_param(),
                 HostParamSchema::value("count", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SEMAPHORE_COUNT_NAME => HostFunctionSchema::with_return(
             NGX_SEMAPHORE_COUNT_NAME,
@@ -2034,7 +2038,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         NGX_TODAY_NAME => nullary(NGX_TODAY_NAME, HostTypeSchema::String),
         NGX_TIME_NAME => nullary(NGX_TIME_NAME, HostTypeSchema::Int),
         NGX_NOW_NAME => nullary(NGX_NOW_NAME, HostTypeSchema::Float),
-        NGX_UPDATE_TIME_NAME => nullary(NGX_UPDATE_TIME_NAME, HostTypeSchema::Null),
+        NGX_UPDATE_TIME_NAME => nullary(NGX_UPDATE_TIME_NAME, HostTypeSchema::Unit),
         NGX_LOCALTIME_NAME => nullary(NGX_LOCALTIME_NAME, HostTypeSchema::String),
         NGX_UTCTIME_NAME => nullary(NGX_UTCTIME_NAME, HostTypeSchema::String),
         NGX_COOKIE_TIME_NAME => int_in_string_out(NGX_COOKIE_TIME_NAME, "sec"),
@@ -2075,8 +2079,8 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
             vec![HostParamSchema::value("max_args", HostTypeSchema::Unknown)],
             request_args_result_schema(),
         ),
-        NGX_REQ_READ_BODY_NAME => nullary(NGX_REQ_READ_BODY_NAME, HostTypeSchema::Null),
-        NGX_REQ_DISCARD_BODY_NAME => nullary(NGX_REQ_DISCARD_BODY_NAME, HostTypeSchema::Null),
+        NGX_REQ_READ_BODY_NAME => nullary(NGX_REQ_READ_BODY_NAME, HostTypeSchema::Unit),
+        NGX_REQ_DISCARD_BODY_NAME => nullary(NGX_REQ_DISCARD_BODY_NAME, HostTypeSchema::Unit),
         NGX_REQ_GET_BODY_DATA_NAME => nullary(
             NGX_REQ_GET_BODY_DATA_NAME,
             HostTypeSchema::Optional(Box::new(HostTypeSchema::String)),
@@ -2088,7 +2092,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         NGX_REQ_SET_BODY_DATA_NAME => HostFunctionSchema::with_return(
             NGX_REQ_SET_BODY_DATA_NAME,
             vec![HostParamSchema::value("data", HostTypeSchema::String)],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_REQ_SET_BODY_FILE_NAME => HostFunctionSchema::with_return(
             NGX_REQ_SET_BODY_FILE_NAME,
@@ -2096,7 +2100,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("path", HostTypeSchema::String),
                 HostParamSchema::value("auto_clean", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_REQ_INIT_BODY_NAME => HostFunctionSchema::with_return(
             NGX_REQ_INIT_BODY_NAME,
@@ -2104,14 +2108,14 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 "buffer_size",
                 HostTypeSchema::Unknown,
             )],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_REQ_APPEND_BODY_NAME => HostFunctionSchema::with_return(
             NGX_REQ_APPEND_BODY_NAME,
             vec![HostParamSchema::value("data", HostTypeSchema::String)],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
-        NGX_REQ_FINISH_BODY_NAME => nullary(NGX_REQ_FINISH_BODY_NAME, HostTypeSchema::Null),
+        NGX_REQ_FINISH_BODY_NAME => nullary(NGX_REQ_FINISH_BODY_NAME, HostTypeSchema::Unit),
         NGX_REQ_IS_INTERNAL_NAME => nullary(NGX_REQ_IS_INTERNAL_NAME, HostTypeSchema::Bool),
         NGX_REQ_START_TIME_NAME => nullary(NGX_REQ_START_TIME_NAME, HostTypeSchema::Float),
         NGX_IS_SUBREQUEST_NAME => nullary(NGX_IS_SUBREQUEST_NAME, HostTypeSchema::Bool),
@@ -2124,7 +2128,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         NGX_REQ_SET_METHOD_NAME => HostFunctionSchema::with_return(
             NGX_REQ_SET_METHOD_NAME,
             vec![HostParamSchema::value("method_id", HostTypeSchema::Int)],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_REQ_SET_URI_NAME => HostFunctionSchema::with_return(
             NGX_REQ_SET_URI_NAME,
@@ -2132,12 +2136,12 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("uri", HostTypeSchema::String),
                 HostParamSchema::value("jump", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_REQ_SET_URI_ARGS_NAME => HostFunctionSchema::with_return(
             NGX_REQ_SET_URI_ARGS_NAME,
             vec![HostParamSchema::value("args", HostTypeSchema::Unknown)],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_REQ_SET_HEADER_NAME => HostFunctionSchema::with_return(
             NGX_REQ_SET_HEADER_NAME,
@@ -2145,12 +2149,12 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("name", HostTypeSchema::String),
                 HostParamSchema::value("value", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_REQ_CLEAR_HEADER_NAME => HostFunctionSchema::with_return(
             NGX_REQ_CLEAR_HEADER_NAME,
             vec![HostParamSchema::value("name", HostTypeSchema::String)],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_VAR_SET_NAME => HostFunctionSchema::with_return(
             NGX_VAR_SET_NAME,
@@ -2158,13 +2162,13 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("name", HostTypeSchema::String),
                 HostParamSchema::value("value", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_STATUS_GET_NAME => nullary(NGX_STATUS_GET_NAME, HostTypeSchema::Int),
         NGX_STATUS_SET_NAME => HostFunctionSchema::with_return(
             NGX_STATUS_SET_NAME,
             vec![HostParamSchema::value("status", HostTypeSchema::Int)],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_HEADER_GET_NAME => HostFunctionSchema::with_return(
             NGX_HEADER_GET_NAME,
@@ -2177,18 +2181,18 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("name", HostTypeSchema::String),
                 HostParamSchema::value("value", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_HEADER_SET_ALL_NAME => HostFunctionSchema::with_return(
             NGX_HEADER_SET_ALL_NAME,
             vec![HostParamSchema::value("headers", HostTypeSchema::Unknown)],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
-        NGX_HEADER_CLEAR_NAME => nullary(NGX_HEADER_CLEAR_NAME, HostTypeSchema::Null),
+        NGX_HEADER_CLEAR_NAME => nullary(NGX_HEADER_CLEAR_NAME, HostTypeSchema::Unit),
         NGX_EXIT_NAME => HostFunctionSchema::with_return(
             NGX_EXIT_NAME,
             vec![HostParamSchema::value("status", HostTypeSchema::Int)],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_REDIRECT_NAME => HostFunctionSchema::with_return(
             NGX_REDIRECT_NAME,
@@ -2196,7 +2200,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("uri", HostTypeSchema::String),
                 HostParamSchema::value("status", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_CTX_GET_NAME => HostFunctionSchema::with_return(
             NGX_CTX_GET_NAME,
@@ -2209,14 +2213,14 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("key", HostTypeSchema::String),
                 HostParamSchema::value("value", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_CTX_DELETE_NAME => HostFunctionSchema::with_return(
             NGX_CTX_DELETE_NAME,
             vec![HostParamSchema::value("key", HostTypeSchema::String)],
             HostTypeSchema::Unknown,
         ),
-        NGX_CTX_CLEAR_NAME => nullary(NGX_CTX_CLEAR_NAME, HostTypeSchema::Null),
+        NGX_CTX_CLEAR_NAME => nullary(NGX_CTX_CLEAR_NAME, HostTypeSchema::Unit),
         NGX_SHARED_DICT_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_DICT_NAME,
             vec![HostParamSchema::value("name", HostTypeSchema::String)],
@@ -2235,7 +2239,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 dict_handle_param(),
                 HostParamSchema::value("key", HostTypeSchema::String),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SHARED_INCR_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_INCR_NAME,
@@ -2306,7 +2310,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         NGX_SHARED_FLUSH_ALL_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_FLUSH_ALL_NAME,
             vec![dict_handle_param()],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SHARED_FLUSH_EXPIRED_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_FLUSH_EXPIRED_NAME,
@@ -2336,7 +2340,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("host", HostTypeSchema::Unknown),
                 HostParamSchema::value("port", HostTypeSchema::Int),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_UDP_SETPEERNAME_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_UDP_SETPEERNAME_NAME,
@@ -2345,7 +2349,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("host", HostTypeSchema::String),
                 HostParamSchema::value("port", HostTypeSchema::Int),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_UDP_SEND_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_UDP_SEND_NAME,
@@ -2353,7 +2357,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 udp_sock_param(),
                 HostParamSchema::value("data", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_UDP_RECEIVE_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_UDP_RECEIVE_NAME,
@@ -2366,7 +2370,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         NGX_SOCKET_UDP_CLOSE_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_UDP_CLOSE_NAME,
             vec![udp_sock_param()],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_UDP_SETTIMEOUT_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_UDP_SETTIMEOUT_NAME,
@@ -2374,7 +2378,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 udp_sock_param(),
                 HostParamSchema::value("ms", HostTypeSchema::Int),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_TCP_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_TCP_NAME,
@@ -2388,7 +2392,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("host", HostTypeSchema::String),
                 HostParamSchema::value("port", HostTypeSchema::Int),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_CONNECT_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_CONNECT_NAME,
@@ -2404,7 +2408,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 tcp_sock_param(),
                 HostParamSchema::value("data", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_TCP_RECEIVE_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_TCP_RECEIVE_NAME,
@@ -2433,7 +2437,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         NGX_SOCKET_TCP_CLOSE_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_TCP_CLOSE_NAME,
             vec![tcp_sock_param()],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_TCP_SETTIMEOUT_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_TCP_SETTIMEOUT_NAME,
@@ -2441,7 +2445,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 tcp_sock_param(),
                 HostParamSchema::value("ms", HostTypeSchema::Int),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_TCP_SETKEEPALIVE_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_TCP_SETKEEPALIVE_NAME,
@@ -2450,7 +2454,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("timeout", HostTypeSchema::Unknown),
                 HostParamSchema::value("pool_size", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_TCP_GETREUSEDTIMES_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_TCP_GETREUSEDTIMES_NAME,
@@ -2466,7 +2470,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 HostParamSchema::value("ssl_verify", HostTypeSchema::Unknown),
                 HostParamSchema::value("send_status_req", HostTypeSchema::Unknown),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_TCP_SETTRUSTEDSTORE_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_TCP_SETTRUSTEDSTORE_NAME,
@@ -2478,7 +2482,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                     HostParamPassing::Borrow,
                 ),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_TCP_SETCLIENTCERT_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_TCP_SETCLIENTCERT_NAME,
@@ -2490,7 +2494,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                     HostParamPassing::Borrow,
                 ),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SOCKET_TCP_TRUSTEDSTORE_NAME => HostFunctionSchema::with_return(
             NGX_SOCKET_TCP_TRUSTEDSTORE_NAME,
@@ -2505,23 +2509,23 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
             ],
             HostTypeSchema::Resource(tls_clientcert_resource_key()),
         ),
-        NGX_SEND_HEADERS_NAME => nullary(NGX_SEND_HEADERS_NAME, HostTypeSchema::Null),
+        NGX_SEND_HEADERS_NAME => nullary(NGX_SEND_HEADERS_NAME, HostTypeSchema::Unit),
         NGX_PRINT_NAME => HostFunctionSchema::with_return(
             NGX_PRINT_NAME,
             vec![HostParamSchema::value("data", HostTypeSchema::Unknown)],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_SAY_NAME => HostFunctionSchema::with_return(
             NGX_SAY_NAME,
             vec![HostParamSchema::value("data", HostTypeSchema::Unknown)],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         NGX_FLUSH_NAME => HostFunctionSchema::with_return(
             NGX_FLUSH_NAME,
             vec![HostParamSchema::value("wait", HostTypeSchema::Bool)],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
-        NGX_EOF_NAME => nullary(NGX_EOF_NAME, HostTypeSchema::Null),
+        NGX_EOF_NAME => nullary(NGX_EOF_NAME, HostTypeSchema::Unit),
         other => metadata_schema(other)
             .unwrap_or_else(|| panic!("ngx host catalog has no schema for {other}")),
     }
@@ -2535,7 +2539,7 @@ fn metadata_schema(name: &str) -> Option<HostFunctionSchema> {
                 HostParamSchema::value("level", HostTypeSchema::Int),
                 HostParamSchema::value("message", HostTypeSchema::String),
             ],
-            HostTypeSchema::Null,
+            HostTypeSchema::Unit,
         ),
         "ngx::core::null_value" => nullary(name, HostTypeSchema::Null),
         "ngx::get_phase"
