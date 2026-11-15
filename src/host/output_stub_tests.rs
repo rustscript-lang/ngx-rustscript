@@ -20,6 +20,13 @@ use crate::runtime::WorkerRuntime;
 use nginx_sys::ngx_http_request_t;
 use vm::{Program, Value, Vm, VmStatus};
 
+
+/// Serializes tests that share process-global stub or zone state.
+fn stub_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 fn compile_content(source: &str) -> Arc<Program> {
     compile_rss_source_for_phase(source, NgxPhase::Content).expect("content source should compile")
 }
@@ -55,6 +62,7 @@ fn eval_in_content(request: *mut ngx_http_request_t, source: &str) -> Result<Val
 
 #[test]
 fn send_headers_is_idempotent_and_sets_default_status() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -70,6 +78,7 @@ fn send_headers_is_idempotent_and_sets_default_status() {
 
 #[test]
 fn print_and_say_preserve_order_and_say_appends_newline() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -85,6 +94,7 @@ fn print_and_say_preserve_order_and_say_appends_newline() {
 
 #[test]
 fn print_flattens_arrays_and_accepts_binary() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -101,6 +111,7 @@ fn print_flattens_arrays_and_accepts_binary() {
 
 #[test]
 fn flush_false_sends_flush_buf_without_waiting() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -125,6 +136,7 @@ fn flush_false_sends_flush_buf_without_waiting() {
 
 #[test]
 fn flush_true_waits_when_connection_is_buffered() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     nginx_stubs::stub_output_set_needs_flush_wait(1);
@@ -154,6 +166,7 @@ fn flush_true_waits_when_connection_is_buffered() {
 
 #[test]
 fn eof_sends_last_buf_and_rejects_later_output() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -169,6 +182,7 @@ fn eof_sends_last_buf_and_rejects_later_output() {
 
 #[test]
 fn status_and_header_mutation_rejected_after_send_headers() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -183,6 +197,7 @@ fn status_and_header_mutation_rejected_after_send_headers() {
 
 #[test]
 fn head_skips_body_and_http10_buffers_until_eof() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -210,6 +225,7 @@ fn head_skips_body_and_http10_buffers_until_eof() {
 
 #[test]
 fn second_eof_returns_seen_eof() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -238,6 +254,7 @@ ngx::eof();
 
 #[test]
 fn http10_explicit_content_length_is_not_overwritten_and_rejects_overflow() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -276,6 +293,7 @@ ngx::print("xyz");
 
 #[test]
 fn print_rejects_maps_deep_nesting_and_oversized_arrays() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -296,6 +314,7 @@ ngx::print({a: 1});
 
 #[test]
 fn nested_array_is_bounded_before_allocation() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -314,6 +333,7 @@ fn nested_array_is_bounded_before_allocation() {
 
 #[test]
 fn output_filter_again_keeps_body_and_done_does_not_fail() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     nginx_stubs::stub_output_set_rc(-2);
@@ -364,6 +384,7 @@ ngx::send_headers();
 
 #[test]
 fn subrequest_eof_sets_last_in_chain_not_last_buf() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut main = dummy_request();
@@ -392,6 +413,7 @@ ngx::eof();
 
 #[test]
 fn identity_zero_is_rejected() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -420,6 +442,7 @@ ngx::print("x");
 
 #[test]
 fn pointer_reuse_does_not_inherit_eof() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -510,6 +533,7 @@ fn run_flush_wait(
 
 #[test]
 fn flush_write_callback_resumes_and_restores_handler() {
+    let _guard = stub_lock();
     let (mut req, mut exec, mut registry, mut worker) = run_flush_wait(
         r#"
 use ngx;
@@ -539,6 +563,7 @@ ngx::flush(true);
 
 #[test]
 fn flush_send_timeout_fails_wait() {
+    let _guard = stub_lock();
     let (mut req, mut exec, mut registry, mut worker) = run_flush_wait(
         r#"
 use ngx;
@@ -561,6 +586,7 @@ ngx::flush(true);
 
 #[test]
 fn flush_delayed_then_ready_does_not_spin() {
+    let _guard = stub_lock();
     let (mut req, mut exec, mut registry, mut worker) = run_flush_wait(
         r#"
 use ngx;
@@ -585,6 +611,7 @@ ngx::flush(true);
 
 #[test]
 fn stale_flush_wake_after_cleanup_is_ignored() {
+    let _guard = stub_lock();
     let (mut req, exec, _registry, mut worker) = run_flush_wait(
         r#"
 use ngx;
@@ -606,6 +633,7 @@ ngx::flush(true);
 
 #[test]
 fn client_abort_cancels_flush_wait() {
+    let _guard = stub_lock();
     let (mut req, mut exec, mut registry, mut worker) = run_flush_wait(
         r#"
 use ngx;
@@ -630,6 +658,7 @@ ngx::flush(true);
 
 #[test]
 fn ok_finish_and_cleanup_with_armed_wait_do_not_stamp_499() {
+    let _guard = stub_lock();
     let (mut req, exec, _registry, mut worker) = run_flush_wait(
         r#"
 use ngx;
@@ -667,6 +696,7 @@ ngx::flush(true);
 
 #[test]
 fn error_and_finalize_cleanup_do_not_stamp_499() {
+    let _guard = stub_lock();
     let (mut req, exec, _registry, mut worker) = run_flush_wait(
         r#"
 use ngx;
@@ -726,6 +756,7 @@ ngx::flush(true);
 
 #[test]
 fn identity_replacement_does_not_stamp_499() {
+    let _guard = stub_lock();
     let (mut req, _exec, _registry, mut worker) = run_flush_wait(
         r#"
 use ngx;
@@ -759,6 +790,7 @@ ngx::print("fresh");
 
 #[test]
 fn confirmed_client_abort_stamps_499_once() {
+    let _guard = stub_lock();
     let (mut req, mut exec, mut registry, mut worker) = run_flush_wait(
         r#"
 use ngx;
@@ -790,6 +822,7 @@ ngx::flush(true);
 
 #[test]
 fn flush_timeout_stamps_408_not_499() {
+    let _guard = stub_lock();
     let (mut req, mut exec, mut registry, mut worker) = run_flush_wait(
         r#"
 use ngx;
@@ -819,6 +852,7 @@ ngx::flush(true);
 
 #[test]
 fn generic_flush_error_does_not_stamp_499() {
+    let _guard = stub_lock();
     let (mut req, mut exec, mut registry, mut worker) = run_flush_wait(
         r#"
 use ngx;
@@ -848,6 +882,7 @@ ngx::flush(true);
 
 #[test]
 fn auto_last_on_ok_error_and_finalize() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     nginx_stubs::stub_output_reset();
     let mut req = dummy_request();
@@ -925,6 +960,7 @@ ngx::print("fn");
 
 #[test]
 fn concurrent_dummy_requests_on_threads_keep_independent_bodies() {
+    let _guard = stub_lock();
     std::thread::scope(|scope| {
         let a = scope.spawn(|| {
             let mut req = dummy_request();

@@ -217,7 +217,7 @@ fn dns_setpeername_echo_round_trip() {
     let echo = spawn_echo(peer, b"ping", b"pong");
     let status = pump(
         &format!(
-            "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"localhost\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, null);\nngx::socket::udp::close(sock);\n"
+            "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"localhost\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, ());\nngx::socket::udp::close(sock);\n"
         ),
         Duration::from_secs(3),
     );
@@ -232,7 +232,7 @@ fn ipv6_bind_setpeername_echo_round_trip() {
     let echo = spawn_echo(peer, b"ping", b"pong");
     let status = pump(
         &format!(
-            "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::bind(sock, \"::1\", 0);\nngx::socket::udp::setpeername(sock, \"::1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, null);\nngx::socket::udp::close(sock);\n"
+            "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::bind(sock, \"::1\", 0);\nngx::socket::udp::setpeername(sock, \"::1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, ());\nngx::socket::udp::close(sock);\n"
         ),
         Duration::from_secs(3),
     );
@@ -250,7 +250,7 @@ fn two_sockets_may_pend_independently() {
     let echo_right = spawn_echo(right, b"R", b"r");
     let status = pump(
         &format!(
-            "use ngx;\nlet a = ngx::socket::udp();\nlet b = ngx::socket::udp();\nngx::socket::udp::settimeout(a, 1000);\nngx::socket::udp::settimeout(b, 1000);\nngx::socket::udp::setpeername(a, \"127.0.0.1\", {left_port});\nngx::socket::udp::setpeername(b, \"127.0.0.1\", {right_port});\nngx::socket::udp::send(a, \"L\");\nngx::socket::udp::send(b, \"R\");\nngx::socket::udp::receive(a, null);\nngx::socket::udp::receive(b, null);\nngx::socket::udp::close(a);\nngx::socket::udp::close(b);\n"
+            "use ngx;\nlet a = ngx::socket::udp();\nlet b = ngx::socket::udp();\nngx::socket::udp::settimeout(a, 1000);\nngx::socket::udp::settimeout(b, 1000);\nngx::socket::udp::setpeername(a, \"127.0.0.1\", {left_port});\nngx::socket::udp::setpeername(b, \"127.0.0.1\", {right_port});\nngx::socket::udp::send(a, \"L\");\nngx::socket::udp::send(b, \"R\");\nngx::socket::udp::receive(a, ());\nngx::socket::udp::receive(b, ());\nngx::socket::udp::close(a);\nngx::socket::udp::close(b);\n"
         ),
         Duration::from_secs(3),
     );
@@ -265,7 +265,7 @@ fn request_cleanup_closes_the_udp_fd() {
     let port = probe.local_addr().unwrap().port();
     drop(probe);
     let mut driver = Driver::new(compile(&format!(
-        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 60000);\nngx::socket::udp::bind(sock, \"127.0.0.1\", {port});\nngx::socket::udp::receive(sock, null);\n"
+        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 60000);\nngx::socket::udp::bind(sock, \"127.0.0.1\", {port});\nngx::socket::udp::receive(sock, ());\n"
     )));
     driver.wait_until_waiting(Duration::from_secs(2));
     assert_eq!(driver.worker.in_flight().unwrap(), 1);
@@ -279,7 +279,7 @@ fn request_cleanup_cancels_a_pending_receive() {
     let peer = bind_echo_peer("127.0.0.1:0");
     let port = peer.local_addr().unwrap().port();
     let mut driver = Driver::new(compile(&format!(
-        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 60000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::receive(sock, null);\n"
+        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 60000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::receive(sock, ());\n"
     )));
     driver.wait_until_waiting(Duration::from_secs(2));
     assert_eq!(driver.worker.in_flight().unwrap(), 1);
@@ -291,7 +291,7 @@ fn request_cleanup_cancels_a_pending_send_when_waiting() {
     let peer = bind_echo_peer("127.0.0.1:0");
     let port = peer.local_addr().unwrap().port();
     let mut driver = Driver::new(compile(&format!(
-        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 60000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, null);\n"
+        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 60000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, ());\n"
     )));
     let started = Instant::now();
     loop {
@@ -326,11 +326,11 @@ fn worker_runtimes_isolate_udp_sockets() {
     let echo_left = spawn_echo(left, b"A", b"a");
     let echo_right = spawn_echo(right, b"B", b"b");
     let left_status = Driver::new(compile(&format!(
-        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {left_port});\nngx::socket::udp::send(sock, \"A\");\nngx::socket::udp::receive(sock, null);\nngx::socket::udp::close(sock);\n"
+        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {left_port});\nngx::socket::udp::send(sock, \"A\");\nngx::socket::udp::receive(sock, ());\nngx::socket::udp::close(sock);\n"
     )))
     .pump_until(Duration::from_secs(3));
     let right_status = Driver::new(compile(&format!(
-        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {right_port});\nngx::socket::udp::send(sock, \"B\");\nngx::socket::udp::receive(sock, null);\nngx::socket::udp::close(sock);\n"
+        "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 1000);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {right_port});\nngx::socket::udp::send(sock, \"B\");\nngx::socket::udp::receive(sock, ());\nngx::socket::udp::close(sock);\n"
     )))
     .pump_until(Duration::from_secs(3));
     echo_left.join().expect("left echo");
@@ -416,7 +416,7 @@ fn timeout_zero_does_not_fire_a_timer() {
     let started = Instant::now();
     let status = pump(
         &format!(
-            "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 0);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, null);\nngx::socket::udp::close(sock);\n"
+            "use ngx;\nlet sock = ngx::socket::udp();\nngx::socket::udp::settimeout(sock, 0);\nngx::socket::udp::setpeername(sock, \"127.0.0.1\", {port});\nngx::socket::udp::send(sock, \"ping\");\nngx::socket::udp::receive(sock, ());\nngx::socket::udp::close(sock);\n"
         ),
         Duration::from_secs(3),
     );

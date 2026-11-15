@@ -296,7 +296,7 @@ fn script_round_trip_uses_openresty_count_semantics() {
     );
     assert_eq!(
         run_value(
-            "use ngx;\nlet s = ngx::semaphore::new(0);\nngx::semaphore::post(s, null);\nngx::semaphore::count(s);\n"
+            "use ngx;\nlet s = ngx::semaphore::new(0);\nngx::semaphore::post(s, ());\nngx::semaphore::count(s);\n"
         )
         .expect("null counts as one permit"),
         Value::Int(1)
@@ -353,7 +353,7 @@ fn forged_integer_handles_never_compile() {
     // (forged, foreign, or stale) cannot reach `count`/`post`/`wait` at all.
     for source in [
         "use ngx;\nngx::semaphore::count(0);\n",
-        "use ngx;\nngx::semaphore::wait(7, null);\n",
+        "use ngx;\nngx::semaphore::wait(7, ());\n",
         "use ngx;\nlet s = ngx::semaphore::new(1);\nngx::semaphore::post(0, 1);\n",
     ] {
         let err = compile_rss_source(source)
@@ -380,7 +380,7 @@ fn sync_only_semaphore_program_stays_on_pooled_path() {
 #[test]
 fn async_semaphore_wait_program_uses_request_owned_path() {
     let program =
-        compile("use ngx;\nlet s = ngx::semaphore::new(0);\nngx::semaphore::wait(s, null);\n");
+        compile("use ngx;\nlet s = ngx::semaphore::new(0);\nngx::semaphore::wait(s, ());\n");
     assert!(
         ngx_rustscript::config::program_requires_request_state(&program),
         "async semaphore wait must select the request-owned VM path"
@@ -391,7 +391,7 @@ fn async_semaphore_wait_program_uses_request_owned_path() {
 fn wait_acquires_an_available_permit_without_suspending() {
     shutdown_current();
     let status = Driver::start(compile(
-        "use ngx;\nlet s = ngx::semaphore::new(1);\nngx::semaphore::wait(s, null);\nngx::semaphore::count(s);\n",
+        "use ngx;\nlet s = ngx::semaphore::new(1);\nngx::semaphore::wait(s, ());\nngx::semaphore::count(s);\n",
     ))
     .handle();
     assert_eq!(
@@ -451,7 +451,7 @@ fn wait_reports_acquire_versus_timeout_to_the_script() {
     shutdown_current();
     assert_eq!(
         run_async_value(
-            "use ngx;\nlet s = ngx::semaphore::new(1);\nngx::semaphore::wait(s, null);\n"
+            "use ngx;\nlet s = ngx::semaphore::new(1);\nngx::semaphore::wait(s, ());\n"
         ),
         Value::Bool(true),
         "a free permit acquires without a timer"

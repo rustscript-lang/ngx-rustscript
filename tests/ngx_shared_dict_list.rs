@@ -18,6 +18,12 @@ use ngx_rustscript::shared_dict::{
 };
 use vm::{HostParamPassing, HostTypeSchema, Program, ResourceTypeKey, Value, Vm, VmStatus};
 
+/// Serializes tests that share process-global stub or zone state.
+fn zone_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 fn compile(source: &str) -> Arc<Program> {
     compile_rss_source(source).unwrap_or_else(|err| panic!("compile failed: {err}\n{source}"))
 }
@@ -66,6 +72,47 @@ fn expect_int(value: &Value) -> i64 {
     }
 }
 
+/// Unwraps a canonical guest `Option` carrier into its payload.
+fn option_payload(value: &Value) -> Option<Value> {
+    let (some, payload) = vm::option::payload(value).expect("Option carrier");
+    if some {
+        Some(payload.expect("Some payload").clone())
+    } else {
+        None
+    }
+}
+
+fn expect_option_number(value: &Value) -> Option<f64> {
+    option_payload(value).map(|payload| match payload {
+        Value::Int(number) => number as f64,
+        Value::Float(number) => number,
+        other => panic!("expected number payload, got {other:?}"),
+    })
+}
+
+fn expect_option_string(value: &Value) -> Option<String> {
+    option_payload(value).map(|payload| match payload {
+        Value::String(text) => (*text).clone(),
+        other => panic!("expected string payload, got {other:?}"),
+    })
+}
+
+/// Decodes one tagged `SharedValue` record.
+fn shared_value(value: &Value) -> Option<(String, Value)> {
+    let record = option_payload(value)?;
+    let kind = expect_string(map_get(&record, "kind"));
+    let payload = match kind.as_str() {
+        "bool" => option_payload(map_get(&record, "bool_value")),
+        "int" => option_payload(map_get(&record, "int_value")),
+        "float" => option_payload(map_get(&record, "float_value")),
+        "string" => option_payload(map_get(&record, "text_value")),
+        "bytes" => option_payload(map_get(&record, "bytes_value")),
+        other => panic!("unknown SharedValue kind {other}"),
+    }
+    .unwrap_or_else(|| panic!("{kind} record must carry its payload"));
+    Some((kind, payload))
+}
+
 fn expect_string(value: &Value) -> String {
     match value {
         Value::String(text) => (**text).clone(),
@@ -93,6 +140,7 @@ const LIST_HOSTS: &[&str] = &[
 
 #[test]
 fn list_and_maintenance_hosts_are_catalogued() {
+    let _guard = zone_lock();
     assert_eq!(
         production_runtime_host_names().len(),
         199,
@@ -177,11 +225,11 @@ fn list_and_maintenance_hosts_are_catalogued() {
                     .to_string()
             }
             NGX_SHARED_FLUSH_EXPIRED_NAME => {
-                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::flush_expired(d, null);\n"
+                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::flush_expired(d, ());\n"
                     .to_string()
             }
             NGX_SHARED_GET_KEYS_NAME => {
-                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::get_keys(d, null);\n"
+                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::get_keys(d, ());\n"
                     .to_string()
             }
             _ => unreachable!(),
@@ -191,6 +239,7 @@ fn list_and_maintenance_hosts_are_catalogued() {
 
 #[test]
 fn lpush_rpush_preserve_order_and_llen() {
+    let _guard = zone_lock();
     let result = eval(
         r#"
 use ngx;
@@ -201,8 +250,8 @@ ngx::shared::lpush(d, "q", "z");
 ngx::shared::llen(d, "q");
 "#,
     );
-    assert_eq!(expect_int(map_get(&result, "value")), 3);
-    assert_eq!(*map_get(&result, "error"), Value::Null);
+    assert_eq!(expect_option_number(map_get(&result, "value")), Some(3.0));
+    assert_eq!(option_payload(map_get(&result, "error")), None);
 
     let left = eval(
         r#"
@@ -214,7 +263,9 @@ ngx::shared::lpush(d, "q", "z");
 ngx::shared::lpop(d, "q");
 "#,
     );
-    assert_eq!(expect_string(map_get(&left, "value")), "z");
+    let (kind, payload) = shared_value(map_get(&left, "value")).expect("lpop value");
+    assert_eq!(kind, "string");
+    assert_eq!(expect_string(&payload), "z");
 
     let right = eval(
         r#"
@@ -226,11 +277,14 @@ ngx::shared::lpush(d, "q", "z");
 ngx::shared::rpop(d, "q");
 "#,
     );
-    assert_eq!(expect_string(map_get(&right, "value")), "b");
+    let (kind, payload) = shared_value(map_get(&right, "value")).expect("rpop value");
+    assert_eq!(kind, "string");
+    assert_eq!(expect_string(&payload), "b");
 }
 
 #[test]
 fn pop_and_llen_on_missing_key() {
+    let _guard = zone_lock();
     let llen = eval(
         r#"
 use ngx;
@@ -238,8 +292,8 @@ let d = ngx::shared::dict("dogs");
 ngx::shared::llen(d, "missing");
 "#,
     );
-    assert_eq!(expect_int(map_get(&llen, "value")), 0);
-    assert_eq!(*map_get(&llen, "error"), Value::Null);
+    assert_eq!(expect_option_number(map_get(&llen, "value")), Some(0.0));
+    assert_eq!(option_payload(map_get(&llen, "error")), None);
 
     let pop = eval(
         r#"
@@ -248,12 +302,13 @@ let d = ngx::shared::dict("dogs");
 ngx::shared::lpop(d, "missing");
 "#,
     );
-    assert_eq!(*map_get(&pop, "value"), Value::Null);
-    assert_eq!(*map_get(&pop, "error"), Value::Null);
+    assert_eq!(option_payload(map_get(&pop, "value")), None);
+    assert_eq!(option_payload(map_get(&pop, "error")), None);
 }
 
 #[test]
 fn last_pop_removes_the_list_key() {
+    let _guard = zone_lock();
     let result = eval(
         r#"
 use ngx;
@@ -263,55 +318,67 @@ ngx::shared::lpop(d, "q");
 ngx::shared::llen(d, "q");
 "#,
     );
-    assert_eq!(expect_int(map_get(&result, "value")), 0);
+    assert_eq!(expect_option_number(map_get(&result, "value")), Some(0.0));
 }
 
 #[test]
 fn scalar_list_conflict_returns_structured_error_and_does_not_corrupt() {
+    let _guard = zone_lock();
     let push = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "k", "scalar", null, 9);
+ngx::shared::set(d, "k", "scalar", (), 9);
 ngx::shared::lpush(d, "k", "x");
 "#,
     );
-    assert_eq!(*map_get(&push, "value"), Value::Null);
-    assert_eq!(expect_string(map_get(&push, "error")), "value not a list");
+    assert_eq!(option_payload(map_get(&push, "value")), None);
+    assert_eq!(
+        expect_option_string(map_get(&push, "error")).expect("error is Some"),
+        "value not a list"
+    );
 
     let got = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "k", "scalar", null, 9);
+ngx::shared::set(d, "k", "scalar", (), 9);
 ngx::shared::lpush(d, "k", "x");
 ngx::shared::get(d, "k");
 "#,
     );
-    assert_eq!(expect_string(map_get(&got, "value")), "scalar");
+    let (kind, payload) = shared_value(map_get(&got, "value")).expect("get value");
+    assert_eq!(kind, "string");
+    assert_eq!(expect_string(&payload), "scalar");
     assert_eq!(expect_int(map_get(&got, "flags")), 9);
 
     let llen = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "k", "scalar", null, null);
+ngx::shared::set(d, "k", "scalar", (), ());
 ngx::shared::llen(d, "k");
 "#,
     );
-    assert_eq!(*map_get(&llen, "value"), Value::Null);
-    assert_eq!(expect_string(map_get(&llen, "error")), "value not a list");
+    assert_eq!(option_payload(map_get(&llen, "value")), None);
+    assert_eq!(
+        expect_option_string(map_get(&llen, "error")).expect("error is Some"),
+        "value not a list"
+    );
 
     let pop = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "k", "scalar", null, null);
+ngx::shared::set(d, "k", "scalar", (), ());
 ngx::shared::rpop(d, "k");
 "#,
     );
-    assert_eq!(*map_get(&pop, "value"), Value::Null);
-    assert_eq!(expect_string(map_get(&pop, "error")), "value not a list");
+    assert_eq!(option_payload(map_get(&pop, "value")), None);
+    assert_eq!(
+        expect_option_string(map_get(&pop, "error")).expect("error is Some"),
+        "value not a list"
+    );
 
     let list_get = eval(
         r#"
@@ -321,9 +388,9 @@ ngx::shared::lpush(d, "q", 1);
 ngx::shared::get(d, "q");
 "#,
     );
-    assert_eq!(*map_get(&list_get, "value"), Value::Null);
+    assert_eq!(option_payload(map_get(&list_get, "value")), None);
     assert_eq!(
-        expect_string(map_get(&list_get, "error")),
+        expect_option_string(map_get(&list_get, "error")).expect("error is Some"),
         "value is a list"
     );
 
@@ -332,24 +399,28 @@ ngx::shared::get(d, "q");
 use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::lpush(d, "q", 1);
-ngx::shared::incr(d, "q", 1, null, null);
+ngx::shared::incr(d, "q", 1, (), ());
 "#,
     );
-    assert_eq!(expect_string(map_get(&incr, "error")), "not a number");
+    assert_eq!(
+        expect_option_string(map_get(&incr, "error")).expect("error is Some"),
+        "not a number"
+    );
     let still = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::lpush(d, "q", 1);
-ngx::shared::incr(d, "q", 1, null, null);
+ngx::shared::incr(d, "q", 1, (), ());
 ngx::shared::llen(d, "q");
 "#,
     );
-    assert_eq!(expect_int(map_get(&still, "value")), 1);
+    assert_eq!(expect_option_number(map_get(&still, "value")), Some(1.0));
 }
 
 #[test]
 fn list_push_rejects_bool_and_null() {
+    let _guard = zone_lock();
     let bad = eval(
         r#"
 use ngx;
@@ -357,20 +428,27 @@ let d = ngx::shared::dict("dogs");
 ngx::shared::lpush(d, "q", true);
 "#,
     );
-    assert_eq!(*map_get(&bad, "value"), Value::Null);
-    assert_eq!(expect_string(map_get(&bad, "error")), "bad value type");
+    assert_eq!(option_payload(map_get(&bad, "value")), None);
+    assert_eq!(
+        expect_option_string(map_get(&bad, "error")).expect("error is Some"),
+        "bad value type"
+    );
     let nil = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::rpush(d, "q", null);
+ngx::shared::rpush(d, "q", ());
 "#,
     );
-    assert_eq!(expect_string(map_get(&nil, "error")), "bad value type");
+    assert_eq!(
+        expect_option_string(map_get(&nil, "error")).expect("error is Some"),
+        "bad value type"
+    );
 }
 
 #[test]
 fn list_push_is_allocation_transactional() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("tiny", 80);
     let failed = shared_dict::dict_lpush("tiny", b"q", DictValue::String("x".repeat(200))).unwrap();
@@ -383,6 +461,7 @@ fn list_push_is_allocation_transactional() {
 
 #[test]
 fn list_length_is_bounded() {
+    let _guard = zone_lock();
     assert_eq!(MAX_LIST_LEN, 65_536);
     reset_process_zones();
     install_process_zone("dogs", 16 * 1024 * 1024);
@@ -398,6 +477,7 @@ fn list_length_is_bounded() {
 
 #[test]
 fn flush_all_marks_expired_without_requiring_delete() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("dogs", 64 * 1024);
     set_clock_ms(Some(1_000_000));
@@ -426,6 +506,7 @@ fn flush_all_marks_expired_without_requiring_delete() {
 
 #[test]
 fn flush_expired_honors_max_and_hard_cap() {
+    let _guard = zone_lock();
     assert_eq!(MAX_FLUSH_BATCH, 1024);
     reset_process_zones();
     install_process_zone("dogs", 256 * 1024);
@@ -452,6 +533,7 @@ fn flush_expired_honors_max_and_hard_cap() {
 
 #[test]
 fn get_keys_skips_expired_and_obeys_hard_cap() {
+    let _guard = zone_lock();
     assert_eq!(MAX_GET_KEYS, 1024);
     reset_process_zones();
     install_process_zone("dogs", 512 * 1024);
@@ -485,9 +567,9 @@ fn get_keys_skips_expired_and_obeys_hard_cap() {
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "a", 1, null, null);
-ngx::shared::set(d, "b", 2, null, null);
-ngx::shared::set(d, "c", 3, null, null);
+ngx::shared::set(d, "a", 1, (), ());
+ngx::shared::set(d, "b", 2, (), ());
+ngx::shared::set(d, "c", 3, (), ());
 ngx::shared::get_keys(d, 1);
 "#,
     );
@@ -513,27 +595,31 @@ ngx::shared::get_keys(d, 1);
 
 #[test]
 fn set_replaces_list_without_leaving_list_nodes() {
+    let _guard = zone_lock();
     let got = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::lpush(d, "k", "x");
 ngx::shared::lpush(d, "k", "y");
-ngx::shared::set(d, "k", "scalar", null, null);
+ngx::shared::set(d, "k", "scalar", (), ());
 ngx::shared::get(d, "k");
 "#,
     );
-    assert_eq!(expect_string(map_get(&got, "value")), "scalar");
+    let (kind, payload) = shared_value(map_get(&got, "value")).expect("get value");
+    assert_eq!(kind, "string");
+    assert_eq!(expect_string(&payload), "scalar");
 }
 
 #[test]
 fn list_hosts_do_not_require_request_state() {
+    let _guard = zone_lock();
     let program = compile(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
 ngx::shared::lpush(d, "q", 1);
-ngx::shared::get_keys(d, null);
+ngx::shared::get_keys(d, ());
 "#,
     );
     assert!(
@@ -544,6 +630,7 @@ ngx::shared::get_keys(d, null);
 
 #[test]
 fn list_ops_keep_sibling_scalar_lookup() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("dogs", 64 * 1024);
     shared_dict::dict_store(
@@ -579,6 +666,7 @@ fn list_ops_keep_sibling_scalar_lookup() {
 
 #[test]
 fn get_keys_is_read_only_and_preserves_every_live_key() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("dogs", 64 * 1024);
     set_clock_ms(Some(3_000_000));
@@ -612,6 +700,7 @@ fn get_keys_is_read_only_and_preserves_every_live_key() {
 
 #[test]
 fn get_keys_bounds_visits_independently_of_result_hits() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("dogs", 2 * 1024 * 1024);
     set_clock_ms(Some(4_000_000));
@@ -650,6 +739,7 @@ fn get_keys_bounds_visits_independently_of_result_hits() {
 
 #[test]
 fn flush_expired_bounds_visits_independently_of_hits() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("dogs", 2 * 1024 * 1024);
     set_clock_ms(Some(5_000_000));
@@ -699,6 +789,7 @@ fn flush_expired_bounds_visits_independently_of_hits() {
 
 #[test]
 fn flush_all_repeated_calls_complete_beyond_batch() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("dogs", 4 * 1024 * 1024);
     set_clock_ms(Some(6_000_000));

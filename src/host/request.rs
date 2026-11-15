@@ -17,7 +17,7 @@ use vm::HostModuleDescriptor;
 use vm::{HostNamedStruct, HostStructField, HostTypeSchema, Value, VmError, VmMap};
 
 use super::super::VmResult;
-use super::{CallOutcome, IntoHostCallOutcome};
+use super::{CallOutcome, IntoHostCallOutcome, option_value};
 use crate::host::{
     current_identity, with_current_request, with_current_request_mut, ScopeError,
 };
@@ -36,14 +36,38 @@ fn ret<T: IntoHostCallOutcome>(value: T) -> VmResult<CallOutcome> {
 
 #[derive(Debug)]
 struct RequestHeadersResult {
-    headers: VmMap,
+    headers: Vec<(String, String)>,
     truncated: bool,
 }
 
 #[derive(Debug)]
 struct RequestArgsResult {
-    args: VmMap,
+    args: Vec<(String, Option<String>)>,
     truncated: bool,
+}
+
+/// One request header entry; duplicate names repeat the entry.
+fn header_entry_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "HeaderEntry",
+        vec![
+            HostStructField::new("name", HostTypeSchema::String),
+            HostStructField::new("value", HostTypeSchema::String),
+        ],
+    )
+}
+
+fn arg_entry_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "ArgEntry",
+        vec![
+            HostStructField::new("name", HostTypeSchema::String),
+            HostStructField::new(
+                "value",
+                HostTypeSchema::Option(Box::new(HostTypeSchema::String)),
+            ),
+        ],
+    )
 }
 
 impl HostNamedStruct for RequestHeadersResult {
@@ -53,7 +77,7 @@ impl HostNamedStruct for RequestHeadersResult {
         vec![
             HostStructField::new(
                 "headers",
-                HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+                HostTypeSchema::Array(Box::new(header_entry_schema())),
             ),
             HostStructField::new("truncated", HostTypeSchema::Bool),
         ]
@@ -67,32 +91,44 @@ impl HostNamedStruct for RequestArgsResult {
         vec![
             HostStructField::new(
                 "args",
-                HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown)),
+                HostTypeSchema::Array(Box::new(arg_entry_schema())),
             ),
             HostStructField::new("truncated", HostTypeSchema::Bool),
         ]
     }
 }
 
-fn map_envelope_outcome(field: &'static str, values: VmMap, truncated: bool) -> CallOutcome {
+fn envelope_outcome(field: &'static str, values: Value, truncated: bool) -> CallOutcome {
     let mut carrier = VmMap::new();
-    carrier.insert(
-        Value::string(field),
-        Value::Map(std::sync::Arc::new(values)),
-    );
+    carrier.insert(Value::string(field), values);
     carrier.insert(Value::string("truncated"), Value::Bool(truncated));
     carrier.into_host_call_outcome()
 }
 
 impl IntoHostCallOutcome for RequestHeadersResult {
     fn into_host_call_outcome(self) -> CallOutcome {
-        map_envelope_outcome("headers", self.headers, self.truncated)
+        let entries = self
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                Value::map(vec![
+                    (Value::string("name"), Value::string(name)),
+                    (Value::string("value"), Value::string(value)),
+                ])
+            })
+            .collect();
+        envelope_outcome("headers", Value::array(entries), self.truncated)
     }
 }
 
 impl IntoHostCallOutcome for RequestArgsResult {
     fn into_host_call_outcome(self) -> CallOutcome {
-        map_envelope_outcome("args", self.args, self.truncated)
+        let entries = self
+            .args
+            .iter()
+            .map(|(name, value)| super::codec::arg_entry(name, value.as_deref()))
+            .collect();
+        envelope_outcome("args", Value::array(entries), self.truncated)
     }
 }
 
@@ -240,23 +276,6 @@ fn clamp_count(value: &Value, name: &str, default: i64, hard: i64) -> VmResult<u
 }
 
 
-fn insert_decoded_arg(args: &mut VmMap, key: String, value: Value) {
-    let key_value = Value::string(key);
-    match args.get(&key_value) {
-        None => {
-            args.insert(key_value, value);
-        }
-        Some(Value::Array(existing)) => {
-            let mut items = existing.as_ref().clone();
-            items.push(value);
-            args.insert(key_value, Value::array(items));
-        }
-        Some(previous) => {
-            let previous = previous.clone();
-            args.insert(key_value, Value::array(vec![previous, value]));
-        }
-    }
-}
 
 fn http_version_number(version: ngx_uint_t) -> Option<f64> {
     if version == NGX_HTTP_VERSION_9 as ngx_uint_t {
@@ -286,8 +305,8 @@ fn header_error(message: &str) -> VmError {
     VmError::HostError(format!("ngx::req::get_headers {message}"))
 }
 
-fn collect_headers(list: &ngx_list_t, max: usize, raw: bool) -> VmResult<(VmMap, bool)> {
-    let mut headers = VmMap::new();
+fn collect_headers(list: &ngx_list_t, max: usize, raw: bool) -> VmResult<(Vec<(String, String)>, bool)> {
+    let mut headers: Vec<(String, String)> = Vec::new();
     let mut seen = 0usize;
     let mut truncated = false;
     let mut total_bytes = 0usize;
@@ -364,11 +383,10 @@ fn collect_headers(list: &ngx_list_t, max: usize, raw: bool) -> VmResult<(VmMap,
                 total_bytes = total_bytes
                     .saturating_add(key_bytes.len())
                     .saturating_add(value_bytes.len());
-                insert_decoded_arg(
-                    &mut headers,
+                headers.push((
                     bytes_as_string(key_bytes),
-                    Value::string(bytes_as_string(value_bytes)),
-                );
+                    bytes_as_string(value_bytes),
+                ));
                 seen += 1;
             }
         }
@@ -732,7 +750,11 @@ pub fn get_method() -> VmResult<CallOutcome> {
 /// HTTP version as 0.9/1.0/1.1/2.0/3.0, or `null` if unrecognized.
 #[pd_host_function(name = "ngx::req::http_version", contract = crate::host::catalog::ngx_req_http_version_contract)]
 pub fn http_version() -> VmResult<CallOutcome> {
-    with_request(|request| ret(http_version_number(request.as_ref().http_version)))
+    with_request(|request| {
+        ret(option_value(
+            http_version_number(request.as_ref().http_version).map(Value::Float),
+        ))
+    })
 }
 
 /// Original request header bytes. `no_request_line` is `null`/`false`/`true`.

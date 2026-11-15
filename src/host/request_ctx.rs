@@ -18,7 +18,7 @@ use vm::HostModuleDescriptor;
 use vm::{Value, VmError, VmMap};
 
 use super::super::VmResult;
-use super::{CallOutcome, IntoHostCallOutcome};
+use super::{CallOutcome, IntoHostCallOutcome, option_value};
 use crate::host::{current_identity, with_current_ctx, with_current_ctx_mut, ScopeError};
 
 /// Maximum number of top-level ctx keys.
@@ -398,27 +398,27 @@ fn ret(value: impl IntoHostCallOutcome) -> VmResult<CallOutcome> {
 pub fn get(key: &str) -> VmResult<CallOutcome> {
     let identity = current_identity().map_err(scope_err)?;
     let value = with_current_ctx(identity, |ctx| ctx.get(key)).map_err(scope_err)?;
-    ret(value)
+    ret(option_value(ctx_string_value(value, "ngx::ctx::get")?))
 }
 
-/// OpenResty-adapted `ngx.ctx[key] = value`. Returns `null`.
+/// OpenResty-adapted `ngx.ctx[key] = value`. Returns `()`.
 #[pd_host_function(name = "ngx::ctx::set", contract = crate::host::catalog::ngx_ctx_set_contract)]
-pub fn set(key: &str, value: &Value) -> VmResult<CallOutcome> {
+pub fn set(key: &str, value: String) -> VmResult<CallOutcome> {
     let identity = current_identity().map_err(scope_err)?;
-    with_current_ctx_mut(identity, |ctx| ctx.set(key, value))
+    with_current_ctx_mut(identity, |ctx| ctx.set(key, &Value::string(value)))
         .map_err(scope_err)?
         .map_err(host_err)?;
     ret(())
 }
 
-/// Adapted delete: returns the removed value, or `null` if missing.
+/// Adapted delete: returns the removed value, or `Option::None` if missing.
 #[pd_host_function(name = "ngx::ctx::delete", contract = crate::host::catalog::ngx_ctx_delete_contract)]
 pub fn delete(key: &str) -> VmResult<CallOutcome> {
     let identity = current_identity().map_err(scope_err)?;
     let value = with_current_ctx_mut(identity, |ctx| ctx.delete(key))
         .map_err(scope_err)?
         .map_err(host_err)?;
-    ret(value)
+    ret(option_value(ctx_string_value(value, "ngx::ctx::delete")?))
 }
 
 /// Clear every ctx entry. Returns `null`.
@@ -427,6 +427,20 @@ pub fn clear() -> VmResult<CallOutcome> {
     let identity = current_identity().map_err(scope_err)?;
     with_current_ctx_mut(identity, |ctx| ctx.clear()).map_err(scope_err)?;
     ret(())
+}
+
+/// Project a stored ctx value onto the typed guest contract.
+///
+/// Guests can only store `string` values, so anything else is a host-side
+/// invariant violation rather than a guest value.
+fn ctx_string_value(value: Value, name: &str) -> VmResult<Option<Value>> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(text) => Ok(Some(Value::String(text))),
+        _ => Err(VmError::HostError(format!(
+            "{name} ctx values must be strings"
+        ))),
+    }
 }
 
 const REQUEST_CTX_HOST_MODULE_FUNCTIONS: &[fn() -> vm::HostFunctionDescriptor] = &[

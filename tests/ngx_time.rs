@@ -15,6 +15,12 @@ use ngx_rustscript::host::{
 };
 use vm::{Program, Value, Vm, VmStatus};
 
+/// Serializes tests that share process-global stub or zone state.
+fn clock_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 fn compile(source: &str) -> Arc<Program> {
     compile_rss_source(source).unwrap_or_else(|err| panic!("compile failed: {err}"))
 }
@@ -48,6 +54,23 @@ fn expect_string(value: Value) -> String {
     }
 }
 
+/// Unwraps a canonical guest `Option` carrier into its payload.
+fn option_payload(value: &Value) -> Option<Value> {
+    let (some, payload) = vm::option::payload(value).expect("Option carrier");
+    if some {
+        Some(payload.expect("Some payload").clone())
+    } else {
+        None
+    }
+}
+
+fn expect_option_int(value: Value) -> Option<i64> {
+    option_payload(&value).map(|payload| match payload {
+        Value::Int(number) => number,
+        other => panic!("expected int payload, got {other:?}"),
+    })
+}
+
 fn expect_int(value: Value) -> i64 {
     match value {
         Value::Int(number) => number,
@@ -69,6 +92,7 @@ fn reset_clock(sec: i64, msec: u32) {
 
 #[test]
 fn http_cookie_and_parse_time_are_fixed() {
+    let _guard = clock_lock();
     assert_eq!(
         expect_string(eval("use ngx;\nngx::http_time(1290079655);\n")),
         "Thu, 18 Nov 2010 11:27:35 GMT"
@@ -91,25 +115,30 @@ fn http_cookie_and_parse_time_are_fixed() {
 
 #[test]
 fn parse_http_time_accepts_rfc850_and_asctime() {
+    let _guard = clock_lock();
     assert_eq!(
-        expect_int(eval(
+        expect_option_int(eval(
             "use ngx;\nngx::parse_http_time(\"Thursday, 18-Nov-10 11:27:35 GMT\");\n"
         )),
-        1290079655
+        Some(1290079655)
     );
     assert_eq!(
-        expect_int(eval(
+        expect_option_int(eval(
             "use ngx;\nngx::parse_http_time(\"Thu Nov 18 11:27:35 2010\");\n"
         )),
-        1290079655
+        Some(1290079655)
     );
 }
 
 #[test]
 fn parse_http_time_rejects_pre_1970_and_over_128_bytes() {
+    let _guard = clock_lock();
     assert_eq!(
-        eval("use ngx;\nngx::parse_http_time(\"Wed, 31 Dec 1969 23:59:59 GMT\");\n"),
-        Value::Null
+        expect_option_int(eval(
+            "use ngx;\nngx::parse_http_time(\"Wed, 31 Dec 1969 23:59:59 GMT\");\n"
+        )),
+        None,
+        "pre-1970 dates are Option::None"
     );
     let over = "x".repeat(129);
     let err = eval_err(&format!("use ngx;\nngx::parse_http_time(\"{over}\");\n"));
@@ -122,6 +151,7 @@ fn parse_http_time_rejects_pre_1970_and_over_128_bytes() {
 
 #[test]
 fn time_is_int_and_now_is_float_from_the_same_cache() {
+    let _guard = clock_lock();
     let seconds = expect_int(eval("use ngx;\nngx::time();\n"));
     let now = expect_float(eval("use ngx;\nngx::now();\n"));
     assert!(
@@ -137,6 +167,7 @@ fn time_is_int_and_now_is_float_from_the_same_cache() {
 
 #[test]
 fn today_localtime_and_utctime_use_fixed_formats() {
+    let _guard = clock_lock();
     let today = expect_string(eval("use ngx;\nngx::today();\n"));
     assert!(
         today.chars().count() == 10 && today.as_bytes()[4] == b'-' && today.as_bytes()[7] == b'-',
@@ -156,6 +187,7 @@ fn today_localtime_and_utctime_use_fixed_formats() {
 
 #[test]
 fn intra_script_now_reads_share_the_cached_snapshot() {
+    let _guard = clock_lock();
     reset_clock(1_700_000_000, 250);
     let value = eval("use ngx;\nlet a = ngx::now();\nlet b = ngx::now();\na == b;\n");
     assert_eq!(value, Value::Bool(true));
@@ -164,6 +196,7 @@ fn intra_script_now_reads_share_the_cached_snapshot() {
 
 #[test]
 fn event_boundary_and_update_time_refresh_cached_clock_across_vms() {
+    let _guard = clock_lock();
     reset_clock(1_700_000_000, 0);
     let first = expect_float(eval("use ngx;\nngx::now();\n"));
     assert!((first - 1_700_000_000.0).abs() < f64::EPSILON);
@@ -196,6 +229,7 @@ fn event_boundary_and_update_time_refresh_cached_clock_across_vms() {
 
 #[test]
 fn access_program_turn_refreshes_cached_clock_without_direct_hook() {
+    let _guard = clock_lock();
     override_os_clock(1_710_000_000, 0);
     let primed = expect_float(eval("use ngx;\nngx::update_time();\nngx::now();\n"));
     assert!((primed - 1_710_000_000.0).abs() < f64::EPSILON);
@@ -221,6 +255,7 @@ fn access_program_turn_refreshes_cached_clock_without_direct_hook() {
 
 #[test]
 fn async_ready_event_turn_refreshes_cached_clock_without_direct_hook() {
+    let _guard = clock_lock();
     override_os_clock(1_720_000_000, 0);
     let primed = expect_float(eval("use ngx;\nngx::update_time();\nngx::now();\n"));
     assert!((primed - 1_720_000_000.0).abs() < f64::EPSILON);
@@ -241,6 +276,7 @@ fn async_ready_event_turn_refreshes_cached_clock_without_direct_hook() {
 
 #[test]
 fn update_time_samples_os_immediately_without_event_turn() {
+    let _guard = clock_lock();
     override_os_clock(1_730_000_000, 0);
     let primed = expect_float(eval("use ngx;\nngx::update_time();\nngx::now();\n"));
     assert!((primed - 1_730_000_000.0).abs() < f64::EPSILON);

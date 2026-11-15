@@ -60,20 +60,21 @@ Fixed envelopes are catalog `HostTypeSchema::Named` and Rust
 | `SharedIncrResult` | `ngx::shared::incr` |
 | `SharedNumberResult` | `ngx::shared::{ttl,lpush,rpush,llen}` |
 
-Guest scripts use the host named types. Inner `value` fields on shared
-results stay `Unknown` because stored dictionary values are heterogeneous.
+Guest scripts use the host named types. Shared dictionary values are tagged
+`SharedValue` records and absence is `Option::None`.
 
-## Intentional dynamic slots
+## Intentional dynamic parameters
 
-Positions that stay `HostTypeSchema::Unknown` or `Map(Unknown)` are
-listed exactly in `tests/host_catalog.rs`
-(`intentional_dynamic_slots_match_the_allowlist`). Typical reasons:
+Only host **parameters** may stay `HostTypeSchema::Unknown`; they are listed
+exactly in `tests/host_catalog.rs`
+(`exact_dynamic_unknown_and_map_slots_are_allowlisted`). Typical reasons:
 
-- optional trailing OpenResty arguments (`null` or several runtime shapes)
-- open dictionaries (`ngx::encode_args` `args`, header-set maps, ctx payloads)
-- heterogeneous stored shared-dict values and `ngx::header::get` (string,
-  string array, or null)
+- optional OpenResty trailing arguments (`()` or several runtime shapes)
+- open dictionaries (`ngx::encode_args` `args`, header-set maps)
+- mixed printable or buffer payloads (`print`, `say`, socket sends)
 
-Do not add a new `Unknown` or `Map(Unknown)` return for a fixed outer
-shape. Add a named struct, bump `NGX_HOST_CATALOG_SCHEMA_VERSION`, and
-update the fingerprint goldens.
+No host **output** may carry `Unknown`, `Null`, or the legacy `Optional`
+schema: RustScript rejects such a return at compile time. Represent absence
+with `Option<T>`, a void result with `()`, a fixed shape with a named struct,
+and an open-keyed bag with a typed entry array. Add a named struct, bump
+`NGX_HOST_CATALOG_SCHEMA_VERSION`, and update the fingerprint goldens.

@@ -227,7 +227,7 @@ impl RequestExecutionScope {
     /// Uses the outer request pointer only when that frame has the exact same
     /// generation-safe identity and a non-null pointer. A mismatched parent
     /// identity never authorizes its pointer under the VM identity. The ctx
-    /// and disposition pointers are taken from the arguments when non-null,
+    /// and disposition pointers are taken from the arguments when non-(),
     /// otherwise from a matching outer frame.
     pub(crate) fn enter_for_vm(
         identity: RequestIdentity,
@@ -482,7 +482,7 @@ pub fn current_request_live() -> Result<bool, ScopeError> {
     current_frame().map(|frame| !frame.request.is_null())
 }
 
-#[allow(dead_code)] // crate-private helper; tests assert it never returns Some(null)
+#[allow(dead_code)] // crate-private helper; tests assert it never returns Some(())
 pub(crate) fn current_request_ptr() -> Option<*mut ngx_http_request_t> {
     current_frame().ok().and_then(|frame| {
         if frame.request.is_null() {

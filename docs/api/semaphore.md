@@ -23,8 +23,8 @@ only calls the eventfd-backed waker of the current request.
 | OpenResty API | RustScript callable | Status | Phases | Yield | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `ngx.semaphore.new` | `ngx::semaphore::new(count) -> resource` | adapted | `PHASE_SEMAPHORE` | sync | `count` int `0..=1000000`; ≤1024 live semaphores per worker | Worker-owned object, not userdata; the script sees an `i64` handle for its own VM table. | `tests/ngx_semaphore.rs`, `src/semaphore.rs` |
-| `sem:wait` | `ngx::semaphore::wait(sem, timeout) -> bool` | adapted | `PHASE_SEMAPHORE` | Waiting | `timeout` seconds; `null` = no timer, `0` = immediate check; shares the 1024 in-flight wait cap | Returns `true` on acquire and `false` on timeout instead of OpenResty's `nil, "timeout"` pair. `null` (not `0`) means "wait forever". FIFO: the oldest waiter wins each permit. | `tests/ngx_semaphore.rs`, `src/semaphore.rs` |
-| `sem:post` | `ngx::semaphore::post(sem, count) -> null` | adapted | `PHASE_SEMAPHORE` | sync | `count` int `0..=1000000` or `null` (=1); counter ceiling 1000000 | Posting past the ceiling is a `HostError` instead of silently saturating. `0` wakes nobody. | `tests/ngx_semaphore.rs`, `src/semaphore.rs` |
+| `sem:wait` | `ngx::semaphore::wait(sem, timeout) -> bool` | adapted | `PHASE_SEMAPHORE` | Waiting | `timeout` seconds; `()` = no timer, `0` = immediate check; shares the 1024 in-flight wait cap | Returns `true` on acquire and `false` on timeout instead of OpenResty's `nil, "timeout"` pair. `()` (not `0`) means "wait forever". FIFO: the oldest waiter wins each permit. | `tests/ngx_semaphore.rs`, `src/semaphore.rs` |
+| `sem:post` | `ngx::semaphore::post(sem, count) -> ()` | adapted | `PHASE_SEMAPHORE` | sync | `count` int `0..=1000000` or `()` (=1); counter ceiling 1000000 | Posting past the ceiling is a `HostError` instead of silently saturating. `0` wakes nobody. | `tests/ngx_semaphore.rs`, `src/semaphore.rs` |
 | `sem:count` | `ngx::semaphore::count(sem) -> int` | adapted | `PHASE_SEMAPHORE` | sync | — | Matches OpenResty: permits ready minus queued waiters, so a negative value is the FIFO wait depth. | `tests/ngx_semaphore.rs`, `src/semaphore.rs` |
 
 `PHASE_SEMAPHORE` is `access` + `content` only. `log_by_rss_file` fails
@@ -37,13 +37,13 @@ the closed Log allowlist also rejects the family and capability.
   invalid counts, and a worker already holding 1024 live semaphores, fail
   with a named `HostError` at request time.
 - `wait(sem, timeout)`: `timeout` is a number of seconds (fractions
-  allowed). `null` waits without arming a timer (wait forever); `0` is an
+  allowed). `()` waits without arming a timer (wait forever); `0` is an
   immediate, non-blocking check that returns `false` when no permit is
   free; a positive number arms the owned timeout. Negative, `NaN`,
   infinite, and non-number timeouts are rejected before the future is
-  submitted. RustScript adds `null` for an unbounded wait; OpenResty and
+  submitted. RustScript adds `()` for an unbounded wait; OpenResty and
   RustScript both use `0` for the immediate attempt.
-- `post(sem, count)`: `count` is an integer or `null` (one permit).
+- `post(sem, count)`: `count` is an integer or `()` (one permit).
   Negative, fractional, and non-number counts are rejected. `0` is a
   no-op. `count + current` above 1000000 is a `HostError`.
 - `count(sem)`: read-only.

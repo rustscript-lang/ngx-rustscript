@@ -488,7 +488,7 @@ Public callables: `ngx::timer::at(seconds, callback)`,
 `ngx::timer::running_count()`. The bare `ngx::timer` marker is **not** a
 callable. Access + content only; Log fails configuration compile.
 
-- `at`/`every` declare their callback as `fn(bool) -> unknown` with
+- `at`/`every` declare their callback as `fn(bool) -> ()` with
   `HostParamPassing::TakeOwned` and register an exact owned entry; the
   callback return value is discarded. Seconds are checked into a `Duration`
   (negative, NaN, infinite, and zero `every` intervals are rejected).

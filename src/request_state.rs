@@ -1343,7 +1343,7 @@ mod tests {
         let baseline = live_owned_entry_count();
 
         {
-            let mut driver = Driver::new(compile("use ngx;\nngx::ctx::set(\"k\", 1);\n"), 1);
+            let mut driver = Driver::new(compile("use ngx;\nngx::ctx::set(\"k\", \"1\");\n"), 1);
             assert_eq!(driver.handle(), AccessStatus::Ok);
             assert!(live_owned_entry_count() > baseline);
             assert!(driver.cleanup().is_none());
@@ -1352,15 +1352,17 @@ mod tests {
         assert_eq!(live_owned_entry_count(), baseline);
 
         {
-            let mut driver =
-                Driver::new(compile("use ngx;\nngx::ctx::set(\"k\", 1);\n1 / 0;\n"), 2);
+            let mut driver = Driver::new(
+                compile("use ngx;\nngx::ctx::set(\"k\", \"1\");\n1 / 0;\n"),
+                2,
+            );
             assert_eq!(driver.handle(), AccessStatus::Error500);
             assert!(live_owned_entry_count() > baseline);
             drop(driver);
         }
         assert_eq!(live_owned_entry_count(), baseline);
 
-        let sleeping = compile("use ngx;\nngx::ctx::set(\"k\", 1);\nngx::sleep_ms(80);\n");
+        let sleeping = compile("use ngx;\nngx::ctx::set(\"k\", \"1\");\nngx::sleep_ms(80);\n");
         {
             let mut driver = Driver::new(sleeping.clone(), 3);
             assert_eq!(driver.handle(), AccessStatus::Again);
@@ -1391,10 +1393,10 @@ mod tests {
         let program = compile(
             r#"
 use ngx;
-if ngx::ctx::get("k") != null {
+if ngx::ctx::get("k").unwrap_or("") != "" {
     1 / 0;
 }
-ngx::ctx::set("k", 1);
+ngx::ctx::set("k", "1");
 "#,
         );
         let mut first = Driver::new(program.clone(), 7);
@@ -1558,7 +1560,7 @@ ngx::ctx::set("k", 1);
 
         assert_default_policy_denies(
             &format!(
-                "use io;\nlet handle = io::open({:?}, \"r\");\nio::close(handle);\n",
+                "use io;\nlet handle = io::open({:?}, \"r\");\n",
                 input.to_string_lossy()
             ),
             "outside the allowed roots",
@@ -1569,7 +1571,7 @@ ngx::ctx::set("k", 1);
     #[test]
     fn default_standard_host_policy_denies_http() {
         assert_default_policy_denies(
-            "use http;\nhttp::client::request({\"method\": \"GET\", \"url\": \"http://127.0.0.1:9/\"});\n",
+            "use http;\nlet request = http::request::new(\"GET\", \"http://127.0.0.1:9/\");\nhttp::client::request(request);\n",
             "scheme 'http' is not allowed",
         );
     }
@@ -1577,7 +1579,7 @@ ngx::ctx::set("k", 1);
     #[test]
     fn default_standard_host_policy_denies_sqlite() {
         assert_default_policy_denies(
-            "use sqlite;\nlet db = sqlite::open({\"path\": \"state.db\", \"mode\": \"read_write_create\"});\nsqlite::close(db);\n",
+            "use sqlite;\nlet db = sqlite::open({path: Option::Some(\"state.db\"), mode: Option::Some(\"read_write_create\")});\nsqlite::close(db);\n",
             "database root is not configured",
         );
     }
@@ -1593,7 +1595,7 @@ ngx::ctx::set("k", 1);
         let input = root.join("input.txt");
         std::fs::write(&input, "policy-ok").expect("write input");
         let source = format!(
-            "use io;\nlet handle = io::open({:?}, \"r\");\nlet text = io::read_all(handle);\nio::close(handle);\nif text != \"policy-ok\" {{ 1 / 0; }}\n",
+            "use io;\nfn read(path: string) -> Result<string, string> {{\n    let handle = io::open(path, \"r\")?;\n    let text = io::read_all(handle)?;\n    io::close(handle)?;\n    Result::Ok(text)\n}}\nlet read_result = read({:?});\nlet text = match read_result {{\n    Result::Ok(text) => text,\n    Result::Err(message) => message\n}};\nif text != \"policy-ok\" {{ 1 / 0; }}\n",
             input.to_string_lossy()
         );
         let mut policy = StandardHostPolicy::fail_closed();
@@ -1648,7 +1650,7 @@ ngx::ctx::set("k", 1);
         let mut content = worker
             .bind_phase_exec(
                 compile(
-                    "use ngx;\nngx::ctx::set(\"c\", ngx::ctx::get(\"k\"));\nngx::sleep_ms(5);\n",
+                    "use ngx;\nngx::ctx::set(\"c\", ngx::ctx::get(\"k\").unwrap_or(\"\"));\nngx::sleep_ms(5);\n",
                 ),
                 1,
                 NgxPhase::Content,
@@ -1711,7 +1713,7 @@ ngx::ctx::set("k", 1);
             .expect("bind access");
         let mut content = worker
             .bind_phase_exec(
-                compile("use ngx;\nngx::ctx::set(\"c\", ngx::ctx::get(\"k\"));\n"),
+                compile("use ngx;\nngx::ctx::set(\"c\", ngx::ctx::get(\"k\").unwrap_or(\"\"));\n"),
                 7,
                 NgxPhase::Content,
             )

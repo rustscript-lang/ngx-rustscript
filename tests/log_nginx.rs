@@ -331,7 +331,7 @@ fn log_script() -> &'static str {
     r#"
 use ngx;
 ngx::log(ngx::log_level::notice(), "LOG_PHASE=" + ngx::get_phase());
-ngx::log(ngx::log_level::notice(), "LOG_MARK=" + ngx::encode_args({ uri: ngx::var::get("uri") }));
+ngx::log(ngx::log_level::notice(), "LOG_MARK=" + ngx::encode_args({ uri: ngx::var::get("uri").unwrap_or("") }));
 "#
 }
 
@@ -715,23 +715,23 @@ fn access_content_then_log_share_ngx_ctx() {
         r#"
 use ngx;
 ngx::ctx::set("shared", "from-access");
-ngx::log(ngx::log_level::notice(), "ACCESS_CTX=" + ngx::ctx::get("shared"));
+ngx::log(ngx::log_level::notice(), "ACCESS_CTX=" + ngx::ctx::get("shared").unwrap_or(""));
 "#,
     );
     write_script(
         &content,
         r#"
 use ngx;
-ngx::ctx::set("content", ngx::ctx::get("shared"));
-ngx::log(ngx::log_level::notice(), "CONTENT_CTX=" + ngx::ctx::get("content"));
+ngx::ctx::set("content", ngx::ctx::get("shared").unwrap_or(""));
+ngx::log(ngx::log_level::notice(), "CONTENT_CTX=" + ngx::ctx::get("content").unwrap_or(""));
 "#,
     );
     write_script(
         &log,
         r#"
 use ngx;
-ngx::log(ngx::log_level::notice(), "LOG_CTX=" + ngx::ctx::get("shared"));
-ngx::log(ngx::log_level::notice(), "LOG_CONTENT_CTX=" + ngx::ctx::get("content"));
+ngx::log(ngx::log_level::notice(), "LOG_CTX=" + ngx::ctx::get("shared").unwrap_or(""));
+ngx::log(ngx::log_level::notice(), "LOG_CONTENT_CTX=" + ngx::ctx::get("content").unwrap_or(""));
 ngx::log(ngx::log_level::notice(), "LOG_PHASE=" + ngx::get_phase());
 "#,
     );
@@ -957,7 +957,8 @@ fn log_reload_and_sigquit_do_not_wait_or_leak() {
         fs::read_to_string(&error).unwrap_or_default()
     );
     let start = Instant::now();
-    quit_and_wait(&mut running.child, Duration::from_secs(5));
+    // A loaded box needs more than 5s to drain the log-phase workers.
+    quit_and_wait(&mut running.child, Duration::from_secs(15));
     assert!(
         start.elapsed() < Duration::from_secs(5),
         "SIGQUIT with log handler must not wait, elapsed {:?}",

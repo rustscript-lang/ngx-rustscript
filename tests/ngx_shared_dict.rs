@@ -19,6 +19,12 @@ use ngx_rustscript::shared_dict::{
 };
 use vm::{HostParamPassing, HostTypeSchema, Program, ResourceTypeKey, Value, Vm, VmStatus};
 
+/// Serializes tests that share process-global stub or zone state.
+fn zone_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 fn compile(source: &str) -> Arc<Program> {
     compile_rss_source(source).unwrap_or_else(|err| panic!("compile failed: {err}\n{source}"))
 }
@@ -86,6 +92,47 @@ fn expect_bool(value: &Value) -> bool {
     }
 }
 
+/// Unwraps a canonical guest `Option` carrier into its payload.
+fn option_payload(value: &Value) -> Option<Value> {
+    let (some, payload) = vm::option::payload(value).expect("Option carrier");
+    if some {
+        Some(payload.expect("Some payload").clone())
+    } else {
+        None
+    }
+}
+
+fn expect_option_string(value: &Value) -> Option<String> {
+    option_payload(value).map(|payload| match payload {
+        Value::String(text) => (*text).clone(),
+        other => panic!("expected string payload, got {other:?}"),
+    })
+}
+
+fn expect_option_number(value: &Value) -> Option<f64> {
+    option_payload(value).map(|payload| match payload {
+        Value::Int(number) => number as f64,
+        Value::Float(number) => number,
+        other => panic!("expected number payload, got {other:?}"),
+    })
+}
+
+/// Decodes one tagged `SharedValue` record into `(kind, payload)`.
+fn shared_value(value: &Value) -> Option<(String, Value)> {
+    let record = option_payload(value)?;
+    let kind = expect_string(map_get(&record, "kind"));
+    let payload = match kind.as_str() {
+        "bool" => option_payload(map_get(&record, "bool_value")),
+        "int" => option_payload(map_get(&record, "int_value")),
+        "float" => option_payload(map_get(&record, "float_value")),
+        "string" => option_payload(map_get(&record, "text_value")),
+        "bytes" => option_payload(map_get(&record, "bytes_value")),
+        other => panic!("unknown SharedValue kind {other}"),
+    }
+    .unwrap_or_else(|| panic!("{kind} record must carry its payload"));
+    Some((kind, payload))
+}
+
 fn expect_string(value: &Value) -> String {
     match value {
         Value::String(text) => (**text).clone(),
@@ -112,6 +159,7 @@ const SHARED_HOSTS: &[&str] = &[
 
 #[test]
 fn shared_dict_hosts_are_catalogued() {
+    let _guard = zone_lock();
     let key = ResourceTypeKey::new("ngx.shared.dict").unwrap();
     let catalog = ngx_host_catalog();
     assert!(
@@ -180,7 +228,7 @@ fn shared_dict_hosts_are_catalogued() {
                 assert_eq!(schema.params.len(), 2);
                 assert_eq!(schema.params[0].passing, HostParamPassing::Borrow);
                 assert_eq!(schema.params[1].ty, HostTypeSchema::String);
-                assert_eq!(schema.return_type, HostTypeSchema::Unit);
+                assert_eq!(schema.return_type, HostTypeSchema::Bool);
             }
             NGX_SHARED_INCR_NAME => {
                 assert!(host_allowed_in_phase(name, NgxPhase::Init));
@@ -226,23 +274,23 @@ fn shared_dict_hosts_are_catalogued() {
                     .to_string()
             }
             NGX_SHARED_SET_NAME => {
-                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::set(d, \"k\", 1, null, null);\n"
+                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::set(d, \"k\", 1, (), ());\n"
                     .to_string()
             }
             NGX_SHARED_SAFE_SET_NAME => {
-                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::safe_set(d, \"k\", 1, null, null);\n"
+                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::safe_set(d, \"k\", 1, (), ());\n"
                     .to_string()
             }
             NGX_SHARED_ADD_NAME => {
-                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::add(d, \"k\", 1, null, null);\n"
+                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::add(d, \"k\", 1, (), ());\n"
                     .to_string()
             }
             NGX_SHARED_SAFE_ADD_NAME => {
-                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::safe_add(d, \"k\", 1, null, null);\n"
+                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::safe_add(d, \"k\", 1, (), ());\n"
                     .to_string()
             }
             NGX_SHARED_REPLACE_NAME => {
-                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::replace(d, \"k\", 1, null, null);\n"
+                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::replace(d, \"k\", 1, (), ());\n"
                     .to_string()
             }
             NGX_SHARED_DELETE_NAME => {
@@ -250,7 +298,7 @@ fn shared_dict_hosts_are_catalogued() {
                     .to_string()
             }
             NGX_SHARED_INCR_NAME => {
-                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::incr(d, \"k\", 1, null, null);\n"
+                "use ngx;\nlet d = ngx::shared::dict(\"dogs\");\nngx::shared::incr(d, \"k\", 1, (), ());\n"
                     .to_string()
             }
             NGX_SHARED_TTL_NAME => {
@@ -276,6 +324,7 @@ fn shared_dict_hosts_are_catalogued() {
 
 #[test]
 fn process_local_get_set_scalars_flags_and_missing() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("dogs", 64 * 1024);
     assert_eq!(
@@ -303,26 +352,29 @@ fn process_local_get_set_scalars_flags_and_missing() {
 
 #[test]
 fn host_get_set_add_replace_delete_incr_ttl() {
+    let _guard = zone_lock();
     let set = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "Jim", 8, null, 7);
+ngx::shared::set(d, "Jim", 8, (), 7);
 "#,
     );
     assert!(expect_bool(map_get(&set, "ok")));
-    assert_eq!(*map_get(&set, "error"), Value::Null);
+    assert_eq!(option_payload(map_get(&set, "error")), None);
     assert!(!expect_bool(map_get(&set, "forcible")));
 
     let got = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "Jim", 8, null, 7);
+ngx::shared::set(d, "Jim", 8, (), 7);
 ngx::shared::get(d, "Jim");
 "#,
     );
-    assert_eq!(expect_int(map_get(&got, "value")), 8);
+    let (kind, payload) = shared_value(map_get(&got, "value")).expect("value is Some");
+    assert_eq!(kind, "int");
+    assert_eq!(expect_int(&payload), 8);
     assert_eq!(expect_int(map_get(&got, "flags")), 7);
 
     let missing = eval(
@@ -332,64 +384,85 @@ let d = ngx::shared::dict("dogs");
 ngx::shared::get(d, "nope");
 "#,
     );
-    assert_eq!(*map_get(&missing, "value"), Value::Null);
+    assert_eq!(
+        option_payload(map_get(&missing, "value")),
+        None,
+        "a missing key has value: Option::None"
+    );
 
     let exists = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "k", "v", null, null);
-ngx::shared::add(d, "k", "other", null, null);
+ngx::shared::set(d, "k", "v", (), ());
+ngx::shared::add(d, "k", "other", (), ());
 "#,
     );
     assert!(!expect_bool(map_get(&exists, "ok")));
-    assert_eq!(expect_string(map_get(&exists, "error")), "exists");
+    assert_eq!(
+        expect_option_string(map_get(&exists, "error")).expect("error is Some"),
+        "exists"
+    );
 
     let not_found = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::replace(d, "missing", 1, null, null);
+ngx::shared::replace(d, "missing", 1, (), ());
 "#,
     );
     assert!(!expect_bool(map_get(&not_found, "ok")));
-    assert_eq!(expect_string(map_get(&not_found, "error")), "not found");
+    assert_eq!(
+        expect_option_string(map_get(&not_found, "error")).expect("error is Some"),
+        "not found"
+    );
 
     let deleted = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "k", true, null, null);
+ngx::shared::set(d, "k", true, (), ());
 ngx::shared::delete(d, "k");
 ngx::shared::get(d, "k");
 "#,
     );
-    assert_eq!(*map_get(&deleted, "value"), Value::Null);
+    assert_eq!(
+        option_payload(map_get(&deleted, "value")),
+        None,
+        "a deleted key has value: Option::None"
+    );
 
     let incr = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::incr(d, "n", 2, 10, null);
+ngx::shared::incr(d, "n", 2, 10, ());
 "#,
     );
-    assert_eq!(expect_int(map_get(&incr, "value")), 12);
-    assert_eq!(*map_get(&incr, "error"), Value::Null);
+    assert_eq!(
+        expect_option_number(map_get(&incr, "value")).expect("value is Some") as i64,
+        12
+    );
+    assert_eq!(option_payload(map_get(&incr, "error")), None);
 
     let not_number = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "s", "x", null, null);
-ngx::shared::incr(d, "s", 1, null, null);
+ngx::shared::set(d, "s", "x", (), ());
+ngx::shared::incr(d, "s", 1, (), ());
 "#,
     );
-    assert_eq!(expect_string(map_get(&not_number, "error")), "not a number");
-    assert_eq!(*map_get(&not_number, "value"), Value::Null);
+    assert_eq!(
+        expect_option_string(map_get(&not_number, "error")).expect("error is Some"),
+        "not a number"
+    );
+    assert_eq!(option_payload(map_get(&not_number, "value")), None);
 }
 
 #[test]
 fn ttl_expire_get_stale_and_clock() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("dogs", 64 * 1024);
     set_clock_ms(Some(1_000_000));
@@ -433,6 +506,7 @@ fn ttl_expire_get_stale_and_clock() {
 
 #[test]
 fn lru_eviction_forcible_and_safe_set() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("tiny", 200);
     let payload = DictValue::String("abcdefghij".into());
@@ -481,6 +555,7 @@ fn lru_eviction_forcible_and_safe_set() {
 
 #[test]
 fn capacity_free_space_and_unknown_zone() {
+    let _guard = zone_lock();
     let cap = eval(
         r#"
 use ngx;
@@ -509,6 +584,7 @@ ngx::shared::dict("missing");
 
 #[test]
 fn empty_key_and_bad_value_type() {
+    let _guard = zone_lock();
     let empty = eval(
         r#"
 use ngx;
@@ -516,12 +592,15 @@ let d = ngx::shared::dict("dogs");
 ngx::shared::get(d, "");
 "#,
     );
-    assert_eq!(expect_string(map_get(&empty, "error")), "empty key");
+    assert_eq!(
+        expect_option_string(map_get(&empty, "error")).expect("error is Some"),
+        "empty key"
+    );
     let err = eval_err(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "k", { a: 1 }, null, null);
+ngx::shared::set(d, "k", { a: 1 }, (), ());
 "#,
     )
     .to_ascii_lowercase();
@@ -532,6 +611,7 @@ ngx::shared::set(d, "k", { a: 1 }, null, null);
 
 #[test]
 fn shared_dict_does_not_require_request_state() {
+    let _guard = zone_lock();
     let program = compile(
         r#"
 use ngx;
@@ -554,16 +634,17 @@ fn map_has_key(value: &Value, key: &str) -> bool {
 
 #[test]
 fn add_and_replace_reject_null() {
+    let _guard = zone_lock();
     let add = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::add(d, "k", null, null, null);
+ngx::shared::add(d, "k", (), (), ());
 "#,
     );
     assert!(!expect_bool(map_get(&add, "ok")));
     assert_eq!(
-        expect_string(map_get(&add, "error")),
+        expect_option_string(map_get(&add, "error")).expect("error is Some"),
         "attempt to add or replace nil values"
     );
 
@@ -571,38 +652,44 @@ ngx::shared::add(d, "k", null, null, null);
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "k", 1, null, null);
-ngx::shared::replace(d, "k", null, null, null);
+ngx::shared::set(d, "k", 1, (), ());
+ngx::shared::replace(d, "k", (), (), ());
 "#,
     );
     assert!(!expect_bool(map_get(&replace, "ok")));
     assert_eq!(
-        expect_string(map_get(&replace, "error")),
+        expect_option_string(map_get(&replace, "error")).expect("error is Some"),
         "attempt to add or replace nil values"
     );
     let still = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "k", 1, null, null);
-ngx::shared::replace(d, "k", null, null, null);
+ngx::shared::set(d, "k", 1, (), ());
+ngx::shared::replace(d, "k", (), (), ());
 ngx::shared::get(d, "k");
 "#,
     );
-    assert_eq!(expect_int(map_get(&still, "value")), 1);
+    let (kind, payload) = shared_value(map_get(&still, "value")).expect("value is Some");
+    assert_eq!(kind, "int");
+    assert_eq!(expect_int(&payload), 1);
 }
 
 #[test]
 fn incr_result_schema_is_value_error_forcible() {
+    let _guard = zone_lock();
     let incr = eval(
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::incr(d, "n", 2, 10, null);
+ngx::shared::incr(d, "n", 2, 10, ());
 "#,
     );
-    assert_eq!(expect_int(map_get(&incr, "value")), 12);
-    assert_eq!(*map_get(&incr, "error"), Value::Null);
+    assert_eq!(
+        expect_option_number(map_get(&incr, "value")).expect("value is Some") as i64,
+        12
+    );
+    assert_eq!(option_payload(map_get(&incr, "error")), None);
     assert!(!expect_bool(map_get(&incr, "forcible")));
     assert!(
         !map_has_key(&incr, "ok"),
@@ -612,6 +699,7 @@ ngx::shared::incr(d, "n", 2, 10, null);
 
 #[test]
 fn zone_name_cap_is_256_bytes() {
+    let _guard = zone_lock();
     assert_eq!(MAX_ZONE_NAME_BYTES, 256);
     assert!(shared_dict::validate_zone_name(&"a".repeat(256)).is_ok());
     assert!(shared_dict::validate_zone_name(&"a".repeat(257)).is_err());
@@ -620,6 +708,7 @@ fn zone_name_cap_is_256_bytes() {
 
 #[test]
 fn tiny_positive_exptime_is_rejected_and_huge_exptime_is_rejected() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("dogs", 64 * 1024);
     set_clock_ms(Some(1_000_000));
@@ -649,6 +738,7 @@ fn tiny_positive_exptime_is_rejected_and_huge_exptime_is_rejected() {
 
 #[test]
 fn replace_is_allocation_transactional() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("tiny", 120);
     let small = DictValue::String("ab".into());
@@ -665,6 +755,7 @@ fn replace_is_allocation_transactional() {
 
 #[test]
 fn existing_numeric_incr_is_in_place_under_pressure() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("tiny", 160);
     let filler = DictValue::String("abcdefghij".into());
@@ -699,6 +790,7 @@ fn existing_numeric_incr_is_in_place_under_pressure() {
 
 #[test]
 fn handle_rejects_stale_and_cross_zone_confusion() {
+    let _guard = zone_lock();
     reset_process_zones();
     install_process_zone("dogs", 64 * 1024);
     install_process_zone("cats", 64 * 1024);
@@ -738,6 +830,7 @@ fn handle_rejects_stale_and_cross_zone_confusion() {
 
 #[test]
 fn rbtree_orders_equal_hash_keys_with_nginx_memn2cmp() {
+    let _guard = zone_lock();
     let left = shared_dict::nginx_memn2cmp(b"aa", b"ab");
     let right = shared_dict::nginx_memn2cmp(b"ab", b"aa");
     let prefix = shared_dict::nginx_memn2cmp(b"aa", b"aaa");

@@ -42,7 +42,7 @@ fn production_registry_installs_every_catalogued_name() {
 #[test]
 fn production_registry_is_restricted_and_authorizes_only_catalogued_hosts() {
     let catalog = ngx_host_catalog();
-    let deny_program = compile_rss_source(r#"use ngx; ngx::escape_uri("a", null);"#)
+    let deny_program = compile_rss_source(r#"use ngx; ngx::escape_uri("a", ());"#)
         .expect("ngx::escape_uri should compile against the catalog");
     let mut denied = Vm::new_shared(deny_program);
     let error = HostFunctionRegistry::restricted()
@@ -58,7 +58,7 @@ fn production_registry_is_restricted_and_authorizes_only_catalogued_hosts() {
     );
 
     let registry = ngx_host_registry().expect("production registry");
-    let allow_program = compile_rss_source(r#"use ngx; ngx::escape_uri("a", null);"#)
+    let allow_program = compile_rss_source(r#"use ngx; ngx::escape_uri("a", ());"#)
         .expect("ngx::escape_uri should compile against the catalog");
     let mut allowed = Vm::new_shared(allow_program);
     registry
@@ -129,7 +129,7 @@ fn request_pool_and_timer_bind_through_the_same_descriptor_registry() {
 
 #[test]
 fn restricted_registry_denies_undeclared_ngx_admission() {
-    let program = compile_rss_source(r#"use ngx; ngx::escape_uri("a", null);"#)
+    let program = compile_rss_source(r#"use ngx; ngx::escape_uri("a", ());"#)
         .expect("ngx::escape_uri should compile against the catalog");
     let mut vm = Vm::new_shared(program);
     let error = HostFunctionRegistry::restricted()
@@ -237,7 +237,7 @@ fn catalog_names_in(registry: &HostFunctionRegistry) -> Vec<String> {
 }
 
 fn allows_escape_uri(registry: &HostFunctionRegistry) -> bool {
-    let program = compile_rss_source(r#"use ngx; ngx::escape_uri("a", null);"#)
+    let program = compile_rss_source(r#"use ngx; ngx::escape_uri("a", ());"#)
         .expect("ngx::escape_uri compiles");
     let mut vm = Vm::new_shared(program);
     registry.bind_vm_cached(&mut vm).is_ok()

@@ -154,6 +154,42 @@ fn install_file_body(req: &mut ngx_http_request_t, path: &mut Vec<u8>) -> LiveFi
     }
 }
 
+/// Unwraps a canonical guest `Option` carrier into its payload.
+fn option_payload(value: &Value) -> Option<Value> {
+    let (some, payload) = vm::option::payload(value).expect("Option carrier");
+    if some {
+        Some(payload.expect("Some payload").clone())
+    } else {
+        None
+    }
+}
+
+fn expect_option_string(value: Value) -> Option<String> {
+    option_payload(&value).map(|payload| match payload {
+        Value::String(text) => (*text).clone(),
+        other => panic!("expected string payload, got {other:?}"),
+    })
+}
+
+/// `(name, value)` pairs from a typed argument entry array.
+fn arg_pairs(root: &Value) -> Vec<(String, Option<String>)> {
+    let entries = match map_get(expect_map(root), "args") {
+        Value::Array(items) => items,
+        other => panic!("expected entry array, got {other:?}"),
+    };
+    entries
+        .iter()
+        .map(|entry| {
+            let entry = expect_map(entry);
+            let name = match map_get(entry, "name") {
+                Value::String(text) => (**text).clone(),
+                other => panic!("expected string name, got {other:?}"),
+            };
+            (name, expect_option_string(map_get(entry, "value").clone()))
+        })
+        .collect()
+}
+
 fn expect_map(value: &Value) -> &VmMap {
     match value {
         Value::Map(map) => map,
@@ -281,7 +317,7 @@ fn async_read_and_discard_are_forbidden_in_log() {
         );
     }
     validate_program_imports_for_phase(
-        &compile("use ngx;\nngx::req::get_body_data();\nngx::req::get_post_args(null);\n"),
+        &compile("use ngx;\nngx::req::get_body_data();\nngx::req::get_post_args(());\n"),
         NgxPhase::Log,
     )
     .expect("completed-body getters must be allowed in log");
@@ -348,12 +384,16 @@ fn get_body_data_copies_memory_and_nulls_file_backed() {
     let _live = install_in_memory_body(&mut req, &mut chunks);
     let ptr = (&mut *req) as *mut ngx_http_request_t;
     let value = eval_in_request(ptr, "use ngx;\nngx::req::get_body_data();\n").expect("data");
-    assert_eq!(value, Value::string("hello body"));
+    assert_eq!(expect_option_string(value), Some("hello body".to_string()));
 
     let mut path = b"/tmp/ngx-rss-bodyXXXXXX".to_vec();
     let _file = install_file_body(&mut req, &mut path);
     let file_data = eval_in_request(ptr, "use ngx;\nngx::req::get_body_data();\n").expect("file");
-    assert_eq!(file_data, Value::Null);
+    assert_eq!(
+        expect_option_string(file_data),
+        None,
+        "file-backed body data is Option::None"
+    );
 }
 
 #[test]
@@ -363,12 +403,19 @@ fn get_body_file_returns_owned_path_and_null_for_memory() {
     let _live = install_in_memory_body(&mut req, &mut chunks);
     let ptr = (&mut *req) as *mut ngx_http_request_t;
     let none = eval_in_request(ptr, "use ngx;\nngx::req::get_body_file();\n").expect("mem");
-    assert_eq!(none, Value::Null);
+    assert_eq!(
+        expect_option_string(none),
+        None,
+        "memory-backed body file is Option::None"
+    );
 
     let mut path = b"/tmp/ngx-rss-owned-body".to_vec();
     let _file = install_file_body(&mut req, &mut path);
     let got = eval_in_request(ptr, "use ngx;\nngx::req::get_body_file();\n").expect("path");
-    assert_eq!(got, Value::string("/tmp/ngx-rss-owned-body"));
+    assert_eq!(
+        expect_option_string(got),
+        Some("/tmp/ngx-rss-owned-body".to_string())
+    );
 }
 
 #[test]
@@ -380,18 +427,18 @@ fn get_post_args_parses_file_backed_body_without_deleting_file() {
     let mut path_bytes = path.to_string_lossy().as_bytes().to_vec();
     let _file = install_file_body(&mut req, &mut path_bytes);
     let ptr = (&mut *req) as *mut ngx_http_request_t;
-    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n").expect("post");
+    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(());\n").expect("post");
     let root = expect_map(&decoded);
     assert_eq!(map_get(root, "truncated"), &Value::Bool(false));
-    let parsed = expect_map(map_get(root, "args"));
-    assert_eq!(map_get(parsed, "b"), &Value::string("2"));
-    assert_eq!(map_get(parsed, "flag"), &Value::Bool(true));
-    match map_get(parsed, "a") {
-        Value::Array(values) => {
-            assert_eq!(values.as_slice(), &[Value::string("1"), Value::string("3")]);
-        }
-        other => panic!("duplicate keys must become an array, got {other:?}"),
-    }
+    assert_eq!(
+        arg_pairs(&decoded),
+        vec![
+            ("a".to_string(), Some("1".to_string())),
+            ("b".to_string(), Some("2".to_string())),
+            ("a".to_string(), Some("3".to_string())),
+            ("flag".to_string(), None),
+        ]
+    );
     assert!(
         path.exists(),
         "get_post_args must not delete NGINX-owned temp files"
@@ -404,11 +451,15 @@ fn get_post_args_malformed_percent_is_left_literal() {
     let mut body = b"a=%ZZ&b=%&c=%2".to_vec();
     let _live = install_in_memory_body(&mut req, std::slice::from_mut(&mut body));
     let ptr = (&mut *req) as *mut ngx_http_request_t;
-    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(null);\n").expect("post");
-    let parsed = expect_map(map_get(expect_map(&decoded), "args"));
-    assert_eq!(map_get(parsed, "a"), &Value::string("%ZZ"));
-    assert_eq!(map_get(parsed, "b"), &Value::string("%"));
-    assert_eq!(map_get(parsed, "c"), &Value::string("%2"));
+    let decoded = eval_in_request(ptr, "use ngx;\nngx::req::get_post_args(());\n").expect("post");
+    assert_eq!(
+        arg_pairs(&decoded),
+        vec![
+            ("a".to_string(), Some("%ZZ".to_string())),
+            ("b".to_string(), Some("%".to_string())),
+            ("c".to_string(), Some("%2".to_string())),
+        ]
+    );
 }
 
 #[test]
@@ -418,7 +469,7 @@ fn get_body_data_skips_empty_buffers_and_rejects_inverted_or_cyclic() {
     let _live = install_in_memory_body(&mut req, std::slice::from_mut(&mut empty));
     let ptr = (&mut *req) as *mut ngx_http_request_t;
     let value = eval_in_request(ptr, "use ngx;\nngx::req::get_body_data();\n").expect("empty");
-    assert_eq!(value, Value::string(""));
+    assert_eq!(expect_option_string(value), Some(String::new()));
 
     let mut inverted = b"xy".to_vec();
     let mut live = install_in_memory_body(&mut req, std::slice::from_mut(&mut inverted));
@@ -650,14 +701,14 @@ fn nginx_request_body_memory_file_chunked_413_repeat_discard_and_disconnect() {
         r#"
 use ngx;
 ngx::req::read_body();
-let data = ngx::req::get_body_data();
-let file = ngx::req::get_body_file();
-if data == null {
+let data = ngx::req::get_body_data().unwrap_or("");
+let file = ngx::req::get_body_file().unwrap_or("");
+if data == "" {
     ngx::say("empty");
 } else {
     ngx::say(data);
 }
-if file == null {
+if file == "" {
     ngx::say("no-file");
 } else {
     ngx::say(file);
@@ -670,14 +721,14 @@ if file == null {
         r#"
 use ngx;
 ngx::req::read_body();
-let data = ngx::req::get_body_data();
-let file = ngx::req::get_body_file();
-if data == null {
+let data = ngx::req::get_body_data().unwrap_or("");
+let file = ngx::req::get_body_file().unwrap_or("");
+if data == "" {
     ngx::say("file-null-data");
 } else {
     ngx::say(data);
 }
-if file == null {
+if file == "" {
     ngx::say("no-file");
 } else {
     ngx::say(file);
@@ -689,9 +740,12 @@ if file == null {
         &post,
         r#"
 use ngx;
+fn arg_pair(entries: [ArgEntry], i: int) -> string {
+    entries[i]?.name.unwrap_or("") + "=" + entries[i]?.value.unwrap_or(Option::None).unwrap_or("")
+}
 ngx::req::read_body();
-let parsed: RequestArgsResult = ngx::req::get_post_args(null);
-ngx::say(ngx::encode_args(parsed.args));
+let parsed: RequestArgsResult = ngx::req::get_post_args(());
+ngx::say(arg_pair(parsed.args, 0));
 if parsed.truncated {
     ngx::say("trunc");
 } else {
@@ -707,8 +761,8 @@ use ngx;
 ngx::req::read_body();
 ngx::req::read_body();
 ngx::req::discard_body();
-let data = ngx::req::get_body_data();
-if data == null {
+let data = ngx::req::get_body_data().unwrap_or("");
+if data == "" {
     ngx::say("empty");
 } else {
     ngx::say(data);
@@ -742,7 +796,7 @@ ngx::log(ngx::log_level::notice(), "LOG_BODY=" + data.unwrap_or(""));
         r#"
 use ngx;
 ngx::req::read_body();
-ngx::ctx::set("body", ngx::req::get_body_data());
+ngx::ctx::set("body", ngx::req::get_body_data().unwrap_or(""));
 "#,
     );
     let content_see = prefix.join("conf/body_content_see.rss");
@@ -750,7 +804,7 @@ ngx::ctx::set("body", ngx::req::get_body_data());
         &content_see,
         r#"
 use ngx;
-ngx::say(ngx::encode_args({ body: ngx::ctx::get("body") }));
+ngx::say(ngx::encode_args({ body: ngx::ctx::get("body").unwrap_or("") }));
 "#,
     );
     let slow = prefix.join("conf/body_slow.rss");
@@ -759,8 +813,8 @@ ngx::say(ngx::encode_args({ body: ngx::ctx::get("body") }));
         r#"
 use ngx;
 ngx::req::read_body();
-let data = ngx::req::get_body_data();
-if data == null {
+let data = ngx::req::get_body_data().unwrap_or("");
+if data == "" {
     ngx::say("empty");
 } else {
     ngx::say(data);
@@ -773,7 +827,7 @@ if data == null {
         r#"
 use ngx;
 ngx::req::read_body();
-ngx::say(ngx::req::get_body_data());
+ngx::say(ngx::req::get_body_data().unwrap_or(""));
 "#,
     );
 

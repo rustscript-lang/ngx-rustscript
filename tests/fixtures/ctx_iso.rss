@@ -1,5 +1,5 @@
 use ngx;
-let id = ngx::var::get("arg_id");
+let id = ngx::var::get("arg_id").unwrap_or("");
 ngx::ctx::set("id", id);
 ngx::sleep_ms(80);
-ngx::log(ngx::log_level::notice(), "CTX_ISO=" + ngx::encode_args({ id: ngx::ctx::get("id") }));
+ngx::log(ngx::log_level::notice(), "CTX_ISO=" + ngx::encode_args({ id: ngx::ctx::get("id").unwrap_or("") }));

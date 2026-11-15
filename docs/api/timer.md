@@ -4,8 +4,8 @@
 
 | OpenResty API | RustScript callable | Status | Phases | Yield | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ngx.sleep` | `ngx::sleep(seconds: number) -> null` | adapted | `SLEEP_PHASES` | Waiting | in-flight 1024; rejects negative / NaN / infinity / overflow | Seconds (int or float), not milliseconds. Tokio timer; completion via `HostFuture` -> waker -> eventfd -> worker-main-thread `resume`. Client close during wait is HTTP 499. | `tests/vm_sleep.rs`, `tests/host_catalog.rs`, `tests/access_async.rs`, `tests/lifecycle.rs`, `tests/nginx_integration.py` |
-| `ngx.sleep` (legacy ms form) | `ngx::sleep_ms(ms: int) -> null` | adapted | `SLEEP_PHASES` | Waiting | in-flight 1024; `ms >= 0` | Not an OpenResty name. Integer milliseconds for scripts written before the seconds migration. Same Waiting path as `ngx::sleep`. | `tests/vm_sleep.rs`, `tests/access_async.rs`, `tests/request_driver.rs`, `tests/lifecycle.rs` |
+| `ngx.sleep` | `ngx::sleep(seconds: number) -> ()` | adapted | `SLEEP_PHASES` | Waiting | in-flight 1024; rejects negative / NaN / infinity / overflow | Seconds (int or float), not milliseconds. Tokio timer; completion via `HostFuture` -> waker -> eventfd -> worker-main-thread `resume`. Client close during wait is HTTP 499. | `tests/vm_sleep.rs`, `tests/host_catalog.rs`, `tests/access_async.rs`, `tests/lifecycle.rs`, `tests/nginx_integration.py` |
+| `ngx.sleep` (legacy ms form) | `ngx::sleep_ms(ms: int) -> ()` | adapted | `SLEEP_PHASES` | Waiting | in-flight 1024; `ms >= 0` | Not an OpenResty name. Integer milliseconds for scripts written before the seconds migration. Same Waiting path as `ngx::sleep`. | `tests/vm_sleep.rs`, `tests/access_async.rs`, `tests/request_driver.rs`, `tests/lifecycle.rs` |
 
 
 ## `ngx::timer` family (landed)
@@ -15,8 +15,8 @@ created it; the callback runs on a timer-owned VM.
 
 | OpenResty API | RustScript callable | Status | Phases | Yield | Limits | Semantic differences | Acceptance |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ngx.timer.at` | `ngx::timer::at(seconds: number, callback: fn(bool) -> unknown) -> bool` | adapted | access, content | sync (the callback runs later) | checked `Duration`; negative/NaN/infinite rejected; `TimerConfig.max_pending` = 1024, worker pool 1024 | Seconds (int or float), not milliseconds. The callback is consumed (`TakeOwned`). `premature=false` on normal expiry. | `tests/ngx_scheduler_contract.rs`, `tests/ngx_timer.rs`, `tests/timer_nginx.rs` |
-| `ngx.timer.every` | `ngx::timer::every(seconds: number, callback: fn(bool) -> unknown) -> bool` | adapted | access, content | sync (the callback runs later) | checked `Duration`; `interval > 0` required; same caps | Rounds serialize: the next deadline is scheduled only after the previous round is terminal, its identity rotates to a fresh generation, and mutable capture cells persist between rounds. | `tests/ngx_timer.rs`, `tests/timer_nginx.rs` |
+| `ngx.timer.at` | `ngx::timer::at(seconds: number, callback: fn(bool) -> ()) -> ()` | adapted | access, content | sync (the callback runs later) | checked `Duration`; negative/NaN/infinite rejected; `TimerConfig.max_pending` = 1024, worker pool 1024 | Seconds (int or float), not milliseconds. The callback is consumed (`TakeOwned`). `premature=false` on normal expiry. | `tests/ngx_scheduler_contract.rs`, `tests/ngx_timer.rs`, `tests/timer_nginx.rs` |
+| `ngx.timer.every` | `ngx::timer::every(seconds: number, callback: fn(bool) -> ()) -> ()` | adapted | access, content | sync (the callback runs later) | checked `Duration`; `interval > 0` required; same caps | Rounds serialize: the next deadline is scheduled only after the previous round is terminal, its identity rotates to a fresh generation, and mutable capture cells persist between rounds. | `tests/ngx_timer.rs`, `tests/timer_nginx.rs` |
 | `ngx.timer.pending_count` | `ngx::timer::pending_count() -> int` | adapted | access, content | sync | none | Registrations waiting to begin, or waiting for a running slot. | `tests/ngx_timer.rs`, `tests/timer_nginx.rs` |
 | `ngx.timer.running_count` | `ngx::timer::running_count() -> int` | adapted | access, content | sync | `TimerConfig.max_running` = 256 | Live callback rounds, including callbacks parked on async host work. | `tests/ngx_timer.rs`, `tests/timer_nginx.rs` |
 

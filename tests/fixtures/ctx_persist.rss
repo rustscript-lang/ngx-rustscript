@@ -1,9 +1,9 @@
 use ngx;
-ngx::ctx::set("n", 1);
+ngx::ctx::set("n", "1");
 ngx::ctx::set("k", "v");
-ngx::ctx::set("user", { id: 7, name: "ada" });
+ngx::ctx::set("user", "ada");
 ngx::sleep_ms(10);
-ngx::ctx::set("n", 2);
+ngx::ctx::set("n", "2");
 ngx::sleep_ms(10);
-ngx::log(ngx::log_level::notice(), "CTX_PERSIST=" + ngx::encode_args({ n: ngx::ctx::get("n"), k: ngx::ctx::get("k") }));
-ngx::log(ngx::log_level::notice(), "CTX_USER=" + ngx::encode_args(ngx::ctx::get("user")));
+ngx::log(ngx::log_level::notice(), "CTX_PERSIST=" + ngx::encode_args({ n: ngx::ctx::get("n").unwrap_or(""), k: ngx::ctx::get("k").unwrap_or("") }));
+ngx::log(ngx::log_level::notice(), "CTX_USER=" + ngx::ctx::get("user").unwrap_or(""));

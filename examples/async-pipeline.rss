@@ -5,17 +5,37 @@ use sqlite;
 use json;
 use bytes as builtin_bytes;
 
-let url_file = ngx::var::get("rss_pipeline_url_file").unwrap_or("");
-let database_file = ngx::var::get("rss_pipeline_database").unwrap_or("");
+let url_file: string = match ngx::var::get("rss_pipeline_url_file") {
+    Option::Some(value) => value,
+    Option::None => ""
+};
+let database_file: string = match ngx::var::get("rss_pipeline_database") {
+    Option::Some(value) => value,
+    Option::None => ""
+};
 
-let input = io::open(url_file, "r");
-let upstream_url = io::read_all(input);
-io::close(input);
+fn read_url(path: string) -> Result<string, string> {
+    let handle = io::open(path, "r")?;
+    let text = io::read_all(handle)?;
+    io::close(handle);
+    Result::Ok(text)
+}
 
-let upstream = http::client::request({"method": "GET", "url": upstream_url});
-let upstream_status: int = upstream["status"];
-let upstream_final_url: string = upstream["url"];
-let upstream_body_bytes: bytes = upstream["body"];
+let upstream_url_read = read_url(url_file);
+let upstream_url = match upstream_url_read {
+    Result::Ok(text) => text,
+    Result::Err(message) => ""
+};
+if upstream_url == "" {
+    ngx::log(ngx::log_level::error(), "async-pipeline could not read the upstream URL file");
+    ngx::exit(500);
+}
+
+let request = http::request::new("GET", upstream_url);
+let upstream = http::client::request(request);
+let upstream_status: int = http::response::status(upstream);
+let upstream_final_url: string = http::response::url(upstream);
+let upstream_body_bytes: bytes = http::response::body(upstream);
 let upstream_body = builtin_bytes::to_utf8(upstream_body_bytes);
 let upstream_json = {
     "status": upstream_status,
@@ -23,29 +43,42 @@ let upstream_json = {
     "body": upstream_body
 };
 
-let database = sqlite::open({"path": database_file, "mode": "read_write_create"});
-let database_rows = sqlite::query(
+let database = sqlite::open({
+    path: Option::Some(database_file),
+    mode: Option::Some("read_write_create")
+});
+let database_result: SqliteQueryResult = sqlite::query(
     database,
     "SELECT 'sqlite-ok' AS source, 42 AS value",
     [],
-    {"max_rows": 8, "max_result_bytes": 65536}
+    {max_rows: Option::Some(8), max_result_bytes: Option::Some(65536)}
 );
+let database_truncated: bool = database_result.truncated;
+let database_column: string = database_result.columns[0];
+let database_first_cell: string = match database_result.rows[0].cells[0].text_value {
+    Option::Some(text) => text,
+    Option::None => ""
+};
 sqlite::close(database);
 
 let dict = ngx::shared::dict("pipeline");
 let shared: SharedStoreResult = ngx::shared::set(
     dict,
     "last_result",
-    json::encode({"upstream": upstream_json, "database": database_rows}),
+    json::encode({"upstream": upstream_json, "database_truncated": database_truncated}),
     60,
-    null
+    ()
 );
+let shared_error = match shared.error {
+    Option::Some(message) => message,
+    Option::None => ""
+};
 
 ngx::status::set(200);
 ngx::header::set("Content-Type", "application/json");
 ngx::say(json::encode({
     "io": upstream_url,
     "http": upstream_json,
-    "sqlite": database_rows,
-    "shared": {"ok": shared.ok, "error": shared.error}
+    "sqlite": {"column": database_column, "source": database_first_cell, "truncated": database_truncated},
+    "shared": {"ok": shared.ok, "error": shared_error}
 }));

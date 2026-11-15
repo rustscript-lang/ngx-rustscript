@@ -12,6 +12,7 @@ pub(crate) mod context;
 pub(crate) mod standard;
 pub(crate) mod timer;
 
+pub use catalog::is_standard_host_import;
 pub use catalog::{
     HostCapability, HostFamily, HostManifestEntry, HostSyncKind, LOG_ALLOWED_NAMES,
     NGX_COOKIE_TIME_NAME, NGX_CRC32_LONG_NAME, NGX_CRC32_SHORT_NAME, NGX_CTX_CLEAR_NAME,
@@ -56,7 +57,6 @@ pub use catalog::{
     host_allowed_in_timer_callback, host_validates_for_log, log_allowlist_accepts, manifest_entry,
     ngx_host_catalog, ngx_host_manifest, timer_callback_schema,
 };
-pub use catalog::{compile_host_catalog, is_standard_host_import};
 
 pub use catalog::{
     NGX_TIMER_AT_NAME, NGX_TIMER_EVERY_NAME, NGX_TIMER_PENDING_COUNT_NAME,
@@ -164,6 +164,41 @@ pub fn production_runtime_host_names() -> &'static [&'static str] {
         .as_slice()
 }
 
+/// Compiler catalog for production ngx scripts.
+///
+/// It carries the ngx host surface plus pd-vm's standard host catalog (I/O,
+/// HTTP, and SQLite). The standard families must be part of the *compile*
+/// catalog: their handles are resources, and a name that the compiler resolves
+/// through the legacy builtin table instead would carry an `int` carrier that
+/// the resource-typed sibling hosts reject. The same catalog is what
+/// [`install_standard_runtime`] installs at runtime through
+/// `standard_composition()`, so compile-time and registered schemas agree.
+pub fn compile_host_catalog() -> vm::HostApiCatalog {
+    static CATALOG: std::sync::OnceLock<vm::HostApiCatalog> = std::sync::OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            let mut builder = vm::HostApiBuilder::new();
+            for catalog in [
+                catalog::ngx_host_catalog(),
+                (*vm::standard_host_catalog()).clone(),
+            ] {
+                for resource in catalog.resources() {
+                    builder.resource(resource.clone());
+                }
+                for schema in catalog.structs() {
+                    builder.named_struct(schema.clone());
+                }
+                for function in catalog.functions() {
+                    builder.function(function.clone());
+                }
+            }
+            builder
+                .build()
+                .expect("merged ngx + standard host catalog must validate")
+        })
+        .clone()
+}
+
 /// Bind the calling VM through the production descriptor registry.
 ///
 /// Catalog-compiled programs resolve hosts by exact adapter. There is no
@@ -211,7 +246,7 @@ pub fn ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
 }
 
 fn build_ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
-    let catalog = catalog::compile_host_catalog();
+    let catalog = compile_host_catalog();
     // HostFunctionRegistry::restricted() starts from HostFunctionRegistry::new(),
     // which catalog-installs HTTP adapters. Those catalog entries then reject
     // ngx-compiled `http::client::*` imports that have no fingerprint — the ngx
@@ -225,6 +260,17 @@ fn build_ngx_host_registry() -> Result<vm::HostFunctionRegistry, String> {
     registry
         .transactionally(|registry| {
             for module in ngx_host_modules() {
+                module
+                    .install_from_catalog(registry, &catalog)
+                    .map_err(|error| {
+                        vm::VmError::HostError(format!("install {}: {error}", module.name))
+                    })?;
+            }
+            // Standard families (io/http/sqlite) are part of the compile
+            // catalog, so their adapters must be installed from that same
+            // snapshot: a compiled standard import carries the exact schema
+            // fingerprint and has no name-only fallback.
+            for module in vm::standard_catalog_modules() {
                 module
                     .install_from_catalog(registry, &catalog)
                     .map_err(|error| {
@@ -271,7 +317,11 @@ pub(crate) fn test_hosts_module() -> vm::HostModuleDescriptor {
 pub(crate) fn test_bind_catalog() -> vm::HostApiCatalog {
     let mut builder = vm::HostApiBuilder::new();
     let test_hosts = test_hosts_module().catalog().expect("test host catalog");
-    for catalog in [ngx_host_catalog(), test_hosts] {
+    for catalog in [
+        ngx_host_catalog(),
+        (*vm::standard_host_catalog()).clone(),
+        test_hosts,
+    ] {
         for resource in catalog.resources() {
             builder.resource(resource.clone());
         }
@@ -294,6 +344,13 @@ pub(crate) fn bind_test_hosts(vm: &mut Vm) {
     registry
         .transactionally(|registry| {
             for module in ngx_host_modules() {
+                module
+                    .install_from_catalog(registry, &catalog)
+                    .map_err(|error| {
+                        vm::VmError::HostError(format!("install {}: {error}", module.name))
+                    })?;
+            }
+            for module in vm::standard_catalog_modules() {
                 module
                     .install_from_catalog(registry, &catalog)
                     .map_err(|error| {
@@ -323,6 +380,27 @@ mod layout {
             CallOutcome, CaptureAsyncHostContext, FromVmValue, HostFutureOutput,
             IntoHostCallOutcome, VmError, arg, borrow_arg, resource, take_arg,
         };
+
+        /// Canonical guest `Option::Some` carrier (`{ tag: true, payload }`).
+        #[allow(dead_code)]
+        pub fn option_some(value: impl Into<vm::Value>) -> vm::Value {
+            vm::option::some_carrier(value.into())
+        }
+
+        /// Canonical guest `Option::None` carrier (`{ tag: false }`).
+        #[allow(dead_code)]
+        pub fn option_none() -> vm::Value {
+            vm::option::none_carrier()
+        }
+
+        /// Guest `Option` of an optional value: `Some(payload)` or `None`.
+        #[allow(dead_code)]
+        pub fn option_value(value: Option<vm::Value>) -> vm::Value {
+            match value {
+                Some(value) => option_some(value),
+                None => option_none(),
+            }
+        }
 
         pub mod codec {
             include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/codec.rs"));

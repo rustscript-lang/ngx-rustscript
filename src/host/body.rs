@@ -22,7 +22,7 @@ use vm::HostModuleDescriptor;
 use vm::{Value, VmError};
 
 use super::super::VmResult;
-use super::{CallOutcome, IntoHostCallOutcome};
+use super::{CallOutcome, IntoHostCallOutcome, option_none, option_some};
 use crate::host::{
     current_identity, with_current_disposition_mut, with_current_request, with_current_request_mut,
     RequestDisposition, ScopeError, control_stop_error,
@@ -156,7 +156,7 @@ fn copy_body_bufs(body: &ngx_http_request_body_t, what: &str) -> VmResult<Vec<u8
             return Err(body_err(what, "body buffer chain exceeds the safety cap"));
         }
         seen.push(cl);
-        // SAFETY: cl is a non-null, acyclic request-body chain node.
+        // SAFETY: cl is a non-(), acyclic request-body chain node.
         let chain = unsafe { &*cl };
         if chain.buf.is_null() {
             return Err(body_err(what, "malformed null body buffer"));
@@ -421,7 +421,8 @@ pub fn discard_body() -> VmResult<CallOutcome> {
     })
 }
 
-/// In-memory request body as an owned string, or `null` when file-backed/unread.
+/// In-memory request body as an owned string, or `Option::None` when
+/// file-backed/unread.
 #[pd_host_function(name = "ngx::req::get_body_data", contract = crate::host::catalog::ngx_req_get_body_data_contract)]
 pub fn get_body_data() -> VmResult<CallOutcome> {
     with_request(|request| {
@@ -433,32 +434,33 @@ pub fn get_body_data() -> VmResult<CallOutcome> {
             ));
         }
         if raw.request_body.is_null() {
-            return ret(Value::Null);
+            return ret(option_none());
         }
         let body = unsafe { &*raw.request_body };
         if !body.temp_file.is_null() {
-            return ret(Value::Null);
+            return ret(option_none());
         }
         if body.bufs.is_null() {
-            return ret(Value::Null);
+            return ret(option_none());
         }
         let bytes = copy_body_bufs(body, "ngx::req::get_body_data")?;
-        ret(bytes_as_string(bytes))
+        ret(option_some(Value::string(bytes_as_string(bytes))))
     })
 }
 
-/// NGINX temp-file path as an owned string, or `null` when memory-backed.
+/// NGINX temp-file path as an owned string, or `Option::None` when
+/// memory-backed.
 #[pd_host_function(name = "ngx::req::get_body_file", contract = crate::host::catalog::ngx_req_get_body_file_contract)]
 pub fn get_body_file() -> VmResult<CallOutcome> {
     with_request(|request| {
         let raw = request.as_ref();
         if raw.request_body.is_null() {
-            return ret(Value::Null);
+            return ret(option_none());
         }
         let body = unsafe { &*raw.request_body };
         match body_temp_path(body, "ngx::req::get_body_file")? {
-            Some(path) => ret(path),
-            None => ret(Value::Null),
+            Some(path) => ret(option_some(Value::string(path))),
+            None => ret(option_none()),
         }
     })
 }

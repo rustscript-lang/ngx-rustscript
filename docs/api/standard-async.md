@@ -7,10 +7,29 @@ features. This page defines the script-facing interface that ngx-rustscript
 supports in `access_by_rss_file` and `content_by_rss_file`.
 
 Calls that perform asynchronous work yield and resume through the module's
-eventfd scheduler. The tables identify synchronous exceptions. All standard
-host domains are rejected in `log_by_rss_file`; async calls cannot wait there,
-and the module keeps the whole I/O/HTTP/SQLite surface fail-closed in that
-phase.
+eventfd scheduler. All standard host domains are rejected in
+`log_by_rss_file`; async calls cannot wait there, and the module keeps the
+whole I/O/HTTP/SQLite surface fail-closed in that phase.
+
+Handles are pd-vm resources, not raw integers. A resource is passed by borrow
+(`io::read_all(file)`, `http::response::status(response)`) or taken by value
+when the call consumes it (`io::close(file)`, `http::client::request(request)`).
+A builder that is mutated must be declared `let mut` and passed as
+`&mut request`.
+
+## Option and Result
+
+The pinned contract uses the guest types, not the VM's internal null value:
+
+- `Option<T>` is a tagged value: `Option::Some(payload)` or `Option::None`.
+  Absence is never `null`.
+- `Result<T, E>` is a tagged value: `Result::Ok(payload)` or
+  `Result::Err(error)`. `?` propagates inside a `Result`-returning function.
+- `()` is the logical Unit: a call with no result, and the value of an empty
+  block.
+
+Explicit `null` literals and legacy `T?` annotations are rejected by the
+RustScript compiler.
 
 ## I/O
 
@@ -20,27 +39,31 @@ writes are each capped at 1 MiB by ngx-rustscript's current policy.
 
 | RustScript callable | Return | Yield | Interface and behavior |
 | --- | --- | --- | --- |
-| `io::open(path: string, mode: string)` | `int` handle | yes | Modes: `r`, `w`, `a`, `r+`, `w+`, `a+`. Any write-capable mode requires `rss_io_write on`. |
-| `io::read_all(handle: int)` | `string` | yes | Reads all remaining UTF-8 text, then rejects the call if the result exceeds the read limit. |
-| `io::read_line(handle: int)` | `string` | yes | Reads one line, including its line ending when present, up to the read limit. |
-| `io::write(handle: int, text: string)` | `int` | yes | Writes text and returns the number of bytes written. A partial write is possible. |
-| `io::flush(handle: int)` | `bool` | yes | Flushes writable handles and returns `true`; a readable handle is a successful no-op. |
-| `io::close(handle: int)` | `bool` | yes | Closes the handle and returns `true`. Closed, foreign, or stale handles are rejected. |
+| `io::open(path: string, mode: string)` | `Result<io.file, string>` | yes | Modes: `r`, `w`, `a`, `r+`, `w+`, `a+`. Any write-capable mode requires `rss_io_write on`. A policy denial is a guest `Result::Err`. |
+| `io::read_all(handle: io.file)` | `Result<string, string>` | yes | Reads all remaining UTF-8 text, then rejects the call if the result exceeds the read limit. |
+| `io::read_line(handle: io.file)` | `Result<Option<string>, string>` | yes | End of file is `Ok(None)`; a present but empty line is `Ok(Some(""))`. The single trailing newline is removed. |
+| `io::write(handle: io.file, text: string)` | `Result<int, string>` | yes | Writes text and returns the number of bytes written. A partial write is possible. |
+| `io::flush(handle: io.file)` | `Result<(), string>` | yes | Flushes writable handles; a readable handle is a successful no-op. |
+| `io::close(handle: io.file)` | `Result<(), string>` | yes | Closes the handle and releases it from the request scope. Closed, foreign, or stale handles are rejected. |
 | `io::exists(path: string)` | `bool` | yes | Tests a path below `rss_io_root`. |
-
-`io::popen(command: string, mode: string) -> int` exists in the pinned pd-vm
-builtin surface, but ngx-rustscript always installs `allow_process: false`.
-Scripts cannot grant process execution through an NGINX directive, so this
-call is outside the supported ngx-rustscript interface.
+| `io::popen(command: string, mode: string)` | `Result<io.file, string>` | yes | Exists in the pinned pd-vm surface, but ngx-rustscript always installs `allow_process: false`; scripts cannot grant process execution through an NGINX directive. |
 
 Example:
 
 ```rss
 use io;
 
-let file: int = io::open("input.txt", "r");
-let text: string = io::read_all(file);
-io::close(file);
+fn read_text(path: string) -> Result<string, string> {
+    let file = io::open(path, "r")?;
+    let text = io::read_all(file)?;
+    io::close(file)?;
+    Result::Ok(text)
+}
+
+let text = match read_text("input.txt") {
+    Result::Ok(text) => text,
+    Result::Err(message) => message
+};
 ```
 
 ## HTTP client
@@ -57,34 +80,28 @@ A location may contain one `rss_http_allow <host> <port>` pair. Repeat
 `rss_http_scheme` to grant both `http` and `https`. Loopback and private
 addresses require `rss_http_allow_private on`.
 
-### http::client::request
+### Request builder and buffered call
 
-```text
-http::client::request(request: map) -> map
-```
-
-The request object has this interface. The pinned pd-vm adapter validates the
-concrete contents at runtime, so the accepted payload shapes are the pinned
-contract's: a header list (duplicates are preserved in order) and a discriminated
-body.
-
-| Field | Type | Required | Meaning |
+| RustScript callable | Return | Yield | Interface |
 | --- | --- | --- | --- |
-| `method` | `string` | yes | `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, or `OPTIONS`; matching is case-insensitive. |
-| `url` | `string` | yes | Absolute URL allowed by the location scheme, host, port, and private-address policy. |
-| `headers` | `array` of `{ name: string, value: string }` | no | Header entries in order. Repeating one name sends duplicate headers; `Host`, `Content-Length`, `Transfer-Encoding`, and `Connection` are client-managed and rejected here. |
-| `body` | `{ kind: "text", text: string }` or `{ kind: "bytes", bytes: bytes }` or `null` | no | Request payload variant. Omitted and `null` mean no body. |
+| `http::request::new(method: string, url: string)` | `http.request` | no | Creates an owned request builder. Methods: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS` (case-insensitive). |
+| `http::request::set_header(&mut request, name: string, value: string)` | `()` | no | Appends one header. Repeating a name sends duplicates. `Host`, `Content-Length`, `Transfer-Encoding`, and `Connection` are client-managed and rejected. |
+| `http::request::set_body_text(&mut request, body: string)` | `()` | no | Sets a UTF-8 request body. |
+| `http::request::set_body_bytes(&mut request, body: bytes)` | `()` | no | Sets a binary request body. |
+| `http::client::request(request: http.request)` | `http.response` | yes | Sends the owned request and returns the buffered response resource. |
 
-The response is a dynamic pd-vm map with these fixed top-level keys; response
-header entries keep the pd-vm `HttpHeaderValue` text/bytes payload variant so
-duplicate headers survive.
+The URL must be absolute and allowed by the location scheme, host, port, and
+private-address policy.
 
-| Field | Type | Meaning |
+### Buffered response
+
+| RustScript callable | Return | Meaning |
 | --- | --- | --- |
-| `status` | `int` | HTTP status code. |
-| `headers` | `array` of `{ name: string, value: { kind: "text", text: string } \| { kind: "bytes", bytes: bytes } }` | Response headers; duplicates are retained, but the adapter sorts and normalizes entries by name, so the original wire order is not guaranteed. |
-| `body` | `bytes` | Buffered response body. Convert with `bytes::to_utf8` when text is required. |
-| `url` | `string` | Final URL after redirects. |
+| `http::response::status(response)` | `int` | HTTP status code. |
+| `http::response::url(response)` | `string` | Final URL after redirects. |
+| `http::response::body(response)` | `bytes` | Buffered response body. Convert with `bytes::to_utf8` when text is required. |
+| `http::response::header_names(response)` | `array<string>` | Header names in normalized order. |
+| `http::response::header_values(response, name: string)` | `array<string>` | All values for one header; duplicates are retained. |
 
 Current pd-vm defaults retained by ngx-rustscript are five redirects, a 1 MiB
 request body, 100 request headers, a 64 KiB serialized request-header block,
@@ -97,23 +114,36 @@ Example:
 use http;
 use bytes as builtin_bytes;
 
-let response: map = http::client::request({
-    method: "GET",
-    url: "http://127.0.0.1:8081/data",
-    headers: [{ name: "accept", value: "application/json" }],
-    body: null
-});
-let status: int = response["status"];
-let body_bytes: bytes = response["body"];
-let body: string = builtin_bytes::to_utf8(body_bytes);
+let mut request = http::request::new("GET", "http://127.0.0.1:8081/data");
+http::request::set_header(&mut request, "accept", "application/json");
+let response = http::client::request(request);
+let status: int = http::response::status(response);
+let body: string = builtin_bytes::to_utf8(http::response::body(response));
+let content_types = http::response::header_values(response, "content-type");
 ```
 
-The pinned catalog also exposes and binds
-`http::client::sse(request: map, on_event: callable(map) -> map) -> map` in
-access and content scripts. This surface is provisional in ngx-rustscript:
-its NGINX request lifecycle has not been covered by the module's executable
-acceptance suite, so the module does not yet make a lifecycle-compatibility
-claim for it.
+### Server-sent events
+
+`http::client::sse(request: http.request, on_event: fn(string, string, string, string) -> bool)`
+consumes a request builder and returns an `http.sse_summary` resource. The
+callback receives the SSE `event`, `data`, `id`, and `retry` fields and returns
+`true` to continue or `false` to stop.
+
+| RustScript callable | Return |
+| --- | --- |
+| `http::sse_summary::outcome(summary)` | `string` |
+| `http::sse_summary::status(summary)` | `int` |
+| `http::sse_summary::url(summary)` | `string` |
+| `http::sse_summary::items(summary)` | `int` |
+| `http::sse_summary::bytes_received(summary)` | `int` |
+| `http::sse_summary::bytes_sent(summary)` | `int` |
+| `http::sse_summary::headers(summary)` | `http.headers` |
+| `http::headers::names(headers)` | `array<string>` |
+| `http::headers::values(headers, name: string)` | `array<string>` |
+
+This surface is provisional in ngx-rustscript: its NGINX request lifecycle has
+not been covered by the module's executable acceptance suite, so the module
+does not yet make a lifecycle-compatibility claim for it.
 
 ## SQLite
 
@@ -123,29 +153,33 @@ remains disabled.
 
 | RustScript callable | Return | Yield | Interface |
 | --- | --- | --- | --- |
-| `sqlite::open(options: map)` | `int` handle | no | Opens a connection using the options below. |
-| `sqlite::execute(db: int, sql: string, params: array)` | `map` | yes | Executes one parameterized statement. |
-| `sqlite::query(db: int, sql: string, params: array, limits: map)` | `map` | yes | Runs a bounded query. Pass `{}` for default limits. |
-| `sqlite::transaction(db: int, statements: array<map>)` | `array<map>` | yes | Runs ordered statements atomically. |
-| `sqlite::close(db: int)` | `null` | no | Closes the connection. Closed, foreign, or stale handles are rejected. |
+| `sqlite::open(options: SqliteOpenOptions)` | `sqlite.connection` | no | Opens a connection using the options below. |
+| `sqlite::execute(connection, sql: string, params: array<SqliteValue>)` | `SqliteExecuteResult` | yes | Executes one parameterized statement. |
+| `sqlite::query(connection, sql: string, params: array<SqliteValue>, limits: SqliteLimits)` | `SqliteQueryResult` | yes | Runs a bounded query. Pass `{}` for default limits. |
+| `sqlite::transaction(connection, statements: array<SqliteStatement>)` | `array<SqliteTransactionResult>` | yes | Runs ordered statements atomically. |
+| `sqlite::close(connection)` | `()` | no | Closes the connection and releases it from the request scope. |
 
 ### sqlite::open options
 
 ```text
-{
-    path: string,
-    mode: string?,
-    limits: map?
+SqliteOpenOptions {
+    path: Option<string>,
+    mode: Option<string>,
+    root: Option<string>,
+    limits: Option<SqliteLimits>
 }
 ```
 
+Omitted `Option` fields normalize to `Option::None`. A present value is
+`Option::Some(...)`.
+
 | Field | Values | Default |
 | --- | --- | --- |
-| `path` | Relative file path, or exactly `:memory:` with `mode: "memory"` | required |
+| `path` | Relative file path, or exactly `:memory:` with `mode: "memory"` | required by the runtime |
 | `mode` | `memory`, `read_only`, `read_write`, `read_write_create` | `read_write_create` |
 | `limits` | Positive integer overrides bounded by the embedding ceilings below | current ceilings |
 
-Supported `limits` keys and current ceilings:
+Supported `limits` keys and current ceilings (each an `Option<int>`):
 
 - `max_connections`: 16
 - `max_statements`: 128
@@ -159,18 +193,30 @@ Supported `limits` keys and current ceilings:
 - `max_transaction_ms`: 5000
 - `busy_timeout_ms`: 5000
 
-Per-call limits may reduce these ceilings and cannot raise them. Unknown limit
-keys and zero or negative values are rejected.
+Per-call limits may reduce these ceilings and cannot raise them. Non-positive
+values are rejected.
 
 ### Parameters
 
-`params` is an array whose entries may be `null`, `int`, `float`, `string`,
-or `bytes`. SQL should use SQLite placeholders such as `?1`.
+`params` is an array of tagged `SqliteValue` records. Exactly one payload
+matches `kind`, except for `null`:
+
+```text
+SqliteValue {
+    kind: string,             // "null" | "int" | "float" | "text" | "blob"
+    int_value: Option<int>,
+    float_value: Option<float>,
+    text_value: Option<string>,
+    blob_value: Option<bytes>
+}
+```
+
+SQL should use SQLite placeholders such as `?1`.
 
 ### Execute result
 
 ```text
-{
+SqliteExecuteResult {
     rows_affected: int,
     last_insert_rowid: int
 }
@@ -178,84 +224,91 @@ or `bytes`. SQL should use SQLite placeholders such as `?1`.
 
 ### Query limits and result
 
-The `limits` map accepted by `sqlite::query` is parsed by the same bounded
-schema as `sqlite::open`. The query path applies `max_rows`, `max_columns`,
-`max_result_bytes`, and `max_statement_bytes`. Other accepted keys do not
-change an already-open connection or the connection-owned parameter and
-operation ceilings. Values cannot exceed the connection's limits. The result
-map is:
+The `limits` argument accepted by `sqlite::query` is the same bounded
+`SqliteLimits` schema as `sqlite::open`. The query path applies `max_rows`,
+`max_columns`, `max_result_bytes`, and `max_statement_bytes`. Other accepted
+keys do not change an already-open connection or the connection-owned parameter
+and operation ceilings. Values cannot exceed the connection's limits. The result
+is:
 
 ```text
-{
+SqliteQueryResult {
     columns: array<string>,
-    rows: array<array<unknown>>,
+    rows: array<SqliteRow>,   // SqliteRow { cells: array<SqliteValue> }
     truncated: bool,
-    next_cursor: int? // most recent returned first-column integer, when any
+    next_cursor: Option<int>  // most recent returned first-column integer, when any
 }
 ```
 
 `next_cursor` retains the first-column integer from the most recent returned
 row whose first column is an `int`; later rows with another first-column type
 do not clear it. It is not the next unread row, and its presence is independent
-of `truncated`. A row cell may be `null`, `int`, `float`, `string`, or `bytes`.
+of `truncated`.
 
 ### Transaction statements and result
 
-Each entry in `statements` has this interface:
+Each entry in `statements` is a `SqliteStatement`:
 
 ```text
-{
+SqliteStatement {
     sql: string,
-    params: array?,
-    query: bool?,
-    limits: map?
+    params: Option<array<SqliteValue>>,
+    query: Option<bool>,
+    limits: Option<SqliteLimits>
 }
 ```
 
-`params` defaults to `[]`; `query` defaults to `false`. When `query` is false,
-the corresponding result is an execute result map. When true, it is a query
-result map. The call returns those maps in statement order and commits only if
-all statements succeed.
+`params` defaults to an empty array; `query` defaults to `false`. When `query`
+is false, the corresponding result carries an execute result. When true, it
+carries a query result:
+
+```text
+SqliteTransactionResult {
+    kind: string,
+    execute: Option<SqliteExecuteResult>,
+    query: Option<SqliteQueryResult>
+}
+```
+
+The call returns those records in statement order and commits only if all
+statements succeed.
 
 Example:
 
 ```rss
 use sqlite;
 
-let db: int = sqlite::open({
-    path: "pipeline.db",
-    mode: "read_write_create",
-    limits: {}
+let db = sqlite::open({
+    path: Option::Some("pipeline.db"),
+    mode: Option::Some("read_write_create")
 });
-let created: map = sqlite::execute(
+let created: SqliteExecuteResult = sqlite::execute(
     db,
     "CREATE TABLE IF NOT EXISTS events (body TEXT NOT NULL)",
     []
 );
-let inserted: map = sqlite::execute(
+let inserted: SqliteExecuteResult = sqlite::execute(
     db,
     "INSERT INTO events(body) VALUES (?1)",
-    { "payload" }
+    [{ kind: "text", text_value: Option::Some("payload") }]
 );
-let rows: map = sqlite::query(
+let rows: SqliteQueryResult = sqlite::query(
     db,
     "SELECT body FROM events ORDER BY rowid DESC LIMIT 10",
     [],
-    { max_rows: 10 }
+    { max_rows: Option::Some(10) }
 );
 sqlite::close(db);
 ```
 
 ## Runtime and policy summary
 
-I/O and SQLite are pd-vm compiler builtins dispatched through its public
-standard composition. HTTP is a pd-vm standard host whose dynamic `map`
-interface is what ngx scripts are written against: the compile catalog leaves
-it dynamic, configuration validates the name and phase, and the pd-vm adapter
-is bound through the standard composition (the per-name path for request VMs,
-and the same composition staged by the timer-host registry for owned-dispatch
-programs). These maps and handles follow the pinned pd-vm public contract;
-ngx-rustscript does not modify RustScript or pd-vm core types.
+I/O, HTTP, and SQLite are pd-vm standard host modules with typed resource
+handles. Their schemas are part of the module's compile catalog as well as the
+runtime composition, so a script is type-checked against the exact contract the
+registry installs: no handle position is dynamic, and no result is a
+`map`/`unknown`/`null` carrier. ngx-rustscript does not modify RustScript or
+pd-vm core types.
 
 The executable end-to-end acceptance is
 `nginx_async_pipeline_runs_io_http_sqlite_shared_dict_and_json` in

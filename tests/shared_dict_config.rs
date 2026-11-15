@@ -58,7 +58,7 @@ fn shared_dict_hosts_compile_without_request_state() {
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "k", 1, null, null);
+ngx::shared::set(d, "k", 1, (), ());
 ngx::shared::get(d, "k");
 "#,
     )
@@ -161,7 +161,7 @@ fn rss_shared_dict_and_access_script_nginx_t() {
         r#"
 use ngx;
 let d = ngx::shared::dict("dogs");
-ngx::shared::set(d, "Jim", "8", null, null);
+ngx::shared::set(d, "Jim", "8", (), ());
 "#,
     );
     let script_q = nginx_quote_path(&script).unwrap();

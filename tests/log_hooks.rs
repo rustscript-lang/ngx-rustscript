@@ -266,7 +266,7 @@ fn log_script() -> &'static str {
     r#"
 use ngx;
 ngx::log(ngx::log_level::notice(), "LOG_PHASE=" + ngx::get_phase());
-ngx::log(ngx::log_level::notice(), "LOG_MARK=" + ngx::encode_args({ uri: ngx::var::get("uri") }));
+ngx::log(ngx::log_level::notice(), "LOG_MARK=" + ngx::encode_args({ uri: ngx::var::get("uri").unwrap_or("") }));
 "#
 }
 

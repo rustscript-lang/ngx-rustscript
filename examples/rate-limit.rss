@@ -11,24 +11,32 @@ if key == "" {
 
 let dict = ngx::shared::dict("ratelimit");
 let added: SharedSafeStoreResult =
-    ngx::shared::safe_add(dict, key, 1, WINDOW_SECONDS, null);
+    ngx::shared::safe_add(dict, key, 1, WINDOW_SECONDS, ());
 if added.ok {
     if 1 > LIMIT {
         ngx::header::set("Retry-After", RETRY_AFTER);
         ngx::exit(ngx::http::status_too_many_requests());
     }
 } else {
-    if added.error != "exists" {
+    let added_error = match added.error {
+        Option::Some(message) => message,
+        Option::None => ""
+    };
+    if added_error != "exists" {
         ngx::exit(ngx::http::status_service_unavailable());
     }
-    let counted: SharedIncrResult = ngx::shared::incr(dict, key, 1, null, null);
-    if counted.error != null {
+    let counted: SharedIncrResult = ngx::shared::incr(dict, key, 1, (), ());
+    let counted_error = match counted.error {
+        Option::Some(message) => message,
+        Option::None => ""
+    };
+    if counted_error != "" {
         ngx::exit(ngx::http::status_service_unavailable());
     }
     if counted.forcible {
         ngx::exit(ngx::http::status_service_unavailable());
     }
-    if counted.value > LIMIT {
+    if counted.value.unwrap_or(0.0) > LIMIT {
         ngx::header::set("Retry-After", RETRY_AFTER);
         ngx::exit(ngx::http::status_too_many_requests());
     }

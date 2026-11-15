@@ -734,14 +734,11 @@ fn buffered_http_requests_reuse_quiescent_vms_with_fresh_request_context() {
             r#"
 use http;
 use ngx;
-if ngx::ctx::get("seen") != null {{ ngx::exit(500); }}
-ngx::ctx::set("seen", 1);
-let response: map = http::client::request({{
-    method: "GET",
-    url: "http://127.0.0.1:{upstream_port}/",
-    body: null
-}});
-if response["status"] != 204 {{ ngx::exit(502); }}
+if ngx::ctx::get("seen").unwrap_or("") != "" {{ ngx::exit(500); }}
+ngx::ctx::set("seen", "1");
+let mut request = http::request::new("GET", "http://127.0.0.1:{upstream_port}/");
+let response = http::client::request(request);
+if http::response::status(response) != 204 {{ ngx::exit(502); }}
 "#
         ),
     )
@@ -910,14 +907,11 @@ fn real_nginx_reuses_buffered_http_vm_and_isolates_runtime_policy() {
             r#"
 use http;
 use ngx;
-if ngx::ctx::get("seen") != null {{ ngx::exit(409); }}
-ngx::ctx::set("seen", 1);
-let response: map = http::client::request({{
-    method: "GET",
-    url: "http://127.0.0.1:{upstream_port}/",
-    body: null
-}});
-if response["status"] != 204 {{ ngx::exit(502); }}
+if ngx::ctx::get("seen").unwrap_or("") != "" {{ ngx::exit(409); }}
+ngx::ctx::set("seen", "1");
+let mut request = http::request::new("GET", "http://127.0.0.1:{upstream_port}/");
+let response = http::client::request(request);
+if http::response::status(response) != 204 {{ ngx::exit(502); }}
 "#
         ),
     )
@@ -994,11 +988,8 @@ fn real_nginx_cancelled_buffered_http_vm_is_not_reused() {
         format!(
             r#"
 use http;
-let response: map = http::client::request({{
-    method: "GET",
-    url: "http://127.0.0.1:{upstream_port}/",
-    body: null
-}});
+let mut request = http::request::new("GET", "http://127.0.0.1:{upstream_port}/");
+let response = http::client::request(request);
 "#
         ),
     )
@@ -1071,12 +1062,9 @@ fn real_nginx_error_and_timeout_paths_never_enter_reuse_pool() {
             r#"
 use http;
 use ngx;
-let response: map = http::client::request({{
-    method: "GET",
-    url: "http://127.0.0.1:{upstream_port}/",
-    body: null
-}});
-if response["status"] != 204 {{ ngx::exit(502); }}
+let mut request = http::request::new("GET", "http://127.0.0.1:{upstream_port}/");
+let response = http::client::request(request);
+if http::response::status(response) != 204 {{ ngx::exit(502); }}
 let failure = 1 / 0;
 "#
         ),

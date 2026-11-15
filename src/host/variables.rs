@@ -9,7 +9,7 @@ use vm::HostModuleDescriptor;
 use vm::{Value, VmError};
 
 use super::super::VmResult;
-use super::{CallOutcome, IntoHostCallOutcome};
+use super::{CallOutcome, IntoHostCallOutcome, option_none, option_some};
 use crate::host::{current_identity, with_current_request, with_current_request_mut, ScopeError};
 
 const MAX_VAR_NAME: usize = 1_024;
@@ -94,15 +94,15 @@ pub fn get(name: &str) -> VmResult<CallOutcome> {
         // public lookup API.
         let vv = unsafe { ngx_http_get_variable(r, &mut ns, hash) };
         if vv.is_null() {
-            return ret(Value::Null);
+            return ret(option_none());
         }
         if unsafe { ngx_rustscript_c_variable_not_found(vv) } != 0 {
-            return ret(Value::Null);
+            return ret(option_none());
         }
         let vv = unsafe { &*vv };
         let len = vv.len() as usize;
         if vv.data.is_null() || len == 0 {
-            return ret(String::new());
+            return ret(option_some(Value::string(String::new())));
         }
         if len > MAX_VAR_VALUE {
             return Err(VmError::HostError(format!(
@@ -110,7 +110,7 @@ pub fn get(name: &str) -> VmResult<CallOutcome> {
             )));
         }
         let bytes = unsafe { std::slice::from_raw_parts(vv.data, len) }.to_vec();
-        ret(bytes_as_string(bytes))
+        ret(option_some(Value::string(bytes_as_string(bytes))))
     })
 }
 

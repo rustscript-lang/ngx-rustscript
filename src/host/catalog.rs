@@ -167,10 +167,11 @@ pub const NGX_SHARED_GET_KEYS_NAME: &str = "ngx::shared::get_keys";
 /// [`NGX_HOST_CATALOG_FINGERPRINT`] when named structs, resource keys, or
 /// function shapes change.
 ///
-/// Version 4: void host returns moved from `Null` to `Unit` so the RustScript
-/// compiler admits them; `ngx::core::null_value` keeps `Null` because it is
-/// the deliberate null literal probe.
-pub const NGX_HOST_CATALOG_SCHEMA_VERSION: u32 = 4;
+/// Version 5: every host output is a typed value. Logical absence uses guest
+/// `Option<T>` (`{tag,payload}`), void hosts and `ngx::core::null_value`
+/// return `Unit`, header/argument bags are typed entry arrays, and shared
+/// dictionary values are tagged `SharedValue` records.
+pub const NGX_HOST_CATALOG_SCHEMA_VERSION: u32 = 5;
 
 /// Fingerprint of schema version 1: named request/codec envelopes with
 /// `Unknown` shared-dict result carriers.
@@ -182,7 +183,7 @@ pub const NGX_HOST_CATALOG_FINGERPRINT_V2: u64 = 0x10c4_07b2_b827_eaff;
 
 /// Fingerprint of the current schema version. The host_catalog drift gate
 /// compares `ngx_host_catalog().fingerprint()` against this constant.
-pub const NGX_HOST_CATALOG_FINGERPRINT: u64 = 0xf73b_df45_cceb_df54;
+pub const NGX_HOST_CATALOG_FINGERPRINT: u64 = 0x3f35_97f5_ecea_9db9;
 
 pub const NGX_SEND_HEADERS_NAME: &str = "ngx::send_headers";
 pub const NGX_PRINT_NAME: &str = "ngx::print";
@@ -1698,16 +1699,15 @@ fn semaphore_param() -> HostParamSchema {
     )
 }
 
-/// The `fn(bool) -> unknown` timer callback type.
+/// The `fn(bool) -> ()` timer callback type.
 ///
 /// The callback observes the OpenResty-compatible `premature` flag and its
-/// return value is discarded, so the declared result is `unknown`. This is the
-/// one deliberate dynamic occurrence on the ngx host surface and the only
-/// catalogued callable parameter.
+/// return value is discarded, so the declared result is the logical Unit. This
+/// is the only catalogued callable parameter.
 pub fn timer_callback_schema() -> HostTypeSchema {
     HostTypeSchema::Callable {
         params: vec![HostTypeSchema::Bool],
-        result: Box::new(HostTypeSchema::Unknown),
+        result: Box::new(HostTypeSchema::Unit),
     }
 }
 
@@ -1723,7 +1723,7 @@ fn timer_registration_schema(owner: &str) -> HostFunctionSchema {
                 HostParamPassing::TakeOwned,
             ),
         ],
-        HostTypeSchema::Bool,
+        HostTypeSchema::Unit,
     )
 }
 
@@ -1792,15 +1792,34 @@ fn nullary(name: &str, return_type: HostTypeSchema) -> HostFunctionSchema {
     HostFunctionSchema::with_return(name, Vec::new(), return_type)
 }
 
-fn map_unknown() -> HostTypeSchema {
-    HostTypeSchema::Map(Box::new(HostTypeSchema::Unknown))
+/// One decoded query/post argument. Repeated keys repeat the entry, so no
+/// duplicate value is lost to a map key.
+fn arg_entry_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "ArgEntry",
+        vec![
+            HostStructField::new("name", HostTypeSchema::String),
+            HostStructField::new("value", option(HostTypeSchema::String)),
+        ],
+    )
+}
+
+/// One request header entry; duplicate names repeat the entry.
+fn header_entry_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "HeaderEntry",
+        vec![
+            HostStructField::new("name", HostTypeSchema::String),
+            HostStructField::new("value", HostTypeSchema::String),
+        ],
+    )
 }
 
 fn decoded_args_result_schema() -> HostTypeSchema {
     HostTypeSchema::named_struct(
         "DecodedArgsResult",
         vec![
-            HostStructField::new("args", map_unknown()),
+            HostStructField::new("args", HostTypeSchema::Array(Box::new(arg_entry_schema()))),
             HostStructField::new("truncated", HostTypeSchema::Bool),
         ],
     )
@@ -1810,7 +1829,10 @@ fn request_headers_result_schema() -> HostTypeSchema {
     HostTypeSchema::named_struct(
         "RequestHeadersResult",
         vec![
-            HostStructField::new("headers", map_unknown()),
+            HostStructField::new(
+                "headers",
+                HostTypeSchema::Array(Box::new(header_entry_schema())),
+            ),
             HostStructField::new("truncated", HostTypeSchema::Bool),
         ],
     )
@@ -1820,29 +1842,53 @@ fn request_args_result_schema() -> HostTypeSchema {
     HostTypeSchema::named_struct(
         "RequestArgsResult",
         vec![
-            HostStructField::new("args", map_unknown()),
+            HostStructField::new("args", HostTypeSchema::Array(Box::new(arg_entry_schema()))),
             HostStructField::new("truncated", HostTypeSchema::Bool),
         ],
     )
 }
 
-fn optional_string() -> HostTypeSchema {
-    HostTypeSchema::Optional(Box::new(HostTypeSchema::String))
+/// A shared-dictionary value: a tagged record because one zone entry can hold
+/// a bool, number, string, or byte string. `kind` selects the payload.
+fn shared_value_schema() -> HostTypeSchema {
+    HostTypeSchema::named_struct(
+        "SharedValue",
+        vec![
+            HostStructField::new("kind", HostTypeSchema::String),
+            HostStructField::new("bool_value", option(HostTypeSchema::Bool)),
+            HostStructField::new("int_value", option(HostTypeSchema::Int)),
+            HostStructField::new("float_value", option(HostTypeSchema::Float)),
+            HostStructField::new("text_value", option(HostTypeSchema::String)),
+            HostStructField::new("bytes_value", option(HostTypeSchema::Bytes)),
+        ],
+    )
 }
 
-fn optional_unknown() -> HostTypeSchema {
-    HostTypeSchema::Optional(Box::new(HostTypeSchema::Unknown))
+/// Guest `Option<T>`: a tagged `{tag, payload}` value, not the legacy
+/// nullable `Optional` codec.
+fn option(inner: HostTypeSchema) -> HostTypeSchema {
+    HostTypeSchema::Option(Box::new(inner))
+}
+
+/// Guest `Option<string>` field schema. The `optional_*` helpers build the
+/// logical guest Option, not the legacy nullable `Optional` codec.
+fn optional_string() -> HostTypeSchema {
+    option(HostTypeSchema::String)
 }
 
 fn optional_number() -> HostTypeSchema {
-    HostTypeSchema::Optional(Box::new(HostTypeSchema::Number))
+    option(HostTypeSchema::Number)
+}
+
+fn optional_shared_value() -> HostTypeSchema {
+    option(shared_value_schema())
 }
 
 fn shared_get_result_schema() -> HostTypeSchema {
     HostTypeSchema::named_struct(
         "SharedGetResult",
         vec![
-            HostStructField::new("value", optional_unknown()),
+            HostStructField::new("value", optional_shared_value()),
             HostStructField::new("flags", HostTypeSchema::Int),
             HostStructField::new("stale", HostTypeSchema::Bool),
             HostStructField::new("error", optional_string()),
@@ -2006,12 +2052,12 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         NGX_DECODE_BASE64_NAME => HostFunctionSchema::with_return(
             NGX_DECODE_BASE64_NAME,
             vec![HostParamSchema::value("text", HostTypeSchema::String)],
-            HostTypeSchema::Optional(Box::new(HostTypeSchema::Bytes)),
+            option(HostTypeSchema::Bytes),
         ),
         NGX_DECODE_BASE64MIME_NAME => HostFunctionSchema::with_return(
             NGX_DECODE_BASE64MIME_NAME,
             vec![HostParamSchema::value("text", HostTypeSchema::String)],
-            HostTypeSchema::Optional(Box::new(HostTypeSchema::Bytes)),
+            option(HostTypeSchema::Bytes),
         ),
         NGX_CRC32_SHORT_NAME => HostFunctionSchema::with_return(
             NGX_CRC32_SHORT_NAME,
@@ -2046,13 +2092,12 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         NGX_PARSE_HTTP_TIME_NAME => HostFunctionSchema::with_return(
             NGX_PARSE_HTTP_TIME_NAME,
             vec![HostParamSchema::value("text", HostTypeSchema::String)],
-            HostTypeSchema::Optional(Box::new(HostTypeSchema::Int)),
+            option(HostTypeSchema::Int),
         ),
         NGX_REQ_GET_METHOD_NAME => nullary(NGX_REQ_GET_METHOD_NAME, HostTypeSchema::String),
-        NGX_REQ_HTTP_VERSION_NAME => nullary(
-            NGX_REQ_HTTP_VERSION_NAME,
-            HostTypeSchema::Optional(Box::new(HostTypeSchema::Float)),
-        ),
+        NGX_REQ_HTTP_VERSION_NAME => {
+            nullary(NGX_REQ_HTTP_VERSION_NAME, option(HostTypeSchema::Float))
+        }
         NGX_REQ_RAW_HEADER_NAME => HostFunctionSchema::with_return(
             NGX_REQ_RAW_HEADER_NAME,
             vec![HostParamSchema::value(
@@ -2081,14 +2126,12 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         ),
         NGX_REQ_READ_BODY_NAME => nullary(NGX_REQ_READ_BODY_NAME, HostTypeSchema::Unit),
         NGX_REQ_DISCARD_BODY_NAME => nullary(NGX_REQ_DISCARD_BODY_NAME, HostTypeSchema::Unit),
-        NGX_REQ_GET_BODY_DATA_NAME => nullary(
-            NGX_REQ_GET_BODY_DATA_NAME,
-            HostTypeSchema::Optional(Box::new(HostTypeSchema::String)),
-        ),
-        NGX_REQ_GET_BODY_FILE_NAME => nullary(
-            NGX_REQ_GET_BODY_FILE_NAME,
-            HostTypeSchema::Optional(Box::new(HostTypeSchema::String)),
-        ),
+        NGX_REQ_GET_BODY_DATA_NAME => {
+            nullary(NGX_REQ_GET_BODY_DATA_NAME, option(HostTypeSchema::String))
+        }
+        NGX_REQ_GET_BODY_FILE_NAME => {
+            nullary(NGX_REQ_GET_BODY_FILE_NAME, option(HostTypeSchema::String))
+        }
         NGX_REQ_SET_BODY_DATA_NAME => HostFunctionSchema::with_return(
             NGX_REQ_SET_BODY_DATA_NAME,
             vec![HostParamSchema::value("data", HostTypeSchema::String)],
@@ -2123,7 +2166,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         NGX_VAR_GET_NAME => HostFunctionSchema::with_return(
             NGX_VAR_GET_NAME,
             vec![HostParamSchema::value("name", HostTypeSchema::String)],
-            HostTypeSchema::Optional(Box::new(HostTypeSchema::String)),
+            option(HostTypeSchema::String),
         ),
         NGX_REQ_SET_METHOD_NAME => HostFunctionSchema::with_return(
             NGX_REQ_SET_METHOD_NAME,
@@ -2173,7 +2216,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         NGX_HEADER_GET_NAME => HostFunctionSchema::with_return(
             NGX_HEADER_GET_NAME,
             vec![HostParamSchema::value("name", HostTypeSchema::String)],
-            HostTypeSchema::Unknown,
+            option(HostTypeSchema::String),
         ),
         NGX_HEADER_SET_NAME => HostFunctionSchema::with_return(
             NGX_HEADER_SET_NAME,
@@ -2205,20 +2248,20 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
         NGX_CTX_GET_NAME => HostFunctionSchema::with_return(
             NGX_CTX_GET_NAME,
             vec![HostParamSchema::value("key", HostTypeSchema::String)],
-            HostTypeSchema::Unknown,
+            option(HostTypeSchema::String),
         ),
         NGX_CTX_SET_NAME => HostFunctionSchema::with_return(
             NGX_CTX_SET_NAME,
             vec![
                 HostParamSchema::value("key", HostTypeSchema::String),
-                HostParamSchema::value("value", HostTypeSchema::Unknown),
+                HostParamSchema::value("value", HostTypeSchema::String),
             ],
             HostTypeSchema::Unit,
         ),
         NGX_CTX_DELETE_NAME => HostFunctionSchema::with_return(
             NGX_CTX_DELETE_NAME,
             vec![HostParamSchema::value("key", HostTypeSchema::String)],
-            HostTypeSchema::Unknown,
+            option(HostTypeSchema::String),
         ),
         NGX_CTX_CLEAR_NAME => nullary(NGX_CTX_CLEAR_NAME, HostTypeSchema::Unit),
         NGX_SHARED_DICT_NAME => HostFunctionSchema::with_return(
@@ -2239,7 +2282,7 @@ fn host_function_contract(name: &str) -> HostFunctionSchema {
                 dict_handle_param(),
                 HostParamSchema::value("key", HostTypeSchema::String),
             ],
-            HostTypeSchema::Unit,
+            HostTypeSchema::Bool,
         ),
         NGX_SHARED_INCR_NAME => HostFunctionSchema::with_return(
             NGX_SHARED_INCR_NAME,
@@ -2541,7 +2584,7 @@ fn metadata_schema(name: &str) -> Option<HostFunctionSchema> {
             ],
             HostTypeSchema::Unit,
         ),
-        "ngx::core::null_value" => nullary(name, HostTypeSchema::Null),
+        "ngx::core::null_value" => nullary(name, HostTypeSchema::Unit),
         "ngx::get_phase"
         | "ngx::config::subsystem"
         | "ngx::config::prefix"
@@ -3459,41 +3502,12 @@ pub fn ngx_host_catalog() -> HostApiCatalog {
         .unwrap_or_else(|error| panic!("ngx host catalog must be a valid HostApiCatalog: {error}"))
 }
 
-/// Compiler catalog for production ngx scripts.
-///
-/// It carries exactly the ngx host surface; the pd-vm standard families are
-/// deliberately **not** merged, for one reason each:
-///
-/// - I/O and SQLite are compiler builtins dispatched through the standard
-///   composition ([`crate::host::install_standard_runtime`]). Cataloguing their
-///   schemas as external host imports would bypass that builtin path and
-///   produce unbindable imports.
-/// - The pinned pd-vm HTTP client catalog declares its request/response
-///   positions as named records (`HttpRequest` / `HttpResponse` / SSE records)
-///   and registers its HTTP adapters byte-for-byte from that same catalog.
-///   RustScript object literals are exact record types, so a compile-time
-///   schema for those positions could never match the documented loose scripts
-///   *and* be registered in the owned-dispatch host registry at the same time:
-///   a relaxed compile schema has no registered adapter, and the exact schema
-///   rejects the documented scripts. The merged catalog therefore leaves the
-///   HTTP surface dynamic (`http::client::*` compile as ordinary host imports
-///   against the documented `map` interface of `docs/api/standard-async.md`),
-///   configuration still validates them by name ([`is_standard_host_import`]),
-///   and the pd-vm adapter validates the concrete request contents at runtime
-///   and returns the pd-vm contract payload shapes unchanged (duplicate header
-///   entries, `HttpHeaderValue` text/bytes variants).
-///
-/// No standard-family position is relaxed here: with the functions left out
-/// there is nothing to relax, so no name, parameter, or result of a standard
-/// family can silently become dynamic.
-pub fn compile_host_catalog() -> HostApiCatalog {
-    ngx_host_catalog()
-}
-
 fn standard_host_names() -> &'static HashSet<String> {
     static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
     NAMES.get_or_init(|| {
-        vm::http_host_catalog()
+        // Every standard family the runtime composition installs: I/O, HTTP,
+        // and SQLite all publish a guest catalog surface.
+        vm::standard_host_catalog()
             .functions()
             .iter()
             .map(|function| function.name.clone())

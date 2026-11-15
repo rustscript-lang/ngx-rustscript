@@ -167,7 +167,7 @@ fn exit_and_redirect_are_catalogued_control_hosts() {
 fn control_programs_require_request_state() {
     let program = compile("use ngx;\nngx::exit(403);\n");
     assert!(program_requires_request_state(&program));
-    let redirect = compile("use ngx;\nngx::redirect(\"/x\", null);\n");
+    let redirect = compile("use ngx;\nngx::redirect(\"/x\", ());\n");
     assert!(program_requires_request_state(&redirect));
     let access = AllowedOps::for_phase(NgxPhase::Access);
     assert!(access.contains(AllowedOps::CONTROL));
@@ -219,7 +219,7 @@ fn redirect_validates_status_and_rejects_unsafe_uri() {
     let bad_status = compile("use ngx;\nngx::redirect(\"/x\", 200);\n");
     let mut driver = Driver::new(bad_status, 6);
     assert_eq!(driver.handle(), AccessStatus::Error500);
-    let unsafe_uri = compile("use ngx;\nngx::redirect(\"/x\\r\\nY: 1\", null);\n");
+    let unsafe_uri = compile("use ngx;\nngx::redirect(\"/x\\r\\nY: 1\", ());\n");
     let mut driver = Driver::new(unsafe_uri, 7);
     assert_eq!(driver.handle(), AccessStatus::Error500);
 }
@@ -366,7 +366,7 @@ ngx::log(ngx::log_level::notice(), "OK_CONTINUED");
         &prefix.join("conf/redir.rss"),
         r#"
 use ngx;
-ngx::redirect("/dest", null);
+ngx::redirect("/dest", ());
 ngx::log(ngx::log_level::notice(), "REDIR_MARKER");
 "#,
     );

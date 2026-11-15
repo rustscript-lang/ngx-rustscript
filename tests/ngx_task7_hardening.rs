@@ -37,6 +37,12 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+/// Serializes tests that share process-global stub or zone state.
+fn stub_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 fn compile(source: &str) -> Arc<Program> {
     compile_rss_source(source).unwrap_or_else(|err| panic!("compile failed: {err}\n{source}"))
 }
@@ -148,6 +154,7 @@ fn is_host_err(err: &str) -> bool {
 
 #[test]
 fn invalid_host_is_rejected_before_list_mutation() {
+    let _guard = stub_lock();
     enable_alloc(64);
     let mut req = dummy_request();
     let mut storage = [unsafe { MaybeUninit::<ngx_table_elt_t>::zeroed().assume_init() }; 8];
@@ -173,6 +180,7 @@ fn invalid_host_is_rejected_before_list_mutation() {
 
 #[test]
 fn host_with_port_normalizes_server_and_invalidates_cached_host() {
+    let _guard = stub_lock();
     enable_alloc(64);
     nginx_stubs::stub_var_reset();
     let mut req = dummy_request();
@@ -198,6 +206,7 @@ fn host_with_port_normalizes_server_and_invalidates_cached_host() {
 
 #[test]
 fn user_agent_recomputes_browser_flags_and_clears_them() {
+    let _guard = stub_lock();
     enable_alloc(64);
     let mut req = dummy_request();
     let mut storage = [unsafe { MaybeUninit::<ngx_table_elt_t>::zeroed().assume_init() }; 8];
@@ -237,6 +246,7 @@ fn user_agent_recomputes_browser_flags_and_clears_them() {
 
 #[test]
 fn connection_keep_alive_close_is_close_substring_semantics() {
+    let _guard = stub_lock();
     enable_alloc(64);
     let mut req = dummy_request();
     let mut storage = [unsafe { MaybeUninit::<ngx_table_elt_t>::zeroed().assume_init() }; 8];
@@ -266,6 +276,7 @@ fn connection_keep_alive_close_is_close_substring_semantics() {
 
 #[test]
 fn invalid_content_length_rejects_before_any_mutation() {
+    let _guard = stub_lock();
     enable_alloc(64);
     let mut req = dummy_request();
     let mut storage = [unsafe { MaybeUninit::<ngx_table_elt_t>::zeroed().assume_init() }; 8];
@@ -296,6 +307,7 @@ fn invalid_content_length_rejects_before_any_mutation() {
 
 #[test]
 fn malformed_request_header_list_does_not_mutate() {
+    let _guard = stub_lock();
     enable_alloc(64);
     let mut req = dummy_request();
     req.pool = std::ptr::dangling_mut();
@@ -324,6 +336,7 @@ fn malformed_request_header_list_does_not_mutate() {
 
 #[test]
 fn request_header_list_push_failure_rolls_back_old_entries() {
+    let _guard = stub_lock();
     enable_alloc(3);
     let mut req = dummy_request();
     let mut storage = [unsafe { MaybeUninit::<ngx_table_elt_t>::zeroed().assume_init() }; 1];
@@ -351,6 +364,7 @@ fn request_header_list_push_failure_rolls_back_old_entries() {
 
 #[test]
 fn set_method_allocation_failure_leaves_method_untouched() {
+    let _guard = stub_lock();
     nginx_stubs::stub_alloc_reset();
     let mut req = dummy_request();
     req.method = nginx_sys::NGX_HTTP_GET as ngx_uint_t;
@@ -370,6 +384,7 @@ fn set_method_allocation_failure_leaves_method_untouched() {
 
 #[test]
 fn status_get_prefers_err_status_then_headers_out_then_http09() {
+    let _guard = stub_lock();
     let mut req = dummy_request();
     let ptr = req.as_mut() as *mut ngx_http_request_t;
     nginx_stubs::test_set_err_status(ptr.cast(), 500);
@@ -390,13 +405,14 @@ fn status_get_prefers_err_status_then_headers_out_then_http09() {
 
 #[test]
 fn redirect_without_disposition_does_not_mutate_location_or_status() {
+    let _guard = stub_lock();
     enable_alloc(64);
     let mut req = dummy_request();
     let mut storage = [unsafe { MaybeUninit::<ngx_table_elt_t>::zeroed().assume_init() }; 8];
     writable_out_list(&mut req, &mut storage, 0);
     req.headers_out.status = 200;
     let ptr = req.as_mut() as *mut ngx_http_request_t;
-    let program = compile("use ngx;\nngx::redirect(\"/x\", null);\n");
+    let program = compile("use ngx;\nngx::redirect(\"/x\", ());\n");
     let mut vm = Vm::try_new((*program).clone()).expect("vm");
     bind_ngx_hosts(&mut vm);
     let err = with_request_scope(
@@ -420,6 +436,7 @@ fn redirect_without_disposition_does_not_mutate_location_or_status() {
 
 #[test]
 fn redirect_first_wins_leaves_previous_disposition_and_location() {
+    let _guard = stub_lock();
     enable_alloc(64);
     let mut req = dummy_request();
     let mut storage = [unsafe { MaybeUninit::<ngx_table_elt_t>::zeroed().assume_init() }; 8];
@@ -445,6 +462,7 @@ fn redirect_first_wins_leaves_previous_disposition_and_location() {
 
 #[test]
 fn response_set_all_allocation_failure_restores_specials() {
+    let _guard = stub_lock();
     enable_alloc(2);
     let mut req = dummy_request();
     let mut storage = [unsafe { MaybeUninit::<ngx_table_elt_t>::zeroed().assume_init() }; 1];
@@ -476,6 +494,7 @@ fn response_set_all_allocation_failure_restores_specials() {
 
 #[test]
 fn send_last_response_matrix_and_helper_failure() {
+    let _guard = stub_lock();
     nginx_stubs::stub_send_reset();
     let mut req = dummy_request();
     let ptr = req.as_mut() as *mut ngx_http_request_t;
@@ -527,6 +546,7 @@ fn send_last_response_matrix_and_helper_failure() {
 
 #[test]
 fn variable_set_c_abi_branches() {
+    let _guard = stub_lock();
     nginx_stubs::stub_var_reset();
     enable_alloc(32);
     let mut req = dummy_request();
@@ -645,6 +665,7 @@ fn variable_set_c_abi_branches() {
 
 #[test]
 fn disposition_mut_participates_in_exclusive_request_borrow() {
+    let _guard = stub_lock();
     let mut req = dummy_request();
     let mut disposition = RequestDisposition::Continue;
     let identity = RequestIdentity::new(9, 9);
@@ -677,6 +698,7 @@ fn disposition_mut_participates_in_exclusive_request_borrow() {
 
 #[test]
 fn var_get_name_limit_is_1024() {
+    let _guard = stub_lock();
     let mut req = dummy_request();
     let ptr = req.as_mut() as *mut ngx_http_request_t;
     let name_ok = "a".repeat(1024);
@@ -690,6 +712,7 @@ fn var_get_name_limit_is_1024() {
 
 #[test]
 fn cookie_and_content_type_dedicated_pointers() {
+    let _guard = stub_lock();
     enable_alloc(64);
     let mut req = dummy_request();
     let mut storage = [unsafe { MaybeUninit::<ngx_table_elt_t>::zeroed().assume_init() }; 8];

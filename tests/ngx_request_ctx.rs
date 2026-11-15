@@ -20,6 +20,16 @@ use ngx_rustscript::request_state::{
 use ngx_rustscript::runtime::WorkerRuntime;
 use vm::{HostTypeSchema, Program, Value, Vm, VmStatus};
 
+fn option_string_schema() -> HostTypeSchema {
+    HostTypeSchema::Option(Box::new(HostTypeSchema::String))
+}
+
+fn compile_err(source: &str) -> String {
+    compile_rss_source(source)
+        .expect_err("source must fail configuration")
+        .to_string()
+}
+
 fn compile(source: &str) -> Arc<Program> {
     compile_rss_source(source).unwrap_or_else(|err| panic!("compile failed: {err}\n{source}"))
 }
@@ -66,11 +76,13 @@ fn expect_string(value: Value) -> String {
     }
 }
 
-fn expect_int(value: Value) -> i64 {
-    match value {
-        Value::Int(number) => number,
-        other => panic!("expected int, got {other:?}"),
+/// Unwraps a canonical guest `Option` carrier.
+fn expect_option_string(value: Value) -> Option<String> {
+    let (some, payload) = vm::option::payload(&value).expect("Option carrier");
+    if !some {
+        return None;
     }
+    Some(expect_string(payload.expect("Some payload").clone()))
 }
 
 fn wait_readable(fd: RawFd, timeout: Duration) -> bool {
@@ -161,7 +173,7 @@ fn ctx_hosts_are_catalogued_sync_request_ctx() {
                 compile(&format!("use ngx;\n{name}(\"k\");\n"));
             }
             NGX_CTX_SET_NAME => {
-                compile("use ngx;\nngx::ctx::set(\"k\", 1);\n");
+                compile("use ngx;\nngx::ctx::set(\"k\", \"1\");\n");
             }
             NGX_CTX_CLEAR_NAME => {
                 compile("use ngx;\nngx::ctx::clear();\n");
@@ -177,107 +189,81 @@ fn ctx_hosts_are_catalogued_sync_request_ctx() {
             .find(|schema| schema.name == name)
             .unwrap_or_else(|| panic!("missing schema {name}"))
     };
-    assert_eq!(
-        schema(NGX_CTX_GET_NAME).return_type,
-        HostTypeSchema::Unknown
-    );
+    assert_eq!(schema(NGX_CTX_GET_NAME).return_type, option_string_schema());
     let set = schema(NGX_CTX_SET_NAME);
     assert_eq!(set.return_type, HostTypeSchema::Unit);
-    assert_eq!(set.params[1].ty, HostTypeSchema::Unknown);
+    assert_eq!(set.params[1].ty, HostTypeSchema::String);
     assert_eq!(
         schema(NGX_CTX_DELETE_NAME).return_type,
-        HostTypeSchema::Unknown
+        option_string_schema()
     );
     assert_eq!(schema(NGX_CTX_CLEAR_NAME).return_type, HostTypeSchema::Unit);
 }
 
 #[test]
-fn get_set_replace_delete_missing_clear_scalars_bytes_nested() {
+fn get_set_replace_delete_missing_clear_strings_and_absent_is_none() {
     assert_eq!(
-        eval_ctx("use ngx;\nngx::ctx::get(\"missing\");\n"),
-        Value::Null
+        expect_option_string(eval_ctx("use ngx;\nngx::ctx::get(\"missing\");\n")),
+        None,
+        "a missing key is Option::None"
     );
     assert_eq!(
-        eval_ctx("use ngx;\nngx::ctx::set(\"n\", null);\nngx::ctx::get(\"n\");\n"),
-        Value::Null
-    );
-    assert_eq!(
-        eval_ctx("use ngx;\nngx::ctx::set(\"b\", true);\nngx::ctx::get(\"b\");\n"),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        eval_ctx("use ngx;\nngx::ctx::set(\"b\", false);\nngx::ctx::get(\"b\");\n"),
-        Value::Bool(false)
-    );
-    assert_eq!(
-        expect_int(eval_ctx(
-            "use ngx;\nngx::ctx::set(\"i\", 42);\nngx::ctx::get(\"i\");\n"
-        )),
-        42
-    );
-    match eval_ctx("use ngx;\nngx::ctx::set(\"f\", 1.5);\nngx::ctx::get(\"f\");\n") {
-        Value::Float(number) => assert!((number - 1.5).abs() < 1e-9),
-        other => panic!("expected float, got {other:?}"),
-    }
-    assert_eq!(
-        expect_string(eval_ctx(
+        expect_option_string(eval_ctx(
             "use ngx;\nngx::ctx::set(\"s\", \"hi\");\nngx::ctx::get(\"s\");\n"
         )),
-        "hi"
+        Some("hi".to_string())
     );
-    match eval_ctx(
-        "use ngx;\nngx::ctx::set(\"bin\", ngx::md5_bin(\"hello\"));\nngx::ctx::get(\"bin\");\n",
-    ) {
-        Value::Bytes(bytes) => assert_eq!(bytes.len(), 16),
-        other => panic!("expected bytes, got {other:?}"),
-    }
     assert_eq!(
-        expect_string(eval_ctx(
+        expect_option_string(eval_ctx(
+            "use ngx;\nngx::ctx::set(\"empty\", \"\");\nngx::ctx::get(\"empty\");\n"
+        )),
+        Some(String::new()),
+        "a stored empty string is Some(\"\"), distinct from absence"
+    );
+    assert_eq!(
+        expect_option_string(eval_ctx(
             "use ngx;\nngx::ctx::set(\"k\", \"old\");\nngx::ctx::set(\"k\", \"new\");\nngx::ctx::get(\"k\");\n"
         )),
-        "new"
+        Some("new".to_string())
     );
     assert_eq!(
-        expect_string(eval_ctx(
+        expect_option_string(eval_ctx(
             "use ngx;\nngx::ctx::set(\"k\", \"gone\");\nngx::ctx::delete(\"k\");\n"
         )),
-        "gone"
+        Some("gone".to_string()),
+        "delete returns the removed value as Some"
     );
     assert_eq!(
-        eval_ctx("use ngx;\nngx::ctx::delete(\"missing\");\n"),
-        Value::Null
+        expect_option_string(eval_ctx("use ngx;\nngx::ctx::delete(\"missing\");\n")),
+        None,
+        "deleting a missing key is Option::None"
     );
     assert_eq!(
-        eval_ctx("use ngx;\nngx::ctx::set(\"a\", 1);\nngx::ctx::clear();\nngx::ctx::get(\"a\");\n"),
-        Value::Null
+        expect_option_string(eval_ctx(
+            "use ngx;\nngx::ctx::set(\"a\", \"1\");\nngx::ctx::clear();\nngx::ctx::get(\"a\");\n"
+        )),
+        None,
+        "clear drops every entry"
     );
-    match eval_ctx(
-        "use ngx;\nngx::ctx::set(\"user\", { id: 1, tags: [\"a\", \"b\"], ok: true });\nngx::ctx::get(\"user\");\n",
-    ) {
-        Value::Map(map) => {
-            assert_eq!(map.get(&Value::string("id")), Some(&Value::Int(1)));
-            assert_eq!(map.get(&Value::string("ok")), Some(&Value::Bool(true)));
-            match map.get(&Value::string("tags")) {
-                Some(Value::Array(items)) => {
-                    assert_eq!(items.len(), 2);
-                }
-                other => panic!("expected tags array, got {other:?}"),
-            }
-        }
-        other => panic!("expected nested map, got {other:?}"),
-    }
+    let non_string = compile_err("use ngx;\nngx::ctx::set(\"n\", 1);\n");
+    assert!(
+        non_string.to_ascii_lowercase().contains("string"),
+        "ctx values are strings: {non_string}"
+    );
 }
 
 #[test]
 fn rejects_callable_empty_nul_and_too_long_key() {
-    let callable = eval_ctx_err("use ngx;\nfn f() { 1 }\nngx::ctx::set(\"f\", f);\n");
-    assert!(callable.contains("callable"), "callable reject: {callable}");
-    let empty = eval_ctx_err("use ngx;\nngx::ctx::set(\"\", 1);\n");
+    let callable = compile_err("use ngx;\nfn f() { 1 }\nngx::ctx::set(\"f\", f);\n");
+    assert!(callable.contains("string"), "callable reject: {callable}");
+    let empty = eval_ctx_err("use ngx;\nngx::ctx::set(\"\", \"1\");\n");
     assert!(empty.contains("empty"), "{empty}");
-    let nul = eval_ctx_err("use ngx;\nngx::ctx::set(\"a\\0b\", 1);\n");
+    let nul = eval_ctx_err("use ngx;\nngx::ctx::set(\"a\\0b\", \"1\");\n");
     assert!(nul.contains("NUL"), "{nul}");
     let long_key = "k".repeat(MAX_CTX_KEY_BYTES + 1);
-    let too_long = eval_ctx_err(&format!("use ngx;\nngx::ctx::set(\"{long_key}\", 1);\n"));
+    let too_long = eval_ctx_err(&format!(
+        "use ngx;\nngx::ctx::set(\"{long_key}\", \"1\");\n"
+    ));
     assert!(too_long.contains("key exceeds"), "{too_long}");
 }
 
@@ -296,8 +282,12 @@ fn no_scope_wrong_capability_stale_generation_nested_and_panic() {
 
     let mut ctx = RequestLocalCtx::new();
     let log_only = AllowedOps::LOG;
-    let denied = run_vm("use ngx;\nngx::ctx::set(\"k\", 1);\n", &mut ctx, log_only)
-        .expect_err("LOG-only must deny ctx");
+    let denied = run_vm(
+        "use ngx;\nngx::ctx::set(\"k\", \"1\");\n",
+        &mut ctx,
+        log_only,
+    )
+    .expect_err("LOG-only must deny ctx");
     assert!(denied.contains("not allowed"), "{denied}");
 
     let identity = RequestIdentity::new(7, 7);
@@ -360,14 +350,14 @@ fn persists_across_two_sleep_resume_cycles() {
         r#"
 use ngx;
 ngx::ctx::set("k", "keep");
-ngx::ctx::set("n", 1);
+ngx::ctx::set("n", "1");
 ngx::sleep_ms(10);
-ngx::ctx::set("n", 2);
+ngx::ctx::set("n", "2");
 ngx::sleep_ms(10);
-if ngx::ctx::get("k") != "keep" {
+if ngx::ctx::get("k").unwrap_or("") != "keep" {
     1 / 0;
 }
-if ngx::ctx::get("n") != 2 {
+if ngx::ctx::get("n").unwrap_or("") != "2" {
     1 / 0;
 }
 "#,
@@ -385,7 +375,7 @@ fn concurrent_requests_are_isolated_across_interleaved_wakes() {
 use ngx;
 ngx::ctx::set("k", "alpha");
 ngx::sleep_ms(20);
-if ngx::ctx::get("k") != "alpha" {
+if ngx::ctx::get("k").unwrap_or("") != "alpha" {
     1 / 0;
 }
 "#,
@@ -395,7 +385,7 @@ if ngx::ctx::get("k") != "alpha" {
 use ngx;
 ngx::ctx::set("k", "beta");
 ngx::sleep_ms(20);
-if ngx::ctx::get("k") != "beta" {
+if ngx::ctx::get("k").unwrap_or("") != "beta" {
     1 / 0;
 }
 "#,
@@ -448,10 +438,10 @@ fn second_access_exec_starts_with_empty_ctx() {
     let program = compile(
         r#"
 use ngx;
-if ngx::ctx::get("k") != null {
+if ngx::ctx::get("k").unwrap_or("") != "" {
     1 / 0;
 }
-ngx::ctx::set("k", 1);
+ngx::ctx::set("k", "1");
 "#,
     );
     let mut first = Driver::new(program.clone(), 7);
@@ -472,11 +462,11 @@ fn ctx_only_production_path_selects_access_exec_and_set_get_works() {
         r#"
 use ngx;
 ngx::ctx::set("k", "sync");
-if ngx::ctx::get("k") != "sync" {
+if ngx::ctx::get("k").unwrap_or("") != "sync" {
     1 / 0;
 }
 ngx::ctx::delete("k");
-if ngx::ctx::get("k") != null {
+if ngx::ctx::get("k").unwrap_or("") != "" {
     1 / 0;
 }
 "#,

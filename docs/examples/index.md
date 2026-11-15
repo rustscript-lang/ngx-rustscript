@@ -40,12 +40,12 @@ ngx::sleep_ms(30);
 ```
 
 Read a request body in `content_by_rss_file` (nullary like OpenResty;
-`get_post_args` still takes explicit `null` for the max-args adaptation):
+`get_post_args` still takes an explicit argument for the max-args adaptation):
 
 ```rss
 use ngx;
 ngx::req::read_body();
-let data = ngx::req::get_body_data();
+let data = ngx::req::get_body_data().unwrap_or("");
 ngx::say(data);
 ```
 
@@ -56,7 +56,7 @@ Replace the request body in `content_by_rss_file` (memory; `set_body_file`
 use ngx;
 ngx::req::read_body();
 ngx::req::set_body_data("replacement");
-ngx::say(ngx::req::get_body_data());
+ngx::say(ngx::req::get_body_data().unwrap_or(""));
 ```
 
 Two sequential sleeps:
@@ -75,7 +75,7 @@ let sock = ngx::socket::udp();
 ngx::socket::udp::settimeout(sock, 1000);
 ngx::socket::udp::setpeername(sock, "127.0.0.1", 53);
 ngx::socket::udp::send(sock, "ping");
-ngx::socket::udp::receive(sock, null);
+ngx::socket::udp::receive(sock, ());
 ngx::socket::udp::close(sock);
 ```
 
@@ -100,7 +100,7 @@ ngx::socket::tcp::settimeout(sock, 1000);
 ngx::socket::tcp::connect(sock, "127.0.0.1", 8080);
 let store = ngx::socket::tcp::trustedstore(ca_pem);
 ngx::socket::tcp::settrustedstore(sock, store);
-ngx::socket::tcp::sslhandshake(sock, null, "localhost", true, null);
+ngx::socket::tcp::sslhandshake(sock, (), "localhost", true, ());
 ngx::socket::tcp::send(sock, "ping");
 ngx::socket::tcp::receive(sock, 4);
 ngx::socket::tcp::setkeepalive(sock, 60000, 30);

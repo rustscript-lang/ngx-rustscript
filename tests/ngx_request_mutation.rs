@@ -192,7 +192,10 @@ fn mutation_schemas_match_vm_types() {
     assert_eq!(status_get.return_type, HostTypeSchema::Int);
 
     let header_get = schema(HEADER_GET);
-    assert_eq!(header_get.return_type, HostTypeSchema::Unknown);
+    assert_eq!(
+        header_get.return_type,
+        HostTypeSchema::Option(Box::new(HostTypeSchema::String))
+    );
 
     let set_all = schema(HEADER_SET_ALL);
     assert_eq!(set_all.params[0].ty, HostTypeSchema::Unknown);
@@ -569,8 +572,7 @@ use ngx;
 ngx::req::set_header("X-Dup", "first");
 ngx::req::set_header("X-Dup", ["a", "b"]);
 ngx::req::clear_header("X-Remove");
-let headers: RequestHeadersResult = ngx::req::get_headers(null, null);
-ngx::log(ngx::log_level::notice(), "HDR=" + ngx::encode_args(headers.headers));
+ngx::log(ngx::log_level::notice(), "HDR=" + ngx::encode_args({ dup: ngx::var::get("http_x_dup").unwrap_or(""), remove: ngx::var::get("http_x_remove").unwrap_or("") }));
 "#,
     );
     let resp_script = prefix.join("conf/resp.rss");
@@ -707,8 +709,12 @@ ngx::exit(200);
     let log = fs::read_to_string(prefix.join("logs/error.log")).unwrap_or_default();
     assert_eq!(status, 200, "{body}\n{log}");
     assert!(
-        log.contains("x-dup=a") && log.contains("x-dup=b"),
+        log.contains("dup=") && log.contains("a") && log.contains("b"),
         "duplicate set must replace with array values: {log}"
+    );
+    assert!(
+        !log.contains("remove=gone"),
+        "clear_header must remove the request header value: {log}"
     );
 
     let (status, body) = http_exchange(

@@ -12,7 +12,7 @@ use vm::HostModuleDescriptor;
 use vm::{Value, VmError, VmMap};
 
 use super::super::VmResult;
-use super::{CallOutcome, IntoHostCallOutcome};
+use super::{CallOutcome, IntoHostCallOutcome, option_some, option_value};
 use crate::host::{
     control_stop_error, current_identity, with_current_disposition_mut,
     with_current_request_and_disposition_mut, with_current_request_mut_ops,
@@ -498,7 +498,8 @@ fn dedicated_response_header(raw: &ngx_http_request_t, name: &str) -> VmResult<O
     })
 }
 
-fn collect_named_header(list: &ngx_list_t, name: &str) -> VmResult<Value> {
+/// First matching response header value as an owned string.
+fn collect_named_header(list: &ngx_list_t, name: &str) -> VmResult<Option<String>> {
     let mut values = Vec::new();
     let mut part = &list.part as *const ngx_list_part_t;
     let mut seen_parts = [std::ptr::null(); MAX_LIST_PARTS];
@@ -529,16 +530,17 @@ fn collect_named_header(list: &ngx_list_t, name: &str) -> VmResult<Value> {
                 if header.hash == 0 || !names_equal_ignore_case(header.key, name) {
                     continue;
                 }
-                values.push(ngx_str_to_value(header.value)?);
+                let Value::String(text) = ngx_str_to_value(header.value)? else {
+                    return Err(VmError::HostError(
+                        "response header value is not a string".into(),
+                    ));
+                };
+                values.push(text);
             }
         }
         part = part_ref.next;
     }
-    Ok(match values.len() {
-        0 => Value::Null,
-        1 => values.remove(0),
-        _ => Value::array(values),
-    })
+    Ok(values.into_iter().next().map(|text| (*text).clone()))
 }
 
 fn uri_has_unsafe_bytes(uri: &str) -> Option<u8> {
@@ -589,16 +591,20 @@ pub fn status_set(status: i64) -> VmResult<CallOutcome> {
     })
 }
 
-/// Read one response header. Missing is `null`; duplicates are an array.
+/// Read one response header. Missing is `Option::None`; duplicate names yield
+/// the first value (use `ngx::req::get_headers` for the full multi-value set).
 #[pd_host_function(name = "ngx::header::get", contract = crate::host::catalog::ngx_header_get_contract)]
 pub fn header_get(name: String) -> VmResult<CallOutcome> {
     validate_header_name(&name)?;
     with_response_read(|request| {
         let raw = request.as_ref();
         if let Some(value) = dedicated_response_header(raw, &name)? {
-            return ret(value);
+            return ret(option_some(value));
         }
-        ret(collect_named_header(&raw.headers_out.headers, &name)?)
+        ret(option_value(
+            collect_named_header(&raw.headers_out.headers, &name)?
+                .map(Value::string),
+        ))
     })
 }
 

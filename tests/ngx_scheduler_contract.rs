@@ -262,7 +262,7 @@ fn semaphore_family_is_registered_without_the_namespace_marker() {
         catalog.function("ngx::semaphore").is_none(),
         "the ngx::semaphore namespace marker must not be a callable"
     );
-    let source = "use ngx;\nlet s = ngx::semaphore::new(1);\nngx::semaphore::wait(s, null);\n";
+    let source = "use ngx;\nlet s = ngx::semaphore::new(1);\nngx::semaphore::wait(s, ());\n";
     for phase in [NgxPhase::Access, NgxPhase::Content] {
         compile_rss_source_for_phase(source, phase)
             .unwrap_or_else(|err| panic!("{phase:?} must accept the semaphore family: {err}"));
@@ -284,7 +284,7 @@ fn timer_family_is_registered_without_the_namespace_marker() {
         catalog.function("ngx::timer").is_none(),
         "the bare ngx::timer namespace marker must not be a callable"
     );
-    let source = "use ngx;\nngx::timer::at(0.05, |premature| null);\n";
+    let source = "use ngx;\nngx::timer::at(0.05, |premature| ());\n";
     for phase in [NgxPhase::Access, NgxPhase::Content] {
         compile_rss_source_for_phase(source, phase)
             .unwrap_or_else(|err| panic!("{phase:?} must accept the timer family: {err}"));
@@ -295,8 +295,8 @@ fn timer_family_is_registered_without_the_namespace_marker() {
 fn timer_family_fails_configuration_compile_in_log() {
     let phase = NgxPhase::Log;
     for source in [
-        "use ngx;\nngx::timer::at(0.05, |premature| null);\n",
-        "use ngx;\nngx::timer::every(0.05, |premature| null);\n",
+        "use ngx;\nngx::timer::at(0.05, |premature| ());\n",
+        "use ngx;\nngx::timer::every(0.05, |premature| ());\n",
         "use ngx;\nngx::timer::pending_count();\n",
         "use ngx;\nngx::timer::running_count();\n",
     ] {
