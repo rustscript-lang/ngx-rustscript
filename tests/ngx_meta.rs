@@ -414,7 +414,7 @@ fn compile_time_config_metadata_is_owned_and_truthful() {
     );
     assert_eq!(
         expect_int(eval("use ngx;\nngx::config::ngx_rustscript_version();\n")),
-        1_000
+        2_000
     );
     let configure = expect_string(eval("use ngx;\nngx::config::nginx_configure();\n"));
     assert_eq!(

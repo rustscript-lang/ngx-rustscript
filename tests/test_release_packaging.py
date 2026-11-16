@@ -108,6 +108,13 @@ def require_full_git_rev(rev: str, label: str) -> str:
 
 
 class ReleasePackagingTests(unittest.TestCase):
+    def test_release_version_matches_crate_and_lockfile(self) -> None:
+        crate = tomllib.loads((ROOT / "Cargo.toml").read_text())
+        lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
+        package = next(item for item in lock["package"] if item["name"] == crate["package"]["name"])
+        self.assertEqual(crate["package"]["version"], "0.2.0")
+        self.assertEqual(package["version"], crate["package"]["version"])
+
     def test_rustscript_core_pin_is_frozen_full_sha(self) -> None:
         cargo_toml = (ROOT / "Cargo.toml").read_text()
         metadata = tomllib.loads(cargo_toml)["package"]["metadata"]["ngx-rustscript"]
@@ -247,7 +254,7 @@ class ReleasePackagingTests(unittest.TestCase):
                 result = run(
                     str(PACKAGE_SCRIPT),
                     "--version",
-                    "0.1.0",
+                    "0.2.0",
                     "--arch",
                     "amd64",
                     "--module",
@@ -262,13 +269,13 @@ class ReleasePackagingTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stdout)
 
-            module_tgz_name = "ngx-rustscript-module-0.1.0-linux-amd64.tgz"
-            bundle_tgz_name = "ngx-rustscript-nginx-0.1.0-nginx-1.31.4-linux-amd64.tgz"
-            deb_name = "nginx-module-rustscript_0.1.0_amd64.deb"
+            module_tgz_name = "ngx-rustscript-module-0.2.0-linux-amd64.tgz"
+            bundle_tgz_name = "ngx-rustscript-nginx-0.2.0-nginx-1.31.4-linux-amd64.tgz"
+            deb_name = "nginx-module-rustscript_0.2.0_amd64.deb"
             expected = {module_tgz_name, bundle_tgz_name, deb_name, "SHA256SUMS"}
             self.assertEqual({path.name for path in first.iterdir()}, expected)
 
-            module_top = "ngx-rustscript-module-0.1.0-linux-amd64"
+            module_top = "ngx-rustscript-module-0.2.0-linux-amd64"
             with tarfile.open(first / module_tgz_name, "r:gz") as archive:
                 member_list = archive.getmembers()
                 members = {member.name: member for member in member_list}
@@ -295,7 +302,7 @@ class ReleasePackagingTests(unittest.TestCase):
                 [],
             )
 
-            bundle_top = "ngx-rustscript-nginx-0.1.0-nginx-1.31.4-linux-amd64"
+            bundle_top = "ngx-rustscript-nginx-0.2.0-nginx-1.31.4-linux-amd64"
             with tarfile.open(first / bundle_tgz_name, "r:gz") as archive:
                 bundle_member_list = archive.getmembers()
                 bundle_members = {member.name: member for member in bundle_member_list}
@@ -336,7 +343,7 @@ class ReleasePackagingTests(unittest.TestCase):
 
             deb = first / deb_name
             self.assertEqual(run("dpkg-deb", "-f", str(deb), "Package").stdout.strip(), "nginx-module-rustscript")
-            self.assertEqual(run("dpkg-deb", "-f", str(deb), "Version").stdout.strip(), "0.1.0")
+            self.assertEqual(run("dpkg-deb", "-f", str(deb), "Version").stdout.strip(), "0.2.0")
             self.assertEqual(run("dpkg-deb", "-f", str(deb), "Architecture").stdout.strip(), "amd64")
             self.assertEqual(run("dpkg-deb", "-f", str(deb), "Depends").stdout.strip(), "libc6, libgcc-s1")
             self.assertEqual(

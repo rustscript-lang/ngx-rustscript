@@ -14,8 +14,8 @@ use super::super::VmResult;
 use super::{CallOutcome, IntoHostCallOutcome};
 
 /// `ngx.config.ngx_lua_version` encodes 0.x.y as `x * 1000 + y`.
-/// Crate version 0.1.0 therefore reports 1000.
-pub const NGX_RUSTSCRIPT_VERSION: i64 = 1_000;
+/// Crate version 0.2.0 therefore reports 2000.
+pub const NGX_RUSTSCRIPT_VERSION: i64 = 2_000;
 
 fn ret(value: impl IntoHostCallOutcome) -> VmResult<CallOutcome> {
     Ok(value.into_host_call_outcome())
