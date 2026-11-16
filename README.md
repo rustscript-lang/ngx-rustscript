@@ -166,7 +166,8 @@ bash tests/verify_add_dynamic.sh
 
 ### Release packages
 
-Pushing a `v*` tag whose version matches `Cargo.toml` creates a GitHub Release.
+The current package version is `0.2.0`. Pushing a `v*` tag whose version
+matches `Cargo.toml` creates a GitHub Release.
 The Release workflow can also be started manually with an existing `v*` tag.
 Linux amd64 releases provide:
 
